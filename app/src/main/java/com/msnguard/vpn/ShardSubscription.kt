@@ -38,11 +38,18 @@ object ShardSubscription {
     private const val TAG = "ShardSubscription"
 
     /**
-     * The subscription. Not user-visible and not user-editable, by design: the
-     * whole point of this transport is one button with nothing to configure.
+     * The subscription. Our own mirror, not the publisher's URL: the SHARD
+     * node list must be editable on GitHub and reach every installed app —
+     * old and new, Smart Split on or off — with no release. The mirror is
+     * rebuilt by `.github/workflows/shard-nodes-sync.yml` every six hours
+     * from the publisher's live list, so a node change reaches the fleet
+     * with no build and no version bump.
+     *
+     * v1.8.7 and later dial this URL. Versions before it read the publisher
+     * directly; they keep working, they just do not follow our edits.
      */
     const val SUBSCRIPTION_URL =
-        "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt"
+        "https://raw.githubusercontent.com/mbm110/MSN-GUARD/master/remote/shard-nodes.txt"
 
     /** Seed list in assets, so the first ever connect works with no network. */
     private const val SEED_ASSET = "shard-seed.txt"

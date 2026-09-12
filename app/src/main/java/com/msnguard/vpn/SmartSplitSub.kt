@@ -66,32 +66,21 @@ object SmartSplitSub {
     private fun cacheFile(context: Context) = File(context.filesDir, CACHE_FILE)
 
     /**
-     * Only the profile the user verified in the field. See [profiles] — the
-     * publisher's fragA probes dead on his carrier, so the ladder is fragB
-     * alone until that changes.
-     */
-    private val WORKING_PROFILES = setOf("Serverless-v50-fragB")
-
-    /**
-     * The profiles to try, in mirror order — filtered to [WORKING_PROFILES].
+     * The profiles to try, in mirror order.
      *
-     * Field report (محسن, 2026-09-12): of the subscription's two configs only
-     * `Serverless-v50-fragB` works on his carrier; fragA probes dead and the
-     * wasted attempt costs a full probe budget on every uncached connect.
-     * Filtered by name here rather than by index so a publisher-side change
-     * to the list order cannot reintroduce the dead profile, and so deleting
-     * the filter (the day fragA is fixed upstream) is a one-line change.
+     * Which profiles the mirror carries is decided entirely on GitHub — the
+     * sync workflow filters the publisher's list to the ones that beat the
+     * DPI (see tools/smart-split-extract.py). The app ships no opinion of its
+     * own: editing the mirror reaches every installed app, old and new, with
+     * no release. Order is the publisher's fallback ladder; the caller races
+     * them cheapest-first and stops at the first that carries a blocked SNI —
+     * see [ShardManager.startSmartSplit].
      *
      * Never an empty list without having tried both cache and seed: an empty
-     * pool would silently disarm Smart Split on a network where it works. If
-     * the filter ever empties the pool entirely, fall back to the unfiltered
-     * mirror — a dead fragA attempt is cheaper than Smart Split silently off.
+     * pool would silently disarm Smart Split on a network where it works.
      */
-    fun profiles(context: Context): List<SmartSplit.FragmentProfile> {
-        val all = parse(readCache(context) ?: readSeed(context)).orEmpty()
-        val working = all.filter { it.name in WORKING_PROFILES }
-        return if (working.isNotEmpty()) working else all
-    }
+    fun profiles(context: Context): List<SmartSplit.FragmentProfile> =
+        parse(readCache(context) ?: readSeed(context)).orEmpty()
 
     /** Parse the mirror format into profiles. Null when unparseable/empty. */
     fun parse(body: String?): List<SmartSplit.FragmentProfile>? {
@@ -114,7 +103,18 @@ object SmartSplitSub {
                 profile.total = array.length()
                 out.add(profile)
             }
-            if (out.isEmpty()) null else out
+            if (out.isEmpty()) null else {
+                // Side effect, and the reason lastParsed exists: a cached
+                // measurement stores the profile's key (its index), and
+                // FragmentProfile.byKey resolves that key against THIS list.
+                // Until v1.8.7 nothing ever assigned it, so cachedProfile()
+                // always returned null and every connect re-probed — the
+                // cache the remember/NO_PROFILE logic thought it had did not
+                // exist. Assigning here keeps byKey in step with whatever the
+                // caller last parsed (cache or seed).
+                lastParsed = out
+                out
+            }
         } catch (_: Exception) {
             null
         }

@@ -93,6 +93,9 @@ class MainActivity : Activity() {
     private lateinit var appUpdater: AppUpdater
     private var predictiveBackCallback: Any? = null
     private var selectedProtocol = Protocol.WIREGUARD
+    // v1.8.7: English keeps the exact v1.8.5 layout; fa/zh get tighter text
+    // blocks and a dial no smaller than the English one. See fitConsoleToViewport.
+    private val localizedTypography: Boolean get() = AppLanguage.current() != "en"
     /**
      * Where the one-time Auto Scan is in [AUTO_SCAN_LADDER], or -1 when it is not
      * running.
@@ -542,16 +545,19 @@ class MainActivity : Activity() {
         orbitDial = OrbitDialView(this, palette).apply {
             setOnClickListener { toggleTunnel() }
         }
-        val localizedTypography = AppLanguage.current() != "en"
         connectionTitle = label(
             textSize = if (localizedTypography) 25f else 21f,
             color = INK,
             style = TypefaceStyle.MEDIUM,
         ).apply {
             gravity = Gravity.CENTER
+            val localizedTypography = this@MainActivity.localizedTypography
             if (localizedTypography) {
                 typeface = Typefaces.extraBold(this@MainActivity)
-                setPadding(dp(10), dp(2), dp(10), dp(3))
+                // Vertical padding 0: the font's own line box already carries
+                // generous headroom (see Typefaces.lineHeightMult), and every
+                // dp of padding here was dp the console took away from the dial.
+                setPadding(dp(10), 0, dp(10), 0)
             }
             // One line, always. Every headline this view shows is short ("Connecting",
             // "Auto Scan", "Connection degraded"), and a wrap would change the
@@ -618,7 +624,12 @@ class MainActivity : Activity() {
         }
         // Height follows the grid rather than being a constant: the rail decides how
         // many rows six transports need, and a hardcoded dp(46) would squash them.
-        transportRailHeight = dp(8) + transportRail.rowCount * dp(38)
+        // v1.8.7: fa/zh cells are 34dp — the localized fonts' line boxes are taller
+        // than Latin at the same sp, so the same 38dp reads looser; 34 + the tighter
+        // lineHeightMult reclaims two rows' worth of height for the dial. English
+        // keeps the v1.8.5 38dp exactly.
+        transportRailHeight = dp(8) + transportRail.rowCount *
+            (if (localizedTypography) dp(34) else dp(38))
         transportRail.select(Protocol.entries.indexOf(selectedProtocol), animate = false)
         renderChainCard()
         // The dead space under the action bar looked like a rendering bug. It is
@@ -1313,12 +1324,16 @@ class MainActivity : Activity() {
             // change (rotation, multi-window, the inset listener landing) can.
             if (delta < 0 && -delta < dp(GROW_SLACK_DP)) return@addOnLayoutChangeListener
             val current = orbitDial.sizeScale
-            // Clamped to the SAME range the setter enforces. If the target were
-            // left below the floor, current would sit clamped at the floor while
-            // target stayed lower, and the two would never agree — an endless
-            // relayout loop on a screen too short to satisfy.
+            // v1.8.7, fa/zh: the localized fonts' tall line boxes made the
+            // console overflow, so fitConsoleToViewport shrank the dial — the
+            // "small connect button" گزارش. The block is compact now
+            // (Typefaces.lineHeightMult, 34dp rail cells), and the dial must
+            // never end up smaller than the English layout's, even on a short
+            // screen: it floors at LOCALIZED_DIAL_FLOOR and lets the console
+            // scroll instead, exactly as it did before the fit existed.
+            val floor = if (localizedTypography) LOCALIZED_DIAL_FLOOR else OrbitDialView.MIN_SIZE_SCALE
             val target = (current * (dialBox - delta).toFloat() / dialBox)
-                .coerceIn(OrbitDialView.MIN_SIZE_SCALE, 1f)
+                .coerceIn(floor, 1f)
 
             // Tolerance, not equality: two adjacent float values would otherwise
             // keep re-triggering layout and the screen would dither forever.
@@ -1362,14 +1377,20 @@ class MainActivity : Activity() {
             rightMargin = -dp(20)
         })
 
+        // v1.8.7: English keeps the v1.8.5 margins exactly. fa/zh get a
+        // tighter block (title closer to the dial, detail closer to the title)
+        // to hand the reclaimed height back to the dial — see
+        // fitConsoleToViewport, which must net-neutral for English.
+        val titleGap = if (localizedTypography) dp(10) else dp(14)
+        val detailGap = if (localizedTypography) dp(1) else dp(3)
         addView(connectionTitle, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = when (AppLanguage.current()) { "zh" -> dp(10); "fa" -> dp(11); else -> dp(11) } })
+        ).apply { topMargin = titleGap })
         addView(connectionDetail, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = when (AppLanguage.current()) { "zh" -> dp(1); "fa" -> dp(2); else -> dp(2) } })
+        ).apply { topMargin = detailGap })
 
         val chipLine = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -6791,6 +6812,16 @@ class MainActivity : Activity() {
          * though it is fully on screen.
          */
         const val FIT_SLACK_DP = 6
+        /**
+         * Dial floor for fa/zh, v1.8.7. The localized fonts' tall line boxes
+         * used to make fitConsoleToViewport shrink the dial well below the
+         * English layout's settled size; the user's requirement is that the
+         * connect dial in Persian and Chinese be as large as the English one.
+         * 0.90 keeps a small safety margin under 1.0 (the English ideal) while
+         * the now-compact text block means the floor is rarely hit; below it
+         * the console scrolls instead of shrinking the dial further.
+         */
+        const val LOCALIZED_DIAL_FLOOR = 0.90f
         /**
          * Spare room required before the dial is allowed to grow back.
          *

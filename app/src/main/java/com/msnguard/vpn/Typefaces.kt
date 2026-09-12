@@ -75,9 +75,18 @@ object Typefaces {
      * Persian needs more leading than the console's tight default: diacritics
      * and letter dots clip at 1.0. Chinese keeps the compact system leading so
      * localized rows do not squeeze the connection dial.
+     *
+     * Multipliers below 1.0 (approved for fa/zh, v1.8.7): the localized fonts
+     * carry big vertical metrics (Vazirmatn 1.71×, Noto SC 1.45× vs Latin's
+     * ~1.17×), so even the "unmultiplied" line was taller than the English
+     * one. Compressing below 1.0 cuts into that slack, not into glyphs:
+     * Vazirmatn at 0.80 keeps ≈1.37× of headroom, Noto SC at 0.85 keeps
+     * ≈1.23× — both still comfortable for diacritics, and the reclaimed
+     * height is what lets the connection dial sit at the English size.
      */
     fun lineHeightMult(): Float = when (AppLanguage.current()) {
-        "fa" -> 1.5f
+        "fa" -> 0.80f
+        "zh" -> 0.85f
         else -> 1.0f
     }
 
