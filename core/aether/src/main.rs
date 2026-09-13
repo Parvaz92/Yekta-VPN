@@ -3015,14 +3015,16 @@ async fn spawn_tcp_forwarder(
 /// relay unexported, and this is the same two-pump shape handle_client uses.
 async fn relay_tcp_pair(
     mut sock: tokio::net::TcpStream,
-    sender: crate::netstack::TcpSender,
+    mut sender: crate::netstack::TcpSender,
     mut from_stack: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    let (mut rd, mut wr) = sock.split();
-    let mut sender = sender;
+    // into_split, not split: the halves are owned, so `rd` can move into the
+    // spawned pump (split() only borrows sock, and a spawned task requires
+    // 'static).
+    let (mut rd, mut wr) = sock.into_split();
 
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
@@ -3344,7 +3346,10 @@ async fn run_masque_in_masque(
         result = async {
             match socks_task.as_mut() {
                 Some(task) => task.await,
-                None => std::future::pending::<Result<()>>().await,
+                // Ok() matches the JoinHandle shape of the arm above: this
+                // branch parks forever but must still type-check against
+                // Result<Result<()>, JoinError>.
+                None => Ok(std::future::pending::<Result<()>>().await),
             }
         } => (join_outcome("socks5 server", result), Winner::Local),
     };
