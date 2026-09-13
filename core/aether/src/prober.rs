@@ -558,6 +558,10 @@ async fn verify_one(
             key_pem: probe.key_pem.to_vec(),
             local_ipv4: probe.local_ipv4,
             quiet: true,
+            // A prober run is a throwaway verify, not a session: it must not
+            // announce the app "connected" while the real tunnel is still
+            // being chosen.
+            announce: false,
             pin_endpoint: false,
             expected_pins: Vec::new(),
         };

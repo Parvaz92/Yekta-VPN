@@ -3027,8 +3027,8 @@ async fn spawn_tcp_forwarder(
 /// Inlined from upstream's socks::relay_tunneled call: our socks.rs keeps the
 /// relay unexported, and this is the same two-pump shape handle_client uses.
 async fn relay_tcp_pair(
-    mut sock: tokio::net::TcpStream,
-    mut sender: crate::netstack::TcpSender,
+    sock: tokio::net::TcpStream,
+    sender: crate::netstack::TcpSender,
     mut from_stack: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) {
     use tokio::io::AsyncReadExt;
@@ -3264,7 +3264,7 @@ async fn run_masque_in_masque(
     ech: Option<Vec<u8>>,
     listen: SocketAddr,
     options: &StartOptions,
-) -> Result<SocketAddr, MimHopFailure> {
+) -> std::result::Result<SocketAddr, MimHopFailure> {
     let h2 = masque_h2::enabled();
     let outer_mtu = TUNNEL_MTU;
 
@@ -3304,13 +3304,29 @@ async fn run_masque_in_masque(
         // forwarder whose bytes leave via the outer tunnel, so the inner edge
         // sees the outer edge's exit address, never the device's carrier IP.
         // The outer hop never owns the TUN, so its stack is always present.
-        let outer_stack = outer.stack.as_ref().ok_or_else(|| {
-            AetherError::Other("outer masque hop lost its userspace stack".into())
-        })?;
-        let (forwarder, forwarder_guard) = if h2 {
-            spawn_tcp_forwarder(outer_stack, inner_peer).await?
+        // These dials ride the outer hop's netstack — a failure here is an
+        // outer-hop failure, not a verdict on the inner candidate.
+        let outer_stack = match outer.stack.as_ref() {
+            Some(stack) => stack,
+            None => {
+                return Err(MimHopFailure::Outer(
+                    "outer masque hop lost its userspace stack".into(),
+                ))
+            }
+        };
+        let forwarder_attempt = if h2 {
+            spawn_tcp_forwarder(outer_stack, inner_peer).await
         } else {
-            spawn_udp_forwarder(outer_stack, inner_peer).await?
+            spawn_udp_forwarder(outer_stack, inner_peer).await
+        };
+        let (forwarder, forwarder_guard) = match forwarder_attempt {
+            Ok(ok) => ok,
+            Err(e) => {
+                log::warn!(
+                    "[-] inner edge {inner_peer} could not be reached through the outer tunnel: {e}"
+                );
+                continue;
+            }
         };
         log::info!(
             "[*] trying inner MASQUE edge {inner_peer} through the outer tunnel via {forwarder}"
