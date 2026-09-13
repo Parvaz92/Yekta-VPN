@@ -179,8 +179,8 @@ object LogRedactor {
      */
     private val HOST = Regex("""\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b""")
 
-    /** This app's own port block: 1819-1825 live, 21100-21199 the probe race. */
-    private val OWN_PORTS = Regex("""\b(?:18(?:19|2[0-5])|211\d\d)\b""")
+    /** This app's own port block: 1819-1826 live, 21100-21299 the probe races. */
+    private val OWN_PORTS = Regex("""\b(?:18(?:19|2[0-6])|21[12]\d\d)\b""")
 
     /**
      * The engine's version banner, which names the engine even after its name is
@@ -214,6 +214,9 @@ object LogRedactor {
         // subsystems
         "ShardManager/probe" to "M7p",
         "ShardManager" to "M7",
+        "AnyTls/probe" to "A2p",
+        "AnyTls" to "A2",
+        "anytls" to "A3",
         "ShardSubscription" to "S3",
         "ShardSocksFront" to "F2",
         "ShardRefreshJob" to "R5",

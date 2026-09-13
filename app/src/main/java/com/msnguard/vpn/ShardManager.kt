@@ -65,8 +65,15 @@ object ShardManager {
     /**
      * First port of the probe block. The race binds one inbound per candidate,
      * `PROBE_BASE_PORT + i`, and they exist only while the race runs.
+     *
+     * xray's block. The anytls sidecar's probe listeners live in
+     * [ANYTLS_PROBE_BASE_PORT]'s block so the two engines' probe ports never
+     * collide at any slice width.
      */
     private const val PROBE_BASE_PORT = 21100
+
+    /** The anytls probe block. 100 clear of xray's, matching its max width. */
+    private const val ANYTLS_PROBE_BASE_PORT = 21200
 
     /**
      * How many nodes race at once.
@@ -104,6 +111,21 @@ object ShardManager {
     private val running = AtomicBoolean(false)
 
     /**
+     * Which engine is serving the live listener; null while down.
+     *
+     * The pool is protocol-heterogeneous since anytls nodes joined it: a
+     * winner may be an xray node (vless/trojan) or an anytls node, and the
+     * engine that serves the listener is a property of the winner — both
+     * bind the SAME port ([SOCKS_PORT]; only one is ever live, the probe
+     * processes die before the live launch). Every surface that cares
+     * whether "the node process" is alive ([isRunning]) dispatches on this.
+     */
+    private enum class Engine { XRAY, ANYTLS }
+
+    @Volatile
+    private var liveEngine: Engine? = null
+
+    /**
      * Signals [start] to abandon the connect at its next checkpoint, without
      * needing the lock [start] holds.
      *
@@ -133,7 +155,10 @@ object ShardManager {
         private set
 
     val isRunning: Boolean
-        get() = running.get() && process?.isAlive == true
+        get() = when (liveEngine) {
+            Engine.ANYTLS -> AnyTlsManager.isRunning
+            else -> running.get() && process?.isAlive == true
+        }
 
     private fun binary(context: Context): File =
         File(context.applicationInfo.nativeLibraryDir, "libxray.so")
@@ -228,13 +253,20 @@ object ShardManager {
         logThread = null
     }
 
-    /** Stop the process and forget the session. */
+    /**
+     * Stop the tunnel and forget the session. Both engines, whichever is
+     * live; the latch sequence is unchanged — see the original doc above.
+     */
     fun stop() {
         // Latch FIRST, lock-free: a start that is mid-race sees this at its next
         // checkpoint and unwinds itself. Blocking on a lock here is what froze
         // the UI for the whole race budget when a disconnect arrived during
         // Connecting — the main thread must never wait on start()'s monitor.
         stopRequestedDuringStart = true
+        // Both engines: whichever is live must die, and the anytls sidecar's own
+        // stop latches the same way. Killing the not-live one is a no-op.
+        AnyTlsManager.stop()
+        liveEngine = null
         // CAPTURED now, not read inside the thread: a quick Disconnect → Connect
         // can start a NEW process before this thread runs, and reading the
         // field there would tear down the fresh session's process.
@@ -267,6 +299,23 @@ object ShardManager {
             activeNode = null
         }, "shard-stop").start()
     }
+
+    /**
+     * The port the live engine is serving the tunnel on, whichever won the
+     * race — the address [ShardSocksFront] must be pointed at.
+     *
+     * Both engines serve on [SOCKS_PORT]; this exists so call sites (the
+     * service's front-end start) do not have to dispatch on the engine and
+     * cannot point the front end at a port nothing listens on after an
+     * anytls win.
+     */
+    val liveSocksPort: Int
+        get() = when (liveEngine) {
+            Engine.ANYTLS -> AnyTlsManager.listenPort.ifZero { SOCKS_PORT }
+            else -> listenPort
+        }
+
+    private fun Int.ifZero(fallback: () -> Int): Int = if (this != 0) this else f()
 
     /** True when the local SOCKS port is accepting, i.e. the tunnel is usable. */
     private fun portAccepts(port: Int, timeoutMs: Int): Boolean = try {
@@ -427,6 +476,23 @@ object ShardManager {
         // what tun2socks dials, so it cannot move to a user-chosen port.
         val listenHost = if (CoreConfig.lanSharingEnabled(context)) "0.0.0.0" else "127.0.0.1"
         val logLevel = if (verboseLog) "info" else "warning"
+
+        // AnyTLS winners never reach Smart Split: the fragment profiles are a
+        // property of the xray config (freedom-outbound finalmask), and the
+        // sidecar has no such knob. Falling straight to the node-only launch
+        // is the same behaviour a pool with no anytls nodes has, so nothing
+        // changes for existing users.
+        if (winner.protocol == "anytls") {
+            if (AnyTlsManager.launchLive(this, winner, listenHost, port, verboseLog)) {
+                liveEngine = Engine.ANYTLS
+                activeNode = winner
+                logLanSharing(context, listenHost, port)
+                return true
+            }
+            lastError = AnyTlsManager.lastError.ifBlank { "anytls tunnel failed to start" }
+            return false
+        }
+        liveEngine = Engine.XRAY
 
         // Smart Split, when the user has it on: bring the tunnel up with a fragment
         // profile and keep the first one that carries a blocked SNI. Returns true
@@ -649,8 +715,17 @@ object ShardManager {
      * Checked through the real SOCKS port with a real request, because a process
      * that is alive and a port that accepts prove nothing about whether the node
      * on the far side still works.
+     *
+     * Dispatches on the live engine: an anytls winner's listener is the
+     * sidecar's own ([AnyTlsManager.SOCKS_PORT]), not this object's, so the
+     * probe must be aimed there. The port is the same [SOCKS_PORT] value in
+     * practice (both engines serve the tunnel on it), but reading it from the
+     * engine that owns it is what keeps this honest if they ever diverge.
      */
-    fun isHealthy(): Boolean = isRunning && ShardProbe.check(listenPort, PROBE_TIMEOUT_MS)
+    fun isHealthy(): Boolean = when (liveEngine) {
+        Engine.ANYTLS -> AnyTlsManager.isRunning && ShardProbe.check(AnyTlsManager.listenPort, PROBE_TIMEOUT_MS)
+        else -> isRunning && ShardProbe.check(listenPort, PROBE_TIMEOUT_MS)
+    }
 
     /**
      * Race [candidates] and return the first node that carries a real request.
@@ -660,32 +735,61 @@ object ShardManager {
      * rest. Measured on the live pool — a winner in 760–864 ms across three runs,
      * against 82 s to probe all 28 nodes sequentially.
      *
-     * The probe is a real HTTP request through the node's own SOCKS inbound, not a
-     * TCP ping. TCP ping was measured to be useless here: every node in the pool
-     * resolves to the same Cloudflare edge, so `connect()` always succeeds and
-     * tells us nothing about whether the node's worker and UUID still work.
+     * The pool is protocol-heterogeneous since anytls nodes joined it, and the
+     * two engines probe differently: xray binds N inbounds in ONE process with
+     * a routing rule per inbound, while the anytls sidecar's config format binds
+     * one listener per server — the same arrangement expressed twice. Both
+     * engines race in PARALLEL, one shared index space for probe ports
+     * ([PROBE_BASE_PORT] contiguous, xray first then anytls), so a mixed
+     * slice costs one slice, not two.
+     *
+     * The probe is a real HTTP request through the node's own SOCKS inbound, not
+     * a TCP ping. TCP ping was measured to be useless here: every node in the
+     * pool resolves to the same Cloudflare edge, so `connect()` always succeeds
+     * and tells us nothing about whether the node's worker and UUID still work.
+     * (For anytls nodes the address is the server itself, but the argument is
+     * unchanged: only a real request proves the password and the TLS layer.)
      *
      * @return the winner, or null if nothing answered inside the budget.
      */
     private fun race(context: Context, candidates: List<ShardNode>): ShardNode? {
         if (candidates.isEmpty()) return null
-        val config = ShardConfigs.probeConfig(context, candidates, PROBE_BASE_PORT)
-        val configFile = ShardConfigs.writeConfig(context, "probe.json", config)
-        if (!launch(context, configFile, "$TAG/probe")) return null
+        val xrayCandidates = candidates.filter { it.protocol != "anytls" }
+        val anytlsCandidates = candidates.filter { it.protocol == "anytls" }
+
+        // One combined, collision-free port map: xray nodes take the block's
+        // low half of indices, anytls nodes the high half.
+        val portOf = HashMap<ShardNode, Int>(candidates.size * 2)
+        candidates.forEachIndexed { index, node -> portOf[node] = PROBE_BASE_PORT + index }
+
+        val xrayLaunched = xrayCandidates.isNotEmpty() &&
+            run {
+                val config = ShardConfigs.probeConfig(context, xrayCandidates, PROBE_BASE_PORT)
+                val configFile = ShardConfigs.writeConfig(context, "probe.json", config)
+                launch(context, configFile, "$TAG/probe")
+            }
+        // The anytls probe uses its own port block: 21200+ so it never
+        // collides with xray's 21100-21199 even at full slice width.
+        val anytlsLaunched = anytlsCandidates.isNotEmpty() &&
+            AnyTlsManager.launchProbe(
+                context,
+                anytlsCandidates,
+                anytlsCandidates.mapIndexed { i, n -> n to (ANYTLS_PROBE_BASE_PORT + i) }.toMap(),
+            )
+
+        if (!xrayLaunched && !anytlsLaunched) {
+            lastError = "no probe process could start"
+            return null
+        }
 
         try {
-            // xray binds its listeners a moment after exec. Waiting for the first
-            // port instead of sleeping a fixed amount keeps a fast device fast.
-            var ready = false
-            val deadline = System.currentTimeMillis() + 4000
-            while (System.currentTimeMillis() < deadline) {
-                if (stopRequestedDuringStart) return null
-                if (portAccepts(PROBE_BASE_PORT, 300)) {
-                    ready = true
-                    break
-                }
-                Thread.sleep(100)
-            }
+            // Each engine's listeners bind a moment after exec. Waiting for
+            // the FIRST port of each that launched keeps a fast device fast.
+            val ready = (if (xrayLaunched) {
+                awaitPortUp(PROBE_BASE_PORT)
+            } else true) && (if (anytlsLaunched) {
+                awaitPortUp(ANYTLS_PROBE_BASE_PORT)
+            } else true)
             if (!ready) {
                 lastError = "probe listener never came up"
                 ConnectionLog.record("$TAG probe listeners did not bind")
@@ -699,7 +803,7 @@ object ShardManager {
                 candidates.size.coerceAtMost(RACE_WIDTH)
             )
 
-            candidates.forEachIndexed { index, node ->
+            candidates.forEach { node ->
                 pool.execute {
                     // Once someone has won, the remaining probes are pointless
                     // work on a metered link — stop rather than finish politely.
@@ -709,7 +813,7 @@ object ShardManager {
                     // user is already waiting on this connect being over.
                     if (stopRequestedDuringStart) return@execute
                     val started = System.currentTimeMillis()
-                    val ok = ShardProbe.check(PROBE_BASE_PORT + index, PROBE_TIMEOUT_MS)
+                    val ok = ShardProbe.check(portOf.getValue(node), PROBE_TIMEOUT_MS)
                     val elapsed = (System.currentTimeMillis() - started).toInt()
                     if (ok) {
                         ShardHealth.recordSuccess(context, node, elapsed)
@@ -741,13 +845,25 @@ object ShardManager {
             ConnectionLog.record("$TAG race error: ${e.message}")
             return null
         } finally {
-            // The probe process must die before the tunnel process starts: they
+            // The probe processes must die before the tunnel process starts: they
             // would otherwise fight over nothing, but it is 45 idle outbounds worth
             // of memory for no reason. killProbe() and NOT stop(): stop() latches
             // stopRequestedDuringStart, and this finally runs on every normal,
             // successful slice too — latching here would cancel the connect that
             // was about to launch its winner.
             killProcess()
+            AnyTlsManager.killProbe()
         }
+    }
+
+    /** Wait up to 4 s for [port] to accept a connection. */
+    private fun awaitPortUp(port: Int): Boolean {
+        val deadline = System.currentTimeMillis() + 4000
+        while (System.currentTimeMillis() < deadline) {
+            if (stopRequestedDuringStart) return false
+            if (portAccepts(port, 300)) return true
+            Thread.sleep(100)
+        }
+        return false
     }
 }

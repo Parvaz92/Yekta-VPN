@@ -155,8 +155,15 @@ object ShardConfigs {
     /** SharedPreferences key for user's custom Cloudflare IP. */
     private const val CUSTOM_CF_IP_PREF = "shard_custom_cf_ip"
 
-    /** Schemes we can actually run. Anything else in the file is skipped. */
-    private val SUPPORTED = setOf("vless", "trojan")
+    /**
+     * Schemes we can actually run. Anything else in the file is skipped.
+     *
+     * `vless`/`trojan` run on xray. `anytls` runs on the anytls sidecar
+     * ([AnyTlsManager]) — Xray has no AnyTLS outbound at all, so the pool is
+     * split by protocol in [ShardManager.start] and each engine races its own
+     * candidates in one combined race.
+     */
+    private val SUPPORTED = setOf("vless", "trojan", "anytls")
 
     /**
      * Get the user's custom Cloudflare IP, if set.
@@ -245,7 +252,37 @@ object ShardConfigs {
         // rather than run as ws, which would fail at the HTTP upgrade with a
         // useless error.
         val network = params["type"]?.lowercase(Locale.US).orEmpty().ifEmpty { "tcp" }
-        if (network != "ws") return null
+        if (network != "ws" && scheme != "anytls") return null
+
+        // anytls:// is its own URI shape (docs/uri_scheme.md): password in the
+        // userinfo, host[:port] with 443 as the default port, `sni` and
+        // `insecure` as the only parameters. No ws, no path, no CDN `host` —
+        // the fields below are filled so the node survives the xray-shaped
+        // [ShardNode] and the health/rank machinery unchanged, and the
+        // engine-specific values travel in the fields the sidecar reads:
+        // [ShardNode.serverName] is the SNI param, and [ShardNode.security]
+        // carries the insecure flag ("insecure" vs "tls") for the sidecar's
+        // TLS verification. Insecure stays opt-in per node from its own URL,
+        // never a default — see AnyTlsManager.
+        if (scheme == "anytls") {
+            val insecure = params["insecure"] == "1" || params["insecure"] == "true"
+            return ShardNode(
+                protocol = scheme,
+                credential = credential,
+                address = address,
+                port = port,
+                network = network,
+                security = if (insecure) "insecure" else "tls",
+                path = "",
+                host = "",
+                serverName = sni,
+                fingerprint = "",
+                cipherSuites = "",
+                finalMask = "",
+                alpn = "",
+                label = label,
+            )
+        }
 
         ShardNode(
             protocol = scheme,
