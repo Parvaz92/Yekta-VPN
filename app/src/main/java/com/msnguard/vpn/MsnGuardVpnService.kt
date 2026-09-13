@@ -2589,7 +2589,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 SmartSplitSub.refreshIfDue(this)
 
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
-                if (!ShardSocksFront.start(ShardManager.SOCKS_PORT)) {
+                // The front end is pointed at whichever engine the race left
+                // serving the tunnel: xray on 1824 or the anytls sidecar on
+                // 1826. ShardManager exposes one accessor so this call site
+                // does not have to know the engine split.
+                if (!ShardSocksFront.start(ShardManager.liveSocksPort)) {
                     error("Could not start the UDP front-end")
                 }
                 activeSocksPort = ShardSocksFront.LISTEN_PORT
