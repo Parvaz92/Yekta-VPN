@@ -311,11 +311,9 @@ object ShardManager {
      */
     val liveSocksPort: Int
         get() = when (liveEngine) {
-            Engine.ANYTLS -> AnyTlsManager.listenPort.ifZero { SOCKS_PORT }
+            Engine.ANYTLS -> AnyTlsManager.listenPort.takeIf { it != 0 } ?: SOCKS_PORT
             else -> listenPort
         }
-
-    private fun Int.ifZero(fallback: () -> Int): Int = if (this != 0) this else f()
 
     /** True when the local SOCKS port is accepting, i.e. the tunnel is usable. */
     private fun portAccepts(port: Int, timeoutMs: Int): Boolean = try {
@@ -483,7 +481,7 @@ object ShardManager {
         // is the same behaviour a pool with no anytls nodes has, so nothing
         // changes for existing users.
         if (winner.protocol == "anytls") {
-            if (AnyTlsManager.launchLive(this, winner, listenHost, port, verboseLog)) {
+            if (AnyTlsManager.launchLive(context, winner, listenHost, port, verboseLog)) {
                 liveEngine = Engine.ANYTLS
                 activeNode = winner
                 logLanSharing(context, listenHost, port)
