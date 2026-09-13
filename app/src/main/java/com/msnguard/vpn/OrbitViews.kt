@@ -70,6 +70,7 @@ class MetricTile(
     onClick: () -> Unit,
 ) : LinearLayout(context) {
 
+    private val row: LinearLayout
     private val valueView: TextView
     private val unitView: TextView
     private val bars: MicroBarsView
@@ -93,7 +94,7 @@ class MetricTile(
         // The sparkline keeps `accent`, which is where the colour identity lives.
         addView(context.orbitLabel(keyText, 8.5f, Sculpt.withAlpha(accentText, 0.92f), medium = true, spacing = 0.13f))
 
-        val row = LinearLayout(context).apply {
+        row = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.BOTTOM
         }
@@ -116,10 +117,52 @@ class MetricTile(
         ).apply { topMargin = context.px(5); bottomMargin = context.px(9) })
     }
 
+    private companion object {
+        /** Number size as designed; anything that already fits stays exactly here. */
+        const val VALUE_MAX_SP = 21f
+
+        /** Floor for the shrink in [fitValueView] — still readable in motion. */
+        const val VALUE_MIN_SP = 11f
+        const val VALUE_STEP_SP = 1f
+    }
+
     /** [value] is pre-scaled for display; [unit] is its suffix, e.g. "GB". */
     fun setValue(value: String, unit: String) {
         valueView.text = value
         unitView.text = unit
+        fitValueView()
+    }
+
+    /**
+     * Shrinks the number until it and its unit share the row.
+     *
+     * The number is 21sp inside a tile one third of the screen wide. Past four
+     * digits — any session past ~12 MB reads `12288`-style values — or on a
+     * narrow screen with a raised system font scale (sp grows with it), the
+     * digits fill the row, push the unit off the tile and the overflow gets
+     * clipped by the tile background. Values that already fit keep the exact
+     * 21sp they had; longer ones step down 1sp at a time to the smallest size
+     * that fits both texts, never below 11sp. Measured with Paint.measureText
+     * of the real mono typeface against the real row width, so density, font
+     * scale and the localized letter spacing all resolve themselves.
+     */
+    private fun fitValueView() {
+        row.post {
+            val rowWidth = row.width
+            if (rowWidth <= 0) return@post
+            val gap = (unitView.layoutParams as? LinearLayout.LayoutParams)?.leftMargin ?: 0
+            val unitWidth = if (unitView.width > 0) unitView.width
+                else unitView.paint.measureText(unitView.text.toString()).toInt()
+            val available = rowWidth - unitWidth - gap -
+                valueView.paddingLeft - valueView.paddingRight
+            var size = VALUE_MAX_SP
+            while (size >= VALUE_MIN_SP) {
+                valueView.textSize = size
+                val needed = valueView.paint.measureText(valueView.text.toString()).toInt()
+                if (needed <= available) break
+                size -= VALUE_STEP_SP
+            }
+        }
     }
 
     fun push(sample: Float) = bars.push(sample)
