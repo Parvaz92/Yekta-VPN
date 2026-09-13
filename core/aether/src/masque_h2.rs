@@ -92,6 +92,10 @@ pub struct H2TunnelConfig {
     pub key_pem: Vec<u8>,
     pub local_ipv4: Ipv4Addr,
     pub quiet: bool,
+    /// Same contract as quic::TunnelConfig::announce: the single-hop tunnel
+    /// announces itself; MIM hops stay silent and the orchestrator announces
+    /// once both hops are up.
+    pub announce: bool,
     pub pin_endpoint: bool,
     pub expected_pins: Vec<Vec<u8>>,
 }
@@ -501,7 +505,9 @@ pub async fn run(
         );
     } else if !ready_fired {
         ready_fired = true;
-        crate::ffi::mark_ready();
+        if cfg.announce {
+            crate::ffi::mark_ready();
+        }
         if let Some(tx) = ready_tx.take() {
             let _ = tx.send(());
         }
@@ -627,7 +633,9 @@ pub async fn run(
                             if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
                                 ready_fired = true;
                                 validate_deadline = None;
-                                crate::ffi::mark_ready();
+                                if cfg.announce {
+                                    crate::ffi::mark_ready();
+                                }
                                 if let Some(tx) = ready_tx.take() {
                                     let _ = tx.send(());
                                 }

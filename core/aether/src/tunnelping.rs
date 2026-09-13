@@ -132,6 +132,7 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 key_pem: p.key_pem.clone(),
                 local_ipv4: p.local_ipv4,
                 quiet: true,
+                announce: true,
                 pin_endpoint: true,
                 expected_pins: crate::consts::MASQUE_PINS
                     .iter()
@@ -158,7 +159,9 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 local_ipv4: p.local_ipv4,
                 quiet: true,
                 // Same defaults as the real tunnel: full datagram, bait on —
-                // a ping is only evidence if it takes the same path.
+                // a ping is only evidence if it takes the same path. The ping
+                // IS its own session, so it announces like a real one.
+                announce: true,
                 max_datagram: quic::MAX_DATAGRAM_SIZE,
                 version_bait: true,
             };

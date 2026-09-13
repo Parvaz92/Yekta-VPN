@@ -106,7 +106,9 @@ target_compile_options(tun2socks PRIVATE
 # 16KB page size — required for Android 15+ / Google Play.
 target_link_options(tun2socks PRIVATE
     "-Wl,-z,max-page-size=16384"
-    "-Wl,-z,common-page-size=16384"
+    # No -z common-page-size: it pads PT_GNU_RELRO to a 16K boundary that can
+    # overhang its LOAD segment end (RELRO@4K OVERRUN); max-page-size alone
+    # carries 16K device support.
 )
 
 find_library(log-lib log)

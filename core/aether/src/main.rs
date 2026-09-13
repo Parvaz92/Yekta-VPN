@@ -1207,6 +1207,7 @@ async fn quick_verify_masque_peer(
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: true,
+            announce: true,
             pin_endpoint: false,
             expected_pins: Vec::new(),
         };
@@ -1824,8 +1825,10 @@ async fn run_masque_tunnel(
         tls_curve_preset: options.tls_curve_preset,
         local_ipv4: parse_local_v4(&identity.ipv4),
         quiet: false,
-        // Plain single-hop MASQUE: full datagram budget, bait on. The bait
-        // only costs one packet per handshake and upstream enables it here too.
+        // Plain single-hop MASQUE: this tunnel IS the session, it announces
+        // itself. The bait only costs one packet per handshake and upstream
+        // enables it here too.
+        announce: true,
         max_datagram: quic::MAX_DATAGRAM_SIZE,
         version_bait: true,
     };
@@ -1888,6 +1891,7 @@ async fn run_masque_tunnel(
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: false,
+            announce: true,
             pin_endpoint: false,
             expected_pins: Vec::new(),
         };
@@ -2887,6 +2891,12 @@ struct MasqueHop {
     _guard: ForwarderGuard,
 }
 
+/// How many verified inner edges to walk before declaring the outer hop
+/// unable to carry a second MASQUE leg. The pool is only verified gateways
+/// now (see [inner_masque_candidates]), so every try is a real edge — four
+/// is two full cache generations on a phone.
+const MIM_INNER_TRIES: usize = 4;
+
 /// How long an inner MIM hop may take to come up. Tighter than the outer
 /// startup budget on purpose: the outer hop already proved the carrier path
 /// works, and the inner list holds several candidates — paying the full outer
@@ -2919,50 +2929,53 @@ fn mim_inner_budget(outer_mtu: usize, inner_peer: SocketAddr, h2: bool) -> (usiz
     (datagram, mtu)
 }
 
-/// Candidate inner edges for a given outer edge: same /24, different last
-/// octet, random order. The public MASQUE fleet answers on every address in
-/// its ranges, so a sibling of a working outer edge is the best guess for a
-/// second edge that is reachable *through* that first one.
-const MASQUE_INNER_PORT: u16 = 443;
-const MIM_INNER_TRIES: usize = 6;
-
-fn inner_masque_candidates(outer: SocketAddr, count: usize) -> Vec<SocketAddr> {
-    use rand::RngExt;
-
-    let mut rng = rand::rng();
+/// Candidate inner edges for a given outer edge.
+///
+/// NOT the sibling /24 shuffle upstream used to use: a random sibling of a
+/// MASQUE edge is usually an ordinary Cloudflare anycast node, which completes
+/// TLS and then rejects our client certificate — every probe in a night's
+/// field log came back `TLS alert 46 (certificate_unknown)` and MIM never
+/// connected once. Upstream v2.0.0 answered that by pinning the inner edge by
+/// hand from env vars; the field-honest equivalent here is to only ever try
+/// addresses that have ALREADY answered connect-ip with our identity — the
+/// same verified pool the outer hunt uses — plus the seed list, never a
+/// random guess.
+///
+/// Order: the gateway cache first (this scan's accepted peers — the freshest
+/// evidence, and the outer hop itself just proved the carrier path works),
+/// then the hard-coded verified gateways, then the seeds. The outer edge is
+/// always excluded; on a phone the cache holds one peer (the last gateway
+/// that actually carried traffic), so the list is short either way.
+fn inner_masque_candidates(
+    outer: SocketAddr,
+    options: &StartOptions,
+    count: usize,
+) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
+    let mut seen: HashSet<SocketAddr> = HashSet::new();
 
-    match outer.ip() {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            let mut hosts: Vec<u8> = (1..=254u8).filter(|host| *host != octets[3]).collect();
-            for index in (1..hosts.len()).rev() {
-                let other = rng.random_range(0..=index);
-                hosts.swap(index, other);
-            }
-            for host in hosts.into_iter().take(count) {
-                let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], host);
-                out.push(SocketAddr::new(IpAddr::V4(ip), MASQUE_INNER_PORT));
-            }
+    let mut push = |out: &mut Vec<SocketAddr>, ip: IpAddr| {
+        let peer = SocketAddr::new(ip, consts::QUIC_PORT);
+        if peer.ip() != outer.ip() && seen.insert(peer) {
+            out.push(peer);
         }
-        IpAddr::V6(v6) => {
-            let mut segments = v6.segments();
-            let last = segments[7];
-            let mut seen: HashSet<u16> = HashSet::new();
-            while out.len() < count && seen.len() < count * 8 {
-                let candidate = rng.random_range(1..=u16::MAX);
-                if candidate == last || !seen.insert(candidate) {
-                    continue;
-                }
-                segments[7] = candidate;
-                out.push(SocketAddr::new(
-                    IpAddr::V6(std::net::Ipv6Addr::from(segments)),
-                    MASQUE_INNER_PORT,
-                ));
-            }
-        }
+    };
+
+    // Freshest first: the peers this very scan just verified with a full
+    // connect-ip handshake. On Android every connect re-provisions the scan,
+    // so this is the pool the outer hop was chosen from minutes ago.
+    for peer in cached_masque_gateways(options) {
+        push(&mut out, peer.ip());
     }
 
+    // Then the measured gateways and seeds — the same fixed ladder the plain
+    // MASQUE hunt walks, so an inner edge candidate here is never an address
+    // the hunt itself would refuse to dial.
+    for peer in masque_gateway_peers() {
+        push(&mut out, peer.ip());
+    }
+
+    out.truncate(count.max(1));
     out
 }
 
@@ -3144,7 +3157,12 @@ async fn establish_masque(
             cert_pem: identity.cert_pem.clone(),
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
-            quiet: false,
+            quiet: true,
+            // A MIM hop never announces on its own: the outer hop's validation
+            // says nothing about the inner hop that owns the TUN. Only
+            // run_masque_in_masque, after BOTH hops validate, calls
+            // mark_ready.
+            announce: false,
             pin_endpoint: true,
             expected_pins: consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
         };
@@ -3168,6 +3186,8 @@ async fn establish_masque(
             tls_curve_preset: options.tls_curve_preset,
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: false,
+            // Same as the h2 branch above: a MIM hop stays silent.
+            announce: false,
             max_datagram: datagram,
             version_bait,
         };
@@ -3209,7 +3229,33 @@ async fn establish_masque(
     })
 }
 
+/// Which MIM hop a session failure belongs to.
+///
+/// v1.8.8 returned one undifferentiated error, so the reconnect loop counted
+/// every INNER failure against the OUTER edge too: two dead inner candidates
+/// blacklisted a healthy outer, forced a full gateway rescan plus its
+/// background top-up, and three reconnects in a row turned into three
+/// consecutive 40-peer scan storms on the carrier network — after which even
+/// plain WireGuard timed out for half a minute (see the 05:58 field log).
+/// Attribution fixes that: only the hop that actually failed pays.
+enum MimHopFailure {
+    Outer(String),
+    Inner(String),
+}
+
+impl std::fmt::Display for MimHopFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MimHopFailure::Outer(m) => write!(f, "outer hop: {m}"),
+            MimHopFailure::Inner(m) => write!(f, "inner hop: {m}"),
+        }
+    }
+}
+
 /// Raise both hops and serve the local listener through the inner one.
+///
+/// Ok carries the inner edge that served the session, so the caller can
+/// prefer it on the next connect; Err says which hop to blame.
 async fn run_masque_in_masque(
     primary: &account::Identity,
     secondary: &account::Identity,
@@ -3218,7 +3264,7 @@ async fn run_masque_in_masque(
     ech: Option<Vec<u8>>,
     listen: SocketAddr,
     options: &StartOptions,
-) -> Result<()> {
+) -> Result<SocketAddr, MimHopFailure> {
     let h2 = masque_h2::enabled();
     let outer_mtu = TUNNEL_MTU;
 
@@ -3236,7 +3282,8 @@ async fn run_masque_in_masque(
         options,
         None,
     )
-    .await?;
+    .await
+    .map_err(|e| MimHopFailure::Outer(e.to_string()))?;
 
     let mut chosen: Option<(SocketAddr, MasqueHop, ForwarderGuard)> = None;
 
@@ -3303,8 +3350,11 @@ async fn run_masque_in_masque(
     }
 
     let Some((inner_peer, mut inner, _forwarder_guard)) = chosen else {
-        return Err(AetherError::Other(
-            "no inner masque edge answered through the outer tunnel".into(),
+        // Every candidate refused. The outer hop itself answered CONNECT-IP
+        // minutes ago, so this is an inner-pool failure: attribute it as one
+        // or the reconnect loop will blacklist and rescan a healthy outer.
+        return Err(MimHopFailure::Inner(
+            "no verified inner edge answered through the outer tunnel".into(),
         ));
     };
 
@@ -3372,7 +3422,17 @@ async fn run_masque_in_masque(
         let _ = (&mut inner.exit).await;
     }
 
-    outcome
+    // A session that ends was still a WORKING session: it carried traffic
+    // through both hops. Report the inner edge as success so the caller
+    // remembers it, and attribute a mid-session death to the hop that died —
+    // the other one was healthy and must not be rescanned because of it.
+    match outcome {
+        Ok(()) => Ok(inner_peer),
+        Err(e) => Err(match winner {
+            Winner::Outer => MimHopFailure::Outer(e.to_string()),
+            Winner::Inner | Winner::Local => MimHopFailure::Inner(e.to_string()),
+        }),
+    }
 }
 
 /// Where MIM remembers its outer edge between runs, mirroring GOOL's cache.
@@ -3392,8 +3452,9 @@ async fn run_mim(
     options: &StartOptions,
 ) -> Result<()> {
     let mut last_peer: Option<SocketAddr> = None;
-    let mut consecutive_fails: u32 = 0;
-    const MAX_CONSECUTIVE_FAILS: u32 = 2;
+    let mut last_inner: Option<SocketAddr> = None;
+    let mut outer_fails: u32 = 0;
+    const MAX_OUTER_FAILS: u32 = 2;
 
     // Same rationale as GOOL's cached peer: the outer edge that worked on
     // this device last time is better evidence than a fresh scan, and the
@@ -3405,12 +3466,12 @@ async fn run_mim(
     };
 
     loop {
-        let peer = if consecutive_fails < MAX_CONSECUTIVE_FAILS {
+        let peer = if outer_fails < MAX_OUTER_FAILS {
             last_peer.or(cached_peer)
         } else {
             if let Some(p) = last_peer {
                 log::warn!(
-                    "[-] outer edge {p} failed {consecutive_fails} times in a row; rescanning"
+                    "[-] outer edge {p} failed {outer_fails} times in a row; rescanning"
                 );
             }
             cached_peer = None;
@@ -3430,7 +3491,7 @@ async fn run_mim(
                         continue;
                     }
                 };
-                consecutive_fails = 0;
+                outer_fails = 0;
                 p
             }
         };
@@ -3441,7 +3502,17 @@ async fn run_mim(
         }
         last_peer = Some(peer);
 
-        let candidates = inner_masque_candidates(peer, MIM_INNER_TRIES);
+        let candidates = {
+            let pool = inner_masque_candidates(peer, options, MIM_INNER_TRIES);
+            // The inner edge that already carried a session through this outer
+            // goes first — it is the strongest evidence in the pool.
+            match last_inner {
+                Some(preferred) if !pool.iter().any(|c| *c == preferred) => {
+                    std::iter::once(preferred).chain(pool).collect()
+                }
+                _ => pool,
+            }
+        };
 
         if candidates.is_empty() {
             return Err(AetherError::Other(
@@ -3460,10 +3531,32 @@ async fn run_mim(
         )
         .await
         {
-            Ok(()) => log::warn!("[-] masque-in-masque tunnel closed; reconnecting"),
-            Err(e) => log::warn!("[-] masque-in-masque tunnel ended: {e}; reconnecting"),
+            Ok(inner_edge) => {
+                log::warn!(
+                    "[-] masque-in-masque session through {peer}/{inner_edge} ended; reconnecting"
+                );
+                last_inner = Some(inner_edge);
+                outer_fails = 0;
+            }
+            Err(MimHopFailure::Outer(e)) => {
+                // Only a genuinely dead OUTER hop pays here. This is the
+                // counter that used to be incremented on every failure: two
+                // inner refusals blacklisted a healthy outer and triggered the
+                // scan storm that poisoned the carrier network (see the
+                // 05:58 field log).
+                log::warn!("[-] masque-in-masque ended — {e}; reconnecting");
+                outer_fails += 1;
+            }
+            Err(MimHopFailure::Inner(e)) => {
+                // Inner failure with a live outer: keep the outer, drop the
+                // remembered inner (it may be the dead one), retry soon.
+                log::warn!("[-] masque-in-masque ended — {e}; retrying inner edges");
+                if let Some(known_inner) = last_inner {
+                    log::warn!("[-] dropping remembered inner edge {known_inner}");
+                    last_inner = None;
+                }
+            }
         }
-        consecutive_fails += 1;
 
         tokio::time::sleep(masque_reconnect_delay()).await;
     }
@@ -4171,6 +4264,7 @@ mod tests {
             key_pem: b"key".to_vec(),
             local_ipv4: "172.16.0.2".parse().unwrap(),
             quiet: true,
+            announce: true,
             pin_endpoint: false,
             expected_pins: Vec::new(),
         };
@@ -4270,6 +4364,7 @@ mod tests {
             key_pem: Vec::new(),
             local_ipv4: "172.16.0.2".parse().unwrap(),
             quiet: true,
+            announce: true,
             pin_endpoint: false,
             expected_pins: Vec::new(),
         };

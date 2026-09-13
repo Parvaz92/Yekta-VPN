@@ -8,8 +8,10 @@ set_target_properties(aether PROPERTIES
 
 add_library(aether_jni SHARED aether_jni.cpp)
 target_link_options(aether_jni PRIVATE
-    "-Wl,-z,max-page-size=16384"
-    "-Wl,-z,common-page-size=16384")
+    "-Wl,-z,max-page-size=16384")
+# No -z common-page-size: it pads PT_GNU_RELRO to a 16K boundary that can
+# overhang its LOAD segment end (RELRO@4K OVERRUN); max-page-size alone
+# carries 16K device support.
 find_library(log-lib log)
 target_link_libraries(aether_jni aether ${log-lib})
 

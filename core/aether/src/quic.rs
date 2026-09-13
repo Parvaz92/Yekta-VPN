@@ -173,6 +173,14 @@ pub struct TunnelConfig {
     pub tls_curve_preset: crate::TlsCurvePreset,
     pub local_ipv4: Ipv4Addr,
     pub quiet: bool,
+    /// Whether this tunnel may call [crate::ffi::mark_ready] on its own
+    /// validation. The single-hop MASQUE tunnel owns the whole session, so it
+    /// announces itself. In masque-in-masque neither hop does: the outer hop's
+    /// validation says nothing about the inner hop that actually owns the TUN,
+    /// and a premature announce is what made v1.8.8 show "connected" while no
+    /// data plane existed. The MIM orchestrator announces once BOTH hops are
+    /// up — see [run_masque_in_masque].
+    pub announce: bool,
     /// Cap on the QUIC datagram size this tunnel may emit. The plain MASQUE
     /// tunnel leaves this at [MAX_DATAGRAM_SIZE]; the MIM inner hop shrinks it
     /// so the inner datagram fits inside the outer tunnel's QUIC payload.
@@ -604,7 +612,9 @@ pub async fn run(
         }
         if connect_ip_ok && !data_check && !ready_fired {
             ready_fired = true;
-            crate::ffi::mark_ready();
+            if cfg.announce {
+                crate::ffi::mark_ready();
+            }
             if predelivery_drops > 0 {
                 log_or_debug(
                     quiet,
@@ -630,7 +640,9 @@ pub async fn run(
             if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
                 ready_fired = true;
                 validate_deadline = None;
-                crate::ffi::mark_ready();
+                if cfg.announce {
+                    crate::ffi::mark_ready();
+                }
                 if predelivery_drops > 0 {
                     log_or_debug(
                         quiet,

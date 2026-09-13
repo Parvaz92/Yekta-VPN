@@ -132,7 +132,13 @@ export "CXX_${RUST_TARGET_SUFFIX}=$BIN/clang++"
 export "CFLAGS_${RUST_TARGET_SUFFIX}=--target=${CLANG_PREFIX}${API}"
 export "CXXFLAGS_${RUST_TARGET_SUFFIX}=--target=${CLANG_PREFIX}${API}"
 export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_TARGET_SUFFIX}=--target=${CLANG_PREFIX}${API} --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$SYSROOT/usr/include/$INCLUDE_ARCH"
-export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-soname,libaether.so -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-soname,libaether.so -C link-arg=-Wl,-z,max-page-size=16384"
+# No -z common-page-size here on purpose: with common-page-size=16384 lld pads
+# PT_GNU_RELRO out to a 16K boundary that can overhang the end of the LOAD
+# segment holding it (RELRO@4K OVERRUN on every .so since the MIM port grew
+# the Rust core). 16K device support comes from max-page-size alone; the
+# loader honors max-page-size for mapping and common-page-size only shrinks
+# the RELRO padding, so dropping it fixes the overhang with no 16K cost.
 
 cd "$CRATE"
 cargo build --release --lib --target "$TARGET_TRIPLE"
