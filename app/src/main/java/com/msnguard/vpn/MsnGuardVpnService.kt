@@ -4775,6 +4775,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // pool shares, so it told the user nothing while looking like it told them
         // something.
         currentProtocol.contains("SHARD") -> Strings.t("SHARD")
+        currentProtocol.contains("MIM") -> Strings.t("Masque over Masque")
         currentProtocol.contains("MASQUE") -> Strings.t("MASQUE")
         currentProtocol.contains("WIREGUARD") -> Strings.t("WireGuard")
         currentProtocol.contains("GOOL") -> Strings.t("WARP-on-WARP")

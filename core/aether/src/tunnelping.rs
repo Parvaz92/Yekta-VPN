@@ -157,6 +157,10 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 tls_curve_preset: crate::TlsCurvePreset::Chrome,
                 local_ipv4: p.local_ipv4,
                 quiet: true,
+                // Same defaults as the real tunnel: full datagram, bait on —
+                // a ping is only evidence if it takes the same path.
+                max_datagram: quic::MAX_DATAGRAM_SIZE,
+                version_bait: true,
             };
             AbortGuard(tokio::spawn(quic::run(
                 cfg,

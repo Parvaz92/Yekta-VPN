@@ -14,7 +14,114 @@ use crate::noize::{self, NoizeConfig};
 use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
-const MAX_DATAGRAM_SIZE: usize = 1350;
+pub const MAX_DATAGRAM_SIZE: usize = 1350;
+pub const MIN_DATAGRAM_SIZE: usize = 1200;
+
+/// QUIC v2, the RFC 9369 version number. Some carrier middleboxes let the
+/// v1 flow through untouched once a v2-looking flow has been seen on the same
+/// 5-tuple — the version-negotiation trick from upstream Aether v2.0.0.
+const QUIC_V2_VERSION: u32 = 0x6b33_43cf;
+const QUIC_V2_BAIT_WAIT: Duration = Duration::from_millis(600);
+const QUIC_V2_BAIT_LEN: usize = 1200;
+
+/// Upstream: the bait is on unless explicitly turned off. AETHER_QUIC_V2 is
+/// the escape hatch for a network where the extra packet hurts.
+pub(crate) fn quic_v2_bait_enabled() -> bool {
+    !matches!(
+        std::env::var("AETHER_QUIC_V2").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    )
+}
+
+/// Two-byte QUIC varint, the 0x4000-prefixed short form.
+fn quic_varint2(value: u64) -> [u8; 2] {
+    (((value & 0x3fff) as u16) | 0x4000).to_be_bytes()
+}
+
+/// A single throwaway QUIC v2 long-header packet of the minimum legal size.
+///
+/// It is never handshake material: the DCID/SCID are random, so the edge cannot
+/// associate it with our real v1 connection. What it does is make a
+/// version-negotiation (or version-mismatch drop) happen on the 5-tuple before
+/// the v1 Client Initial follows, which is enough for filters that key on
+/// "first QUIC version seen" to treat the rest of the flow as v2 and pass it
+/// where they would otherwise drop v1. Mirrors upstream Aether v2.0.0
+/// (`build_version_bait`) byte for byte.
+fn build_version_bait() -> Vec<u8> {
+    let mut rng = rand::rng();
+    let mut dcid = [0u8; 8];
+    let mut scid = [0u8; 8];
+    rng.fill_bytes(&mut dcid);
+    rng.fill_bytes(&mut scid);
+
+    let mut pkt = Vec::with_capacity(QUIC_V2_BAIT_LEN);
+    // 0xc3: long header + fixed bit, type 3 (the type value QUIC v2 uses for
+    // Initial). v1 Initial is 0xc0; using v1's type byte would be another way
+    // to do this, but upstream ships 0xc3 and field-testing was on that byte.
+    pkt.push(0xc3);
+    pkt.extend_from_slice(&QUIC_V2_VERSION.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(scid.len() as u8);
+    pkt.extend_from_slice(&scid);
+    // Zero-length token.
+    pkt.push(0x00);
+
+    // The length field must cover the rest of the packet so the total is
+    // exactly the QUIC minimum datagram size — an undersized Initial is
+    // malformed and would be dropped before any version negotiation happened.
+    let remaining = QUIC_V2_BAIT_LEN - pkt.len() - 2;
+    pkt.extend_from_slice(&quic_varint2(remaining as u64));
+    let mut pn = [0u8; 4];
+    rng.fill_bytes(&mut pn);
+    pkt.extend_from_slice(&pn);
+    pkt.resize(QUIC_V2_BAIT_LEN, 0);
+    pkt
+}
+
+/// Fire the bait and briefly listen for the version-negotiation reply.
+///
+/// The reply, if any, is discarded: it goes to a random DCID the real
+/// connection will never use, and the purpose is the side effect on the
+/// filter, not the payload. Up to `tries` attempts with `wait` between them;
+/// both stops at the first answer, because a server that answered is a server
+/// that saw the packet, which is all the bait is for.
+async fn send_version_bait(sock: &UdpSocket, target: SocketAddr, wait: Duration, tries: usize) {
+    let bait = build_version_bait();
+    let connected = sock.peer_addr().is_ok();
+    let mut buf = [0u8; 2048];
+
+    for _attempt in 0..tries.max(1) {
+        let sent = if connected {
+            sock.send(&bait).await
+        } else {
+            sock.send_to(&bait, target).await
+        };
+        if sent.is_err() {
+            return;
+        }
+
+        let answered = tokio::time::timeout(wait, async {
+            if connected {
+                sock.recv(&mut buf).await
+            } else {
+                sock.recv_from(&mut buf).await.map(|(n, _)| n)
+            }
+        })
+        .await;
+
+        match answered {
+            Ok(Ok(_n)) => {
+                log::debug!(
+                    "[quic] version-negotiation bait answered; the path is open for v1"
+                );
+                return;
+            }
+            Ok(Err(_)) => return,
+            Err(_) => continue,
+        }
+    }
+}
 
 fn net_queue() -> usize {
     crate::sysprofile::channel_capacity()
@@ -66,6 +173,19 @@ pub struct TunnelConfig {
     pub tls_curve_preset: crate::TlsCurvePreset,
     pub local_ipv4: Ipv4Addr,
     pub quiet: bool,
+    /// Cap on the QUIC datagram size this tunnel may emit. The plain MASQUE
+    /// tunnel leaves this at [MAX_DATAGRAM_SIZE]; the MIM inner hop shrinks it
+    /// so the inner datagram fits inside the outer tunnel's QUIC payload.
+    pub max_datagram: usize,
+    /// Fire the QUIC v2 version-negotiation bait before the v1 Client Initial.
+    pub version_bait: bool,
+}
+
+impl TunnelConfig {
+    /// The effective datagram cap, clamped to the QUIC-legal range.
+    pub fn datagram_budget(&self) -> usize {
+        self.max_datagram.clamp(MIN_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE)
+    }
 }
 
 fn validation_timeout() -> Duration {
@@ -223,6 +343,16 @@ pub async fn run(
     let local = init_sock.local_addr()?;
     let init_sock = Arc::new(init_sock);
 
+    // Upstream Aether v2.0.0: before the v1 Client Initial, send one throwaway
+    // QUIC v2 long-header packet on the same socket. Filters that classify the
+    // flow by the first QUIC version they see then treat the v1 handshake that
+    // follows as v2 traffic and pass it — which revives MASQUE on networks
+    // where the v1 fingerprint alone was being dropped. Two tries with a
+    // short listen, then the real handshake proceeds either way.
+    if cfg.version_bait && quic_v2_bait_enabled() {
+        send_version_bait(&init_sock, peer, QUIC_V2_BAIT_WAIT, 2).await;
+    }
+
     let (net_tx, mut net_rx) = mpsc::channel::<NetPacket>(net_queue());
 
     let mut sockets: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
@@ -237,6 +367,13 @@ pub async fn run(
         pin_endpoint: false,
         expected_pins: &[],
     })?;
+
+    // The MIM inner hop shrinks this below MAX_DATAGRAM_SIZE so an inner QUIC
+    // datagram fits inside the outer tunnel's payload; the plain tunnel leaves
+    // it at the default and this is a no-op. quiche clamps at 1200 minimum.
+    let datagram = cfg.datagram_budget();
+    config.set_max_send_udp_payload_size(datagram);
+    config.set_max_recv_udp_payload_size(datagram);
 
     let mut current_ech = cfg.ech_config_list.clone();
 
@@ -812,6 +949,13 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
     sock.connect(p.peer).await?;
     let local = sock.local_addr()?;
 
+    // Same bait as the tunnel path (upstream fires it here too): a gateway
+    // verify that never gets through the filter would rule out a peer the
+    // real connection might have reached.
+    if quic_v2_bait_enabled() {
+        send_version_bait(&sock, p.peer, Duration::from_millis(500), 1).await;
+    }
+
     let mut config = tls::build_config(&TlsParams {
         cert_pem: &p.cert_pem,
         key_pem: &p.key_pem,
@@ -1128,6 +1272,66 @@ async fn flush_connected(conn: &mut quiche::Connection, sock: &UdpSocket) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod v2_bait_tests {
+    use super::*;
+
+    #[test]
+    fn the_bait_is_a_v2_versioned_long_header_of_the_minimum_size() {
+        let pkt = build_version_bait();
+        assert_eq!(pkt.len(), QUIC_V2_BAIT_LEN);
+        assert_eq!(pkt[0] & 0x80, 0x80, "long header form bit must be set");
+        assert_eq!(pkt[0] & 0x40, 0x40, "fixed bit must be set");
+        assert_eq!(
+            u32::from_be_bytes([pkt[1], pkt[2], pkt[3], pkt[4]]),
+            QUIC_V2_VERSION,
+            "the version field must be QUIC v2 so the filter treats the flow as v2"
+        );
+        assert_eq!(pkt[5], 8, "destination connection id length");
+        assert_eq!(pkt[14], 8, "source connection id length");
+    }
+
+    #[test]
+    fn two_baits_do_not_share_connection_ids() {
+        let a = build_version_bait();
+        let b = build_version_bait();
+        assert_ne!(a[6..14], b[6..14], "each bait must use a fresh dcid");
+    }
+
+    #[test]
+    fn the_bait_is_on_unless_it_is_turned_off() {
+        // SAFETY: single-threaded test, and env mutation is the thing under test.
+        std::env::remove_var("AETHER_QUIC_V2");
+        assert!(quic_v2_bait_enabled());
+    }
+
+    #[tokio::test]
+    async fn the_bait_triggers_a_version_negotiation_from_a_v1_only_server() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (n, from) = server.recv_from(&mut buf).await.unwrap();
+            assert_eq!(n, QUIC_V2_BAIT_LEN);
+            let dcid = buf[6..14].to_vec();
+            let scid = buf[15..23].to_vec();
+            let mut vn = vec![0xc0, 0x00, 0x00, 0x00, 0x00];
+            vn.push(scid.len() as u8);
+            vn.extend_from_slice(&scid);
+            vn.push(dcid.len() as u8);
+            vn.extend_from_slice(&dcid);
+            vn.extend_from_slice(&1u32.to_be_bytes());
+            server.send_to(&vn, from).await.unwrap();
+        });
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        send_version_bait(&client, server_addr, Duration::from_secs(2), 1).await;
+        responder.await.unwrap();
+    }
 }
 
 #[cfg(test)]

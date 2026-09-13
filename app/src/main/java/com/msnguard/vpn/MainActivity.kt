@@ -68,6 +68,12 @@ class MainActivity : Activity() {
     private lateinit var chainCard: ChainModeCard
 
     /**
+     * The MASQUE twin of [chainCard], in the same slot: masque-over-masque
+     * chains a second MASQUE hop inside the first, exactly as the chain card
+     * wraps Psiphon/Tor in WARP. Only ever visible with MASQUE selected.
+     */
+    private lateinit var mimCard: MimCard
+    /**
      * The SHARD twin of [chainCard], in the same slot.
      *
      * Only one of the two is ever applicable — the chain wraps Psiphon/Tor, this
@@ -618,6 +624,7 @@ class MainActivity : Activity() {
         ) { openTrafficMonitorScreen() }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
+        mimCard = MimCard(this, palette) { armed -> setMimArmed(armed) }
         smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
             updateConnectionMode(Protocol.entries[index])
@@ -1440,6 +1447,14 @@ class MainActivity : Activity() {
         // [renderChainCard] does the swap, so the home screen keeps its height
         // whichever transport is selected.
         addView(smartSplitCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // Masque-over-masque, the third occupant of the same slot: MASQUE's own
+        // chained mode. [renderChainCard] keeps exactly one of the three cards
+        // visible, so the screen keeps its height here too.
+        addView(mimCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(10) })
@@ -5623,7 +5638,7 @@ class MainActivity : Activity() {
      */
     private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
         Protocol.WIREGUARD -> 32_000L
-        Protocol.MASQUE -> 48_000L
+        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
         Protocol.WARP_IN_WARP -> 55_000L
         else -> 45_000L
     }
@@ -6111,11 +6126,13 @@ class MainActivity : Activity() {
             }
         )
         chainCard.setArmed(chainArmed())
-        // Exactly one of the two cards is shown, and the swap happens here so there
-        // is a single place that decides which control the SHARD user sees. GONE and
-        // not merely disabled: a permanently-N/A card in the SHARD case would be
-        // dead furniture on the app's most-used screen.
+        // Exactly one of the three slot cards is shown, and the swap happens
+        // here so there is a single place that decides which control the user
+        // sees. GONE and not merely disabled: a permanently-N/A card in the
+        // SHARD or MASQUE case would be dead furniture on the app's most-used
+        // screen.
         val shardSelected = selectedProtocol == Protocol.SHARD
+        val masqueSelected = selectedProtocol == Protocol.MASQUE
         // Frozen while the Auto Scan is walking the ladder. The swap is one card
         // disappearing and another taking its place, and the ladder changes the
         // selection three times in a single connect — so the user watched the OVER
@@ -6123,10 +6140,12 @@ class MainActivity : Activity() {
         // reported. [endAutoScan] repaints once the search is over, so the slot
         // always catches up to the transport that actually won.
         if (autoScanIndex < 0) {
-            chainCard.visibility = if (shardSelected) View.GONE else View.VISIBLE
+            chainCard.visibility = if (!shardSelected && !masqueSelected) View.VISIBLE else View.GONE
             smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
+            mimCard.visibility = if (masqueSelected) View.VISIBLE else View.GONE
         }
         renderSmartSplitCard()
+        renderMimCard()
         // The settings page carries the same switch, so keep it in step whenever the
         // card is repainted — arming from the home screen must not leave a stale
         // "off" behind in settings.
@@ -6211,6 +6230,49 @@ class MainActivity : Activity() {
             )
         } else {
             ConnectionLog.record("Smart Split off: everything via node")
+        }
+    }
+
+    /**
+     * Paints the masque-over-masque card for the current selection and state.
+     *
+     * Same two reasons to be unavailable as the other slot cards, in the order
+     * the user can act on them:
+     *
+     *  - not on MASQUE: the second hop chains *inside* a MASQUE connect, so on
+     *    the other transports there is nothing to chain into. Disabled rather
+     *    than hidden while MASQUE is not selected is unnecessary here — the
+     *    card itself is GONE off MASQUE — but the rule still holds for the
+     *    repaint that lands while the rail is mid-animation.
+     *  - connected: the same lock the transport rail gets, since the choice
+     *    only takes effect on the next connect.
+     */
+    private fun renderMimCard() {
+        val applies = selectedProtocol == Protocol.MASQUE
+        val reason = when {
+            !applies -> Strings.t("only for the MASQUE transport")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
+            else -> null
+        }
+        mimCard.setUnavailable(reason, applicable = applies)
+        mimCard.setArmed(CoreConfig.mimArmed(this))
+    }
+
+    /**
+     * Records the masque-over-masque choice. Takes effect on the next connect,
+     * like every other slot-card switch.
+     *
+     * OFF by default; see [CoreConfig.MIM_ARMED_PREF] for why this one inverts
+     * the chain card's default rather than following it.
+     */
+    private fun setMimArmed(armed: Boolean) {
+        preferences().edit().putBoolean(CoreConfig.MIM_ARMED_PREF, armed).apply()
+        if (armed) {
+            ConnectionLog.record(
+                "Masque-over-Masque armed: outer hop from this network, inner hop dialled through it"
+            )
+        } else {
+            ConnectionLog.record("Masque-over-Masque disarmed")
         }
     }
 

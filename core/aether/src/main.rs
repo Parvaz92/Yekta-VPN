@@ -200,7 +200,7 @@ pub async fn run_cli() -> Result<()> {
         };
 
     let forced_peer = match protocol {
-        Protocol::Masque => std::env::var("AETHER_PEER").ok(),
+        Protocol::Masque | Protocol::MasqueInMasque => std::env::var("AETHER_PEER").ok(),
         Protocol::WireGuard | Protocol::WarpInWarp => std::env::var("AETHER_WG_PEER")
             .ok()
             .or_else(|| std::env::var("AETHER_PEER").ok()),
@@ -292,6 +292,23 @@ pub async fn start(options: StartOptions) -> Result<()> {
             let lastconn_path = gool_lastconn_path(&primary_path);
             run_gool(primary, secondary, options.listen, lastconn_path, &options).await
         }
+        Protocol::MasqueInMasque => {
+            masque_h2::set_preferred(options.masque_transport == MasqueTransport::H2);
+            let primary_path = masque_config_path(&options);
+            let secondary_path = derive_sibling_path(&primary_path, "secondary");
+            let primary = load_or_provision_masque(&primary_path).await?;
+            let secondary = load_or_provision_masque(&secondary_path).await?;
+            log::info!(
+                "[+] outer device={} ipv4={} | inner device={} ipv4={}",
+                primary.device_id,
+                primary.ipv4,
+                secondary.device_id,
+                secondary.ipv4
+            );
+            let ech = resolve_ech().await;
+            let lastconn_path = mim_lastconn_path(&primary_path);
+            run_mim(primary, secondary, ech, options.listen, lastconn_path, &options).await
+        }
         Protocol::Psiphon => {
             let upstream = options.upstream_proxy.as_deref().unwrap_or("127.0.0.1:1080");
             log::info!("[+] Psiphon upstream SOCKS proxy: {upstream}");
@@ -355,7 +372,15 @@ pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
     initialize();
 
     let identity = match options.protocol {
-        Protocol::Masque => load_or_provision_masque(&masque_config_path(options)).await?,
+        Protocol::Masque | Protocol::MasqueInMasque => {
+            let path = if options.protocol == Protocol::MasqueInMasque {
+                let primary_path = masque_config_path(options);
+                derive_sibling_path(&primary_path, "secondary")
+            } else {
+                masque_config_path(options)
+            };
+            load_or_provision_masque(&path).await?
+        }
         Protocol::WireGuard => load_or_provision_warp(&warp_config_path(options)).await?,
         Protocol::WarpInWarp => {
             let primary_path = warp_config_path(options);
@@ -787,7 +812,7 @@ async fn select_peer(
     log::info!("[+] selected protocol: {}", protocol.label());
 
     match protocol {
-        Protocol::Masque => {
+        Protocol::Masque | Protocol::MasqueInMasque => {
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             crate::ffi::record_log("Finding a verified MASQUE gateway");
             let probe = prober::MasqueProbe {
@@ -1799,6 +1824,10 @@ async fn run_masque_tunnel(
         tls_curve_preset: options.tls_curve_preset,
         local_ipv4: parse_local_v4(&identity.ipv4),
         quiet: false,
+        // Plain single-hop MASQUE: full datagram budget, bait on. The bait
+        // only costs one packet per handshake and upstream enables it here too.
+        max_datagram: quic::MAX_DATAGRAM_SIZE,
+        version_bait: true,
     };
 
     let quic::Channels {
@@ -2837,6 +2866,636 @@ async fn run_warp_in_warp(
     outcome
 }
 
+/// One raised MASQUE hop: the userspace stack it owns (absent on the Android
+/// TUN path, where the innermost hop bridges the TUN directly), the tunnel
+/// task it rides on, and the guard that tears the background tasks down with
+/// it.
+///
+/// Upstream Aether v2.0.0 introduced this shape for masque-in-masque; ours
+/// carries the extra `local_task` our Android TUN bridge needs (upstream is
+/// CLI-only and never has a tun_fd).
+struct MasqueHop {
+    /// Userspace stack for this hop. `None` on the Android TUN path — that
+    /// path has no stack to serve, the TUN bridge is the data plane.
+    stack: Option<netstack::StackHandle>,
+    exit: TunnelExit,
+    _ctrl: tokio::sync::mpsc::Sender<quic::Control>,
+    /// The tun::bridge task, present only on the Android TUN path. Kept in the
+    /// struct so dropping the hop tears the bridge down with the tunnel.
+    _local: Option<TunnelExit>,
+    /// Forwarder and addr-bridge background tasks.
+    _guard: ForwarderGuard,
+}
+
+/// How long an inner MIM hop may take to come up. Tighter than the outer
+/// startup budget on purpose: the outer hop already proved the carrier path
+/// works, and the inner list holds several candidates — paying the full outer
+/// timeout on every dead one is what makes a failed MIM connect feel frozen.
+fn mim_inner_startup() -> std::time::Duration {
+    masque_startup_timeout().min(std::time::Duration::from_secs(12))
+}
+
+/// The datagram/MTU pair for the inner hop, given the outer hop's MTU.
+///
+/// The inner QUIC datagram travels *inside* the outer tunnel's payload, so it
+/// must fit: IP header + the inner datagram ≤ outer MTU. The MTU the inner
+/// netstack sees is then that datagram minus what the capsule framing itself
+/// costs. H2 (TCP carrier) has no datagram constraint, only the TCP MSS one.
+fn mim_inner_budget(outer_mtu: usize, inner_peer: SocketAddr, h2: bool) -> (usize, usize) {
+    if h2 {
+        let mtu = outer_mtu.saturating_sub(100).clamp(576, 1500);
+        return (quic::MAX_DATAGRAM_SIZE, mtu);
+    }
+
+    let headers = if inner_peer.is_ipv4() { 28 } else { 48 };
+    let datagram = outer_mtu
+        .saturating_sub(headers)
+        .clamp(quic::MIN_DATAGRAM_SIZE, quic::MAX_DATAGRAM_SIZE);
+    // What the capsule layer costs on top of the inner IP packet.
+    let capsule_overhead = quic::MAX_DATAGRAM_SIZE - TUNNEL_MTU;
+    let mtu = datagram
+        .saturating_sub(capsule_overhead)
+        .clamp(576, 1500);
+    (datagram, mtu)
+}
+
+/// Candidate inner edges for a given outer edge: same /24, different last
+/// octet, random order. The public MASQUE fleet answers on every address in
+/// its ranges, so a sibling of a working outer edge is the best guess for a
+/// second edge that is reachable *through* that first one.
+const MASQUE_INNER_PORT: u16 = 443;
+const MIM_INNER_TRIES: usize = 6;
+
+fn inner_masque_candidates(outer: SocketAddr, count: usize) -> Vec<SocketAddr> {
+    use rand::RngExt;
+
+    let mut rng = rand::rng();
+    let mut out: Vec<SocketAddr> = Vec::new();
+
+    match outer.ip() {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            let mut hosts: Vec<u8> = (1..=254u8).filter(|host| *host != octets[3]).collect();
+            for index in (1..hosts.len()).rev() {
+                let other = rng.random_range(0..=index);
+                hosts.swap(index, other);
+            }
+            for host in hosts.into_iter().take(count) {
+                let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], host);
+                out.push(SocketAddr::new(IpAddr::V4(ip), MASQUE_INNER_PORT));
+            }
+        }
+        IpAddr::V6(v6) => {
+            let mut segments = v6.segments();
+            let last = segments[7];
+            let mut seen: HashSet<u16> = HashSet::new();
+            while out.len() < count && seen.len() < count * 8 {
+                let candidate = rng.random_range(1..=u16::MAX);
+                if candidate == last || !seen.insert(candidate) {
+                    continue;
+                }
+                segments[7] = candidate;
+                out.push(SocketAddr::new(
+                    IpAddr::V6(std::net::Ipv6Addr::from(segments)),
+                    MASQUE_INNER_PORT,
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// A local TCP forwarder through the outer hop's netstack.
+///
+/// For the inner hop on the HTTP/2 carrier: masque_h2 speaks TCP, so the inner
+/// hop needs a local loopback endpoint whose bytes are carried through the
+/// outer stack to the real inner edge — the same trick spawn_udp_forwarder
+/// pulls for UDP.
+async fn spawn_tcp_forwarder(
+    outer: &netstack::StackHandle,
+    remote: SocketAddr,
+) -> Result<(SocketAddr, ForwarderGuard)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let local = listener.local_addr()?;
+    let stack = outer.clone();
+
+    let task = tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((sock, _)) = accepted else { break };
+                    let stack = stack.clone();
+                    clients.spawn(async move {
+                        match stack.open_tcp(remote).await {
+                            Ok(conn) => {
+                                let (sender, from_stack) = conn.into_split();
+                                relay_tcp_pair(sock, sender, from_stack).await;
+                            }
+                            Err(e) => log::warn!(
+                                "[-] the inner hop could not reach {remote} through the outer tunnel: {e}"
+                            ),
+                        }
+                    });
+                }
+                Some(_) = clients.join_next(), if !clients.is_empty() => {}
+            }
+        }
+    });
+
+    let mut guard = ForwarderGuard(Vec::new());
+    guard.0.push(task.abort_handle());
+    Ok((local, guard))
+}
+
+/// Bidirectional copy between a local TCP socket and a netstack TCP pair.
+///
+/// Inlined from upstream's socks::relay_tunneled call: our socks.rs keeps the
+/// relay unexported, and this is the same two-pump shape handle_client uses.
+async fn relay_tcp_pair(
+    mut sock: tokio::net::TcpStream,
+    sender: crate::netstack::TcpSender,
+    mut from_stack: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let (mut rd, mut wr) = sock.split();
+    let mut sender = sender;
+
+    let up = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = sender.close().await;
+                    break;
+                }
+                Ok(n) => {
+                    if sender.send(buf[..n].to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = sender.close().await;
+                    break;
+                }
+            }
+        }
+    });
+
+    while let Some(chunk) = from_stack.recv().await {
+        if wr.write_all(&chunk).await.is_err() {
+            break;
+        }
+    }
+    let _ = wr.shutdown().await;
+    up.abort();
+}
+
+/// Raise one MASQUE hop and wait for its startup handshake.
+///
+/// The single `establish_masque` of upstream, adapted to our two local shapes:
+/// with `tun_fd` the hop bridges the Android TUN directly (only the innermost
+/// hop ever does this), without it the hop runs a userspace stack and can
+/// serve SOCKS/HTTP clients.
+#[allow(clippy::too_many_arguments)]
+async fn establish_masque(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    ech: Option<Vec<u8>>,
+    mtu: usize,
+    datagram: usize,
+    version_bait: bool,
+    startup: std::time::Duration,
+    label: &'static str,
+    options: &StartOptions,
+    tun_fd: Option<i32>,
+) -> Result<MasqueHop> {
+    let h2 = masque_h2::enabled();
+    let (chans, internals) = quic::channels();
+    let quic::Channels {
+        outbound_tx,
+        inbound_rx,
+        ctrl_tx,
+    } = chans;
+
+    let mut guard = ForwarderGuard(Vec::new());
+
+    // Local data path: either the Android TUN (innermost hop only) or a
+    // userspace stack that can serve SOCKS and HTTP.
+    let (stack, local_task) = if let Some(fd) = tun_fd {
+        log::info!("[+] [{label}] Android TUN bridge active");
+        (
+            None,
+            Some(tokio::spawn(tun::bridge(
+                fd,
+                parse_local_v4(&identity.ipv4),
+                inbound_rx,
+                outbound_tx,
+            ))),
+        )
+    } else {
+        let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
+        (Some(stack), None)
+    };
+    if let Some(task) = &local_task {
+        guard.0.push(task.abort_handle());
+    }
+
+    // The edge can assign addresses mid-session (ADDRESS_ASSIGN capsules);
+    // on the TUN path they are already the TUN's own addresses, so the bridge
+    // only matters on the netstack path — mirror run_masque_tunnel.
+    let (addr_tx, mut addr_rx) = tokio::sync::mpsc::channel::<quic::AssignedAddr>(8);
+    let bridge_task = if let Some(bridge_stack) = stack.as_ref() {
+        let bridge_stack = bridge_stack.clone();
+        Some(tokio::spawn(async move {
+            while let Some(a) = addr_rx.recv().await {
+                let res = match a.ip {
+                    IpAddr::V4(v4) => bridge_stack.set_addrs(Some((v4, a.prefix)), None).await,
+                    IpAddr::V6(v6) => bridge_stack.set_addrs(None, Some((v6, a.prefix))).await,
+                };
+                if let Err(e) = res {
+                    log::warn!("[-] failed to sync edge address into netstack: {e}");
+                }
+            }
+        }))
+    } else {
+        // TUN path: drain so the sender never blocks the tunnel task.
+        Some(tokio::spawn(async move {
+            while addr_rx.recv().await.is_some() {}
+        }))
+    };
+    if let Some(task) = &bridge_task {
+        guard.0.push(task.abort_handle());
+    }
+
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let tunnel_task = if h2 {
+        let h2cfg = masque_h2::H2TunnelConfig {
+            peer: masque_h2::h2_peer(peer),
+            sni: consts::CONNECT_SNI.to_string(),
+            authority: quic::default_authority().to_string(),
+            path: quic::default_path().to_string(),
+            cert_pem: identity.cert_pem.clone(),
+            key_pem: identity.key_pem.clone(),
+            local_ipv4: parse_local_v4(&identity.ipv4),
+            quiet: false,
+            pin_endpoint: true,
+            expected_pins: consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
+        };
+        log::info!("[+] [{label}] MASQUE transport: HTTP/2 (TCP) to {} (inner mtu {mtu})", h2cfg.peer);
+        tokio::spawn(masque_h2::run(
+            h2cfg,
+            internals,
+            Some(addr_tx),
+            Some(ready_tx),
+        ))
+    } else {
+        let cfg = quic::TunnelConfig {
+            peer,
+            sni: consts::CONNECT_SNI.to_string(),
+            authority: quic::default_authority().to_string(),
+            path: quic::default_path().to_string(),
+            cert_pem: identity.cert_pem.clone(),
+            key_pem: identity.key_pem.clone(),
+            ech_config_list: ech,
+            noize: noize_config(options.masque_profile()),
+            tls_curve_preset: options.tls_curve_preset,
+            local_ipv4: parse_local_v4(&identity.ipv4),
+            quiet: false,
+            max_datagram: datagram,
+            version_bait,
+        };
+        log::info!(
+            "[+] [{label}] MASQUE transport: HTTP/3 (QUIC) to {peer} (mtu {mtu}, datagram {})",
+            cfg.datagram_budget()
+        );
+        tokio::spawn(quic::run(cfg, internals, Some(addr_tx), Some(ready_tx)))
+    };
+    guard.0.push(tunnel_task.abort_handle());
+
+    // Wait for the tunnel's own validation, inside a bounded budget.
+    match tokio::time::timeout(startup, ready_rx).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            let joined = tunnel_task.await;
+            let msg = match joined {
+                Ok(Ok(())) => format!("[{label}] tunnel exited before validation"),
+                Ok(Err(e)) => format!("[{label}] tunnel failed before validation: {e}"),
+                Err(e) => format!("[{label}] tunnel task join error: {e}"),
+            };
+            return Err(AetherError::Other(msg));
+        }
+        Err(_) => {
+            tunnel_task.abort();
+            let _ = tunnel_task.await;
+            return Err(AetherError::Other(format!(
+                "[{label}] tunnel startup timed out after {startup:?}"
+            )));
+        }
+    }
+
+    Ok(MasqueHop {
+        stack,
+        exit: tunnel_task,
+        _ctrl: ctrl_tx,
+        _local: local_task,
+        _guard: guard,
+    })
+}
+
+/// Raise both hops and serve the local listener through the inner one.
+async fn run_masque_in_masque(
+    primary: &account::Identity,
+    secondary: &account::Identity,
+    peer: SocketAddr,
+    inner_peers: &[SocketAddr],
+    ech: Option<Vec<u8>>,
+    listen: SocketAddr,
+    options: &StartOptions,
+) -> Result<()> {
+    let h2 = masque_h2::enabled();
+    let outer_mtu = TUNNEL_MTU;
+
+    log::info!("[*] establishing outer MASQUE tunnel to {peer}...");
+    crate::ffi::record_log("Masque-over-Masque: raising the outer hop");
+    let mut outer = establish_masque(
+        primary,
+        peer,
+        ech,
+        outer_mtu,
+        quic::MAX_DATAGRAM_SIZE,
+        true,
+        masque_startup_timeout(),
+        "outer",
+        options,
+        None,
+    )
+    .await?;
+
+    let mut chosen: Option<(SocketAddr, MasqueHop, ForwarderGuard)> = None;
+
+    for inner_peer in inner_peers
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.ip() != peer.ip())
+    {
+        let (inner_datagram, inner_mtu) = mim_inner_budget(outer_mtu, inner_peer, h2);
+
+        if !h2 && inner_datagram + 28 > outer_mtu {
+            log::warn!(
+                "[-] the outer link carries {outer_mtu} bytes, too little for an inner quic datagram"
+            );
+        }
+
+        // Bind the inner hop's dial through the OUTER hop's stack: a local
+        // forwarder whose bytes leave via the outer tunnel, so the inner edge
+        // sees the outer edge's exit address, never the device's carrier IP.
+        // The outer hop never owns the TUN, so its stack is always present.
+        let outer_stack = outer.stack.as_ref().ok_or_else(|| {
+            AetherError::Other("outer masque hop lost its userspace stack".into())
+        })?;
+        let (forwarder, forwarder_guard) = if h2 {
+            spawn_tcp_forwarder(outer_stack, inner_peer).await?
+        } else {
+            spawn_udp_forwarder(outer_stack, inner_peer).await?
+        };
+        log::info!(
+            "[*] trying inner MASQUE edge {inner_peer} through the outer tunnel via {forwarder}"
+        );
+        crate::ffi::record_log(format!(
+            "Masque-over-Masque: trying inner edge {inner_peer}"
+        ));
+
+        // The TUN fd belongs to the INNERMOST hop only: the user's traffic
+        // must enter at the inner edge's network, with the outer hop under it.
+        match establish_masque(
+            secondary,
+            forwarder,
+            None,
+            inner_mtu,
+            inner_datagram,
+            false,
+            mim_inner_startup(),
+            "inner",
+            options,
+            options.tun_fd,
+        )
+        .await
+        {
+            Ok(hop) => {
+                log::info!("[+] inner MASQUE tunnel established through {inner_peer}");
+                crate::ffi::record_log(format!(
+                    "Masque-over-Masque: inner edge {inner_peer} carries the tunnel"
+                ));
+                chosen = Some((inner_peer, hop, forwarder_guard));
+                break;
+            }
+            Err(e) => log::info!(
+                "[-] inner edge {inner_peer} does not serve masque from inside the tunnel: {e}"
+            ),
+        }
+    }
+
+    let Some((inner_peer, mut inner, _forwarder_guard)) = chosen else {
+        return Err(AetherError::Other(
+            "no inner masque edge answered through the outer tunnel".into(),
+        ));
+    };
+
+    // SOCKS: on the netstack path, bound where the caller asked. On the TUN
+    // path there is no listener to serve — the device's traffic arrives on the
+    // TUN itself.
+    let mut http_task = None;
+    let mut socks_task: Option<TunnelExit> = None;
+    if let Some(inner_stack) = inner.stack.as_ref() {
+        if options.tun_fd.is_none() {
+            http_task = spawn_http_proxy(inner_stack, options);
+            let socks_stack = inner_stack.clone();
+            socks_task = Some(tokio::spawn(async move {
+                log::info!("[+] socks5 server listening on {listen}");
+                socks::serve(listen, socks_stack).await
+            }));
+        }
+    }
+
+    crate::ffi::mark_ready();
+    log::info!(
+        "[+] masque-in-masque ready: {peer} (outer) and {inner_peer} (inner)"
+    );
+
+    #[derive(PartialEq)]
+    enum Winner {
+        Outer,
+        Inner,
+        Local,
+    }
+
+    // Whichever task dies first ends the session; the others are torn down
+    // below. The already-resolved handle inside the select! is NOT re-awaited
+    // (tokio panics on a polled-after-completion JoinHandle). With no SOCKS
+    // listener (the TUN path) that branch parks forever on purpose.
+    let (outcome, winner) = tokio::select! {
+        result = &mut outer.exit => (join_outcome("outer masque tunnel", result), Winner::Outer),
+        result = &mut inner.exit => (join_outcome("inner masque tunnel", result), Winner::Inner),
+        result = async {
+            match socks_task.as_mut() {
+                Some(task) => task.await,
+                None => std::future::pending::<Result<()>>().await,
+            }
+        } => (join_outcome("socks5 server", result), Winner::Local),
+    };
+
+    if let Some(task) = &http_task {
+        task.abort();
+    }
+    if let Some(task) = socks_task.as_mut() {
+        if winner != Winner::Local {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    if winner != Winner::Outer {
+        outer.exit.abort();
+        let _ = (&mut outer.exit).await;
+    }
+    if winner != Winner::Inner {
+        inner.exit.abort();
+        let _ = (&mut inner.exit).await;
+    }
+
+    outcome
+}
+
+/// Where MIM remembers its outer edge between runs, mirroring GOOL's cache.
+fn mim_lastconn_path(config_path: &str) -> String {
+    derive_sibling_path(config_path, "mim-lastconn")
+}
+
+/// The MIM connect loop, shaped after run_gool: cached outer edge first
+/// (verified before reuse), fresh scan on failure, bounded inner-candidate
+/// list through the outer tunnel, reconnect on drop.
+async fn run_mim(
+    primary: account::Identity,
+    secondary: account::Identity,
+    ech: Option<Vec<u8>>,
+    listen: SocketAddr,
+    lastconn_path: String,
+    options: &StartOptions,
+) -> Result<()> {
+    let mut last_peer: Option<SocketAddr> = None;
+    let mut consecutive_fails: u32 = 0;
+    const MAX_CONSECUTIVE_FAILS: u32 = 2;
+
+    // Same rationale as GOOL's cached peer: the outer edge that worked on
+    // this device last time is better evidence than a fresh scan, and the
+    // full scan cost is the one thing this protocol cannot afford twice.
+    let mut cached_peer = if options.forced_peer.is_none() {
+        load_cached_mim_peer(&lastconn_path, &primary, options).await
+    } else {
+        None
+    };
+
+    loop {
+        let peer = if consecutive_fails < MAX_CONSECUTIVE_FAILS {
+            last_peer.or(cached_peer)
+        } else {
+            if let Some(p) = last_peer {
+                log::warn!(
+                    "[-] outer edge {p} failed {consecutive_fails} times in a row; rescanning"
+                );
+            }
+            cached_peer = None;
+            None
+        };
+
+        let peer = match peer {
+            Some(p) => p,
+            None => {
+                let p = match select_peer(&primary, Protocol::Masque, options).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!(
+                            "[-] no usable outer MASQUE gateway found: {e}; rescanning shortly"
+                        );
+                        tokio::time::sleep(masque_reconnect_delay()).await;
+                        continue;
+                    }
+                };
+                consecutive_fails = 0;
+                p
+            }
+        };
+
+        log::info!("[+] using cloudflare edge {peer} (outer)");
+        if options.forced_peer.is_none() {
+            lastconn::save(&lastconn_path, &peer.to_string(), options.masque_profile());
+        }
+        last_peer = Some(peer);
+
+        let candidates = inner_masque_candidates(peer, MIM_INNER_TRIES);
+
+        if candidates.is_empty() {
+            return Err(AetherError::Other(
+                "no second masque edge is known for the inner hop".into(),
+            ));
+        }
+
+        match run_masque_in_masque(
+            &primary,
+            &secondary,
+            peer,
+            &candidates,
+            ech.clone(),
+            listen,
+            options,
+        )
+        .await
+        {
+            Ok(()) => log::warn!("[-] masque-in-masque tunnel closed; reconnecting"),
+            Err(e) => log::warn!("[-] masque-in-masque tunnel ended: {e}; reconnecting"),
+        }
+        consecutive_fails += 1;
+
+        tokio::time::sleep(masque_reconnect_delay()).await;
+    }
+}
+
+/// Read back the last working outer MIM edge and re-verify it, exactly as
+/// [load_cached_gool_peer] does for GOOL: an address that no longer answers
+/// must not be handed straight to run_masque_in_masque.
+async fn load_cached_mim_peer(
+    lastconn_path: &str,
+    primary: &account::Identity,
+    options: &StartOptions,
+) -> Option<SocketAddr> {
+    let cached = lastconn::load(lastconn_path)?;
+    let peer = cached.peer.parse::<SocketAddr>().ok()?;
+
+    if !want_quick_reconnect(&cached).await {
+        return None;
+    }
+
+    log::info!("[*] verifying cached outer MASQUE edge {peer} before reuse");
+    crate::ffi::record_log(format!("Checking last working gateway {peer}"));
+
+    match quick_verify_masque_peer(primary, peer, options).await {
+        Ok(()) => {
+            log::info!("[+] cached outer edge {peer} still works; skipping scan");
+            crate::ffi::record_log(format!("Reusing gateway {peer} — scan skipped"));
+            Some(peer)
+        }
+        Err(e) => {
+            log::warn!("[-] cached outer edge {peer} no longer works ({e}); scanning fresh");
+            crate::ffi::record_log("Last gateway is gone; scanning for a new one");
+            None
+        }
+    }
+}
+
 fn join_outcome(
     what: &str,
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
@@ -2955,6 +3614,7 @@ async fn select_protocol(base: &str) -> Protocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Masque,
+    MasqueInMasque,
     WireGuard,
     WarpInWarp,
     Psiphon,
@@ -2963,6 +3623,7 @@ pub enum Protocol {
 impl Protocol {
     pub fn parse(s: &str) -> Protocol {
         match s.trim().to_lowercase().as_str() {
+            "mim" | "m2" | "masque-in-masque" | "masqueinmasque" => Protocol::MasqueInMasque,
             "wg" | "wireguard" => Protocol::WireGuard,
             "gool" | "wiw" | "warp-in-warp" | "warpinwarp" => Protocol::WarpInWarp,
             "psiphon" => Protocol::Psiphon,
@@ -2973,6 +3634,7 @@ impl Protocol {
     pub fn label(&self) -> &'static str {
         match self {
             Protocol::Masque => "MASQUE",
+            Protocol::MasqueInMasque => "MASQUE-in-MASQUE",
             Protocol::WireGuard => "WireGuard",
             Protocol::WarpInWarp => "WARP-in-WARP (gool)",
             Protocol::Psiphon => "Psiphon",

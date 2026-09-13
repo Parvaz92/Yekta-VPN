@@ -57,6 +57,30 @@ object CoreConfig {
      */
     const val PLAIN_WORKING_TRANSPORT_PREF = "plain_working_transport"
 
+    /**
+     * Whether the next MASQUE connect chains a second MASQUE hop inside the
+     * first (upstream Aether v2.0.0 "masque-in-masque").
+     *
+     * OFF by default, deliberately unlike Psiphon/Tor over WARP: the chain is
+     * what makes those two reachable at all, while double MASQUE is a slower
+     * variant of a transport that usually works single-hop — so the user opts
+     * in on the networks where one layer is not enough instead of paying two
+     * handshakes everywhere by default.
+     *
+     * Read by [json] itself rather than by the callers, so every entry point
+     * (the dial, the tile, quick reconnect) picks it up without each one
+     * having to remember to ask.
+     */
+    const val MIM_ARMED_PREF = "mim_armed"
+    const val MIM_ARMED_DEFAULT = false
+
+    /** The core's protocol name for masque-over-masque. */
+    const val MIM_PROTOCOL = "mim"
+
+    /** Whether the user armed masque-over-masque. */
+    fun mimArmed(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean(MIM_ARMED_PREF, MIM_ARMED_DEFAULT)
 
     fun json(context: Context, protocol: String? = null): String =
         json(context, protocol, listenOverride = null)
@@ -85,7 +109,21 @@ object CoreConfig {
             // anything, i.e. on a first connect — and WireGuard now leads the rail,
             // so a disagreement here would build a MASQUE config under a UI showing
             // WireGuard selected.
-            put("protocol", protocol ?: text("default_protocol", "wireguard"))
+            // Masque-over-masque: when the user armed the second hop, a MASQUE
+            // connect becomes a MIM connect. Rewritten here rather than by the
+            // callers so the tile, the dial and a quick reconnect cannot miss
+            // it — the same reason the chain marker is passed as a protocol by
+            // the callers, but this one is a pure function of the MASQUE
+            // selection, so it belongs with the selection.
+            val effectiveProtocol = if (
+                (protocol ?: text("default_protocol", "wireguard")) == "masque" &&
+                mimArmed(context)
+            ) {
+                MIM_PROTOCOL
+            } else {
+                protocol ?: text("default_protocol", "wireguard")
+            }
+            put("protocol", effectiveProtocol)
             // Where the core's own SOCKS listener goes.
             //
             // Three cases, and the first two are why this is not a constant any more:
