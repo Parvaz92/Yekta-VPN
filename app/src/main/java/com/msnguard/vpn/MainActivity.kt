@@ -61,6 +61,8 @@ class MainActivity : Activity() {
     private lateinit var connectionDetail: TextView
     private lateinit var chipLatency: TextView
     private lateinit var chipProtocol: TextView
+    private lateinit var chipAiMode: TextView
+    private var chipAiSeparator: TextView? = null
     private lateinit var tileDown: MetricTile
     private lateinit var tileUp: MetricTile
     private lateinit var tileSpeed: MetricTile
@@ -605,8 +607,36 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             letterSpacing = spacing(0.08f)
         }
+        // AI MODE: a one-tap shortcut for the Exit-country preference, not a
+        // separate engine. ON = the preferred exit is set (any country picked in
+        // Settings counts as ON — GB is the default only because Taraneh's field
+        // report measured UK edges opening the sanctioned sites); OFF = the
+        // preference is auto, i.e. whichever Cloudflare edge answers first.
+        // It lives in the chip line so the home screen gains no height: the row
+        // is centered and wrap_content, and the pill is WRAP_CONTENT itself.
+        chipAiMode = label(Strings.t("AI MODE"), 12f, MUTED, TypefaceStyle.MEDIUM).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = spacing(0.08f)
+            // Toggle like a card, not a chip: haptic, guard against focus-taps
+            // while locked (same rule as the chain card), and never flip when
+            // the transport does not apply — visibility hides it then anyway,
+            // but a focus-based tap can still arrive on TV/keyboard devices.
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                // Same lock contract as the transport rail: while connected the
+                // chip is dimmed and isEnabled=false swallows the tap silently —
+                // the pref only takes effect next connect anyway.
+                if (!isEnabled || !aiChipApplies()) return@setOnClickListener
+                performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                setAiMode(!aiModeOn())
+            }
+        }
         selectedProtocol = savedProtocol()
         chipProtocol.text = selectedProtocol.label.uppercase()
+        // Painted now that the SAVED protocol is known: chip visibility depends
+        // on the real selection, and the field default (WireGuard) may differ.
+        renderAiChip()
         // One accent per tile, as in the approved mock: download mint, upload
         // violet, speed amber. They were all `primary` before, which is why every
         // sparkline looked identical.
@@ -1407,6 +1437,16 @@ class MainActivity : Activity() {
             addView(chipLatency)
             addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)))
             addView(chipProtocol)
+            // The AI MODE pill rides the same centered line, one separator
+            // away. GONE (not INVISIBLE) when the transport does not apply, so
+            // the row re-centers and never keeps a hole — same rule as the slot
+            // cards below the rail. The separator follows the chip's visibility
+            // in renderAiChip(), so a GONE chip never leaves an orphan dot.
+            addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)).apply {
+                chipAiSeparator = this
+                visibility = View.GONE
+            })
+            addView(chipAiMode)
         }
         addView(chipLine, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3531,6 +3571,23 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(26) })
         addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
         addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
+        // Preferred exit country and custom DNS: both are WARP-transport
+        // knobs, so they live under ROUTING with the endpoint controls. The
+        // country row reads like Psiphon's "Preferred country" on purpose —
+        // to the user it is the same question, answered by a different engine.
+        lateinit var exitCountryRow: OrbitSettingsRow
+        exitCountryRow = addControl(Strings.t("Exit country"), exitCountryLabel()) {
+            chooseExitCountry {
+                exitCountryRow.setValue(exitCountryLabel())
+                // The AI MODE chip reads the same preference — repaint it so the
+                // pill cannot claim OFF while the row just set Germany.
+                renderAiChip()
+            }
+        }
+        lateinit var dnsRow: OrbitSettingsRow
+        dnsRow = addControl(Strings.t("Custom DNS"), customDnsLabel()) {
+            editCustomDns { dnsRow.setValue(customDnsLabel()) }
+        }
         content.addView(sectionLabel(Strings.t("TROUBLESHOOTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
@@ -4445,6 +4502,160 @@ class MainActivity : Activity() {
             }
         }
     )
+
+    /**
+     * Row value for the exit-country preference: the flag+name, or Automatic.
+     */
+    private fun exitCountryLabel(): String {
+        val stored = preferences()
+            .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
+            ?.trim()?.uppercase(Locale.US).orEmpty()
+        if (stored.isEmpty() || stored == MsnGuardVpnService.EXIT_COUNTRY_AUTO) return Strings.t("Automatic")
+        return PsiphonRegions.label(stored)
+    }
+
+    /**
+     * Picker for the WARP transports' preferred exit country.
+     *
+     * Same shape as Psiphon's [chooseEgressRegion] and for the same reason:
+     * the wording "tries this country first, falls back to everything" is the
+     * honest description of a preference that must never wedge a tunnel.
+     * The list is the shared country table — Cloudflare's anycast egress
+     * spans it — with the two-letter codes the service compares against
+     * geolocation answers.
+     */
+    private fun chooseExitCountry(after: (() -> Unit)? = null) {
+        val options = listOf(MsnGuardVpnService.EXIT_COUNTRY_AUTO) + PsiphonRegions.options(this)
+        showChoiceSheet(
+            title = Strings.t("Exit country"),
+            subtitle = Strings.t("Tries to come out in this country first. If it will not connect, any exit is used."),
+            options = options,
+            selected = preferences()
+                .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
+                ?.trim()?.uppercase(Locale.US),
+            label = { code ->
+                if (code == MsnGuardVpnService.EXIT_COUNTRY_AUTO) Strings.t("Automatic")
+                else PsiphonRegions.label(code)
+            },
+            description = { code ->
+                if (code == MsnGuardVpnService.EXIT_COUNTRY_AUTO) {
+                    Strings.t("Fastest — whichever Cloudflare edge answers first")
+                } else {
+                    Strings.t("Sanctioned sites often open on some countries' exits and not others")
+                }
+            },
+            scrollable = true,
+        ) { chosen ->
+            preferences().edit().putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, chosen).apply()
+            ConnectionLog.record(
+                if (chosen == MsnGuardVpnService.EXIT_COUNTRY_AUTO) {
+                    Strings.t("Preferred exit country cleared — the edge chooses")
+                } else {
+                    "Preferred exit country set to ${PsiphonRegions.name(chosen)} ($chosen)"
+                }
+            )
+            after?.invoke()
+        }
+    }
+
+    /** Row value for the custom-DNS box: the servers, or Automatic. */
+    private fun customDnsLabel(): String {
+        val stored = preferences().getString(CUSTOM_DNS, "")?.trim().orEmpty()
+        return stored.ifEmpty { Strings.t("Automatic") }
+    }
+
+    /**
+     * Editor for the resolvers the tunnel's own DNS answers from.
+     *
+     * The plumbing is entirely existing: CoreConfig.json already forwards
+     * `dns_servers` to the core, which uses it for every name it resolves
+     * inside the tunnel (socks.rs `resolver_addresses`), and applyDns puts
+     * the same list on the TUN. This dialog is only the tap that fills it.
+     *
+     * Plain UDP is what the core speaks; DoT/DoH need a TLS DNS client in
+     * the Rust core and are NOT offered here — the hint says what works
+     * rather than advertising an encryption the tunnel does not perform.
+     */
+    private fun editCustomDns(after: (() -> Unit)? = null) {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = EditText(this).apply {
+            setText(preferences().getString(CUSTOM_DNS, "").orEmpty())
+            hint = Strings.t("1.1.1.1, 8.8.8.8")
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            setPadding(dp(18), 0, dp(18), 0)
+            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("Custom DNS"), 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(
+            Strings.t("Resolvers the tunnel answers DNS from, comma-separated. Plain UDP; leave blank for automatic."),
+            14f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        buttons.addView(createSettingsButton(Strings.t("Clear")) {
+            preferences().edit().remove(CUSTOM_DNS).apply()
+            field.setText("")
+            after?.invoke()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(Strings.t("Save")) {
+            val raw = field.text.toString().trim()
+            // Each entry must be an IP, or an IP:port — the same shape the core
+            // parses in resolver_addresses(). Reject anything else rather
+            // than silently dropping it at connect time.
+            val entryOk = Regex("^(?:\\d{1,3}(?:\\.\\d{1,3}){3})(?::([1-9]\\d{0,4}))?$")
+            val entries = raw.split(',', ';', ' ', '\n')
+                .map(String::trim).filter(String::isNotEmpty).distinct()
+            var bad: String? = null
+            for (entry in entries) {
+                val match = entryOk.matchEntire(entry) ?: run { bad = entry; break }
+                // Group 1 is the optional port; the IP is the whole match minus it.
+                val port = match.groupValues[1].ifBlank { entry.substringAfter(':', "") }.toIntOrNull()
+                val ip = if (entry.contains(':')) entry.substringBefore(':') else entry
+                if (ip.split('.').map { it.toIntOrNull() ?: 999 }.any { it !in 0..255 }) bad = entry
+                if (port != null && port !in 1..65535) bad = entry
+                if (bad != null) break
+            }
+            if (bad != null) {
+                field.error = Strings.tf("Not an IP address: %s", bad)
+                return@createSettingsButton
+            }
+            preferences().edit().apply {
+                if (entries.isEmpty()) remove(CUSTOM_DNS) else putString(CUSTOM_DNS, entries.joinToString(", "))
+            }.apply()
+            ConnectionLog.record(
+                if (entries.isEmpty()) Strings.t("Custom DNS cleared — the default resolvers answer")
+                else "Custom DNS set: ${entries.joinToString(", ")}"
+            )
+            after?.invoke()
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
 
     private fun editManualEndpoint() {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
@@ -6146,6 +6357,10 @@ class MainActivity : Activity() {
         }
         renderSmartSplitCard()
         renderMimCard()
+        // The AI MODE chip rides the chip line, but the same repaint decides
+        // transport applicability and the connected lock, so it is painted here
+        // too — one place, the same rules as the cards.
+        renderAiChip()
         // The settings page carries the same switch, so keep it in step whenever the
         // card is repainted — arming from the home screen must not leave a stale
         // "off" behind in settings.
@@ -6440,6 +6655,73 @@ class MainActivity : Activity() {
     ).joinToString(" · ")
 
     private fun preferences() = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+
+    /**
+     * Whether the AI Mode shortcut can act on the selected transport.
+     *
+     * The Exit-country engine only applies to the three WARP transports
+     * (MASQUE/WireGuard/WoW): Psiphon, Tor and SHARD pick their exit through
+     * their own engines, which already have country preferences of their own
+     * (EGRESS_REGION_PREF, tor exit nodes, SHARD node selection). Hiding the
+     * chip on those rather than showing it disabled keeps the chip line clean
+     * — the same GONE-not-disabled rule the slot cards follow.
+     */
+    private fun aiChipApplies(): Boolean = when (selectedProtocol) {
+        Protocol.MASQUE, Protocol.WIREGUARD, Protocol.WARP_IN_WARP -> true
+        else -> false
+    }
+
+    /** Repaints the AI MODE chip: shown only on the WARP transports. */
+    private fun renderAiChip() {
+        if (!::chipAiMode.isInitialized) return
+        val applies = aiChipApplies()
+        chipAiMode.visibility = if (applies) View.VISIBLE else View.GONE
+        chipAiSeparator?.visibility = if (applies) View.VISIBLE else View.GONE
+        if (!applies) return
+        val on = aiModeOn()
+        val lit = on && modeControlsEnabled
+        val fill = if (lit) Sculpt.blend(palette.surface, palette.violet, 0.16f)
+        else Sculpt.blend(palette.surface, palette.ink, 0.02f)
+        chipAiMode.background = Sculpt.sculptedBackground(
+            resources.displayMetrics.density,
+            fill, 999,
+            Sculpt.withAlpha(if (lit) palette.violet else palette.ink, if (lit) 0.4f else 0.10f),
+        )
+        chipAiMode.setPadding(dp(10), dp(4), dp(10), dp(4))
+        chipAiMode.setTextColor(if (lit) palette.violetText else palette.faint)
+        // isEnabled=false on the view both swallows the tap and dims it via
+        // the alpha below — the rail's exact lock contract.
+        chipAiMode.isEnabled = modeControlsEnabled
+        chipAiMode.alpha = if (modeControlsEnabled) 1f else 0.45f
+        chipAiMode.contentDescription = when {
+            !modeControlsEnabled -> "AI Mode قفل است تا اتصال قطع شود"
+            on -> "AI Mode روشن است؛ آی‌پی خروجی انگلیس می‌شود"
+            else -> "AI Mode خاموش است؛ سریع‌ترین مسیر انتخاب می‌شود"
+        }
+    }
+
+    /** The AI Mode preference: ON = GB preferred, OFF = auto (fastest). */
+    private fun aiModeOn(): Boolean =
+        preferences().getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
+            ?.trim()?.uppercase(Locale.US) !in listOf(
+                MsnGuardVpnService.EXIT_COUNTRY_AUTO, "",
+            )
+
+    private fun setAiMode(on: Boolean) {
+        val target = if (on) "GB" else MsnGuardVpnService.EXIT_COUNTRY_AUTO
+        preferences().edit().putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, target).apply()
+        ConnectionLog.record(
+            if (on) {
+                "AI Mode armed — exit country pinned to United Kingdom (GB)"
+            } else {
+                Strings.t("Preferred exit country cleared — the edge chooses")
+            },
+        )
+        renderAiChip()
+        // The settings page can be open behind the dial; its Exit-country row
+        // must not keep a stale value after the chip changed the same pref.
+        refreshPsiphonRows()
+    }
 
     private fun obfuscationProfile(): ObfuscationProfile = preferences()
         .getString(OBFUSCATION_PROFILE, ObfuscationProfile.BALANCED.coreName)
@@ -6986,6 +7268,7 @@ class MainActivity : Activity() {
         const val OBFUSCATION_I1 = "obfuscation_i1"
         const val OBFUSCATION_I2 = "obfuscation_i2"
         const val MANUAL_ENDPOINT = "manual_endpoint"
+        const val CUSTOM_DNS = "dns_servers"
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"

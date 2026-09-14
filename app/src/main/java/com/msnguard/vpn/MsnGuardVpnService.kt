@@ -205,6 +205,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private var plainTransportRecorded = false
     private var storedConfig: String? = null
+
+    /**
+     * [storedConfig] without the exit pin, kept so retries can drop a dead pin.
+     *
+     * storedConfig carries the pin because that config is the one actually
+     * being tunneled. But every retry that reuses it re-injects the same peer,
+     * so a pin whose edge died would be forced on every rotation until the
+     * budget ran out — a loop the pin-clear paths alone cannot break, because
+     * they clear the FILE, not the config already in memory. This copy is the
+     * un-pinned original each retry falls back to after a pin is cleared.
+     */
+    private var unpinnedStoredConfig: String? = null
     private var currentProtocol = "Tunnel"
 
     /**
@@ -358,6 +370,46 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     /** The pending auto-reconnect, so a user action can cancel it. */
     private var reconnectTask: java.util.concurrent.ScheduledFuture<*>? = null
+
+    // ── Preferred exit country (WARP transports) ─────────────────────────────
+    //
+    // All three are latched per session like proxyMode is, not read live: the
+    // rotation must not change its target mid-flight because the user opened
+    // settings on a connected tunnel, and the budget must not survive into a
+    // fresh user-initiated connect.
+
+    /** Latched [EXIT_COUNTRY_PREF] for the running session, or null. */
+    @Volatile
+    private var sessionExitCountry: String? = null
+
+    /** Rotations left in this session's chase of [sessionExitCountry]. */
+    @Volatile
+    private var exitRotationsLeft = 0
+
+    /**
+     * Whether the running session was started with the pinned preferred
+     * endpoint (forced_peer injected from [EXIT_PIN_FILE]).
+     *
+     * Only meaningful for the failure path: a pinned connect that dies must
+     * delete the pin BEFORE the auto-reconnect retries, or the retry re-pins
+     * the same dead edge and the loop never escapes. Unpinned sessions never
+     * touch the pin, so their failures leave it alone.
+     */
+    @Volatile
+    private var startedWithExitPin = false
+
+    /** Guards against a second exit-country evaluation in one session. */
+    @Volatile
+    private var exitCountryEvaluated = false
+
+    /**
+     * Set by the rotation itself, consumed by the [startTunnel] it causes.
+     *
+     * Distinguishes "startTunnel because the exit was wrong" from
+     * "startTunnel because the user asked": the first inherits the remaining
+     * rotation budget, the second resets it.
+     */
+    private val exitRotationPending = AtomicBoolean(false)
 
     /** NetworkCallback to detect connectivity restoration and trigger immediate retry. */
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
@@ -749,6 +801,60 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         /** Preference key for the auto-reconnect toggle. */
         const val AUTO_RECONNECT_PREF = "auto_reconnect"
+
+        /**
+         * Preferred exit COUNTRY for the WARP transports (MASQUE/WireGuard/WoW),
+         * as a two-letter ISO code, or [EXIT_COUNTRY_AUTO].
+         *
+         * A preference, not a constraint — the Psiphon `EGRESS_REGION_PREF`
+         * semantics, applied where the exit is a Cloudflare anycast address
+         * nobody can pin from the config alone. The service enforces it after
+         * the fact: it geolocates the address the core measured and rotates
+         * gateways until the exit lands in the wanted country, or the rotation
+         * budget ([EXIT_ROTATION_BUDGET]) is spent — after which whatever exit
+         * answered keeps the session, because a working tunnel beats a perfect
+         * one. That is the field-tested behaviour Taraneh described: UK egress
+         * ranges open the sanctioned sites, other ranges do not, and the exits
+         * handed out vary per connect.
+         *
+         * NOT read by Psiphon/Tor/SHARD: their exits are chosen by their own
+         * engines, which already have country preferences of their own
+         * (EGRESS_REGION_PREF, tor exit nodes, SHARD node selection).
+         */
+        const val EXIT_COUNTRY_PREF = "warp_exit_country"
+
+        /** Value of [EXIT_COUNTRY_PREF] meaning "whichever edge answers first". */
+        const val EXIT_COUNTRY_AUTO = "auto"
+
+        /**
+         * How many endpoint rotations one user-initiated connect may spend
+         * chasing the preferred exit country.
+         *
+         * Bounded because each rotation is a full reconnect (scan included when
+         * the cache was the wrong exit's) on a metered phone battery, and the
+         * anycast mapping is a lottery: an unbounded loop could spend the whole
+         * evening rescanning. Three is the field number — Taraneh's report has
+         * the UK edge appearing within a handful of reconnects on her carrier —
+         * and on budget exhaustion the session keeps the exit it has.
+         */
+        const val EXIT_ROTATION_BUDGET = 3
+
+        /**
+         * Where the pin for a verified preferred-country endpoint lives.
+         *
+         * Written when a tunnel's measured exit country MATCHES the preference:
+         * the working gateway (which the core just saved into its own lastconn
+         * file, per transport) is remembered so the NEXT connect tries that
+         * endpoint first — as `forced_peer` — instead of gambling on anycast
+         * again. Deleted the moment a pinned connect fails, so a dead edge
+         * cannot wedge the app: the retry then proceeds unpinned, which is the
+         * "start with the tested English endpoint, and if it fails continue
+         * with the rest" ordering.
+         *
+         * JSON, filesDir, never synced: it is a cache of one carrier's good
+         * edge, worthless on another network.
+         */
+        private const val EXIT_PIN_FILE = "preferred-exit-endpoint.json"
 
         /**
          * Auto-reconnect is ON by default.
@@ -1961,84 +2067,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val config = storedConfig
                 if (config != null && connected.get()) {
                     ConnectionLog.record("Quick reconnect requested")
-                    // Latched BEFORE the teardown, because the teardown is what races
-                    // us. On MASQUE/WireGuard/WoW the core runs inside worker.execute
-                    // and its `finally` ends the service; on every path a failure
-                    // lands in failAndStop, which does the same. Both now read this
-                    // flag and leave the service alive for the restart below.
-                    reconnectRequested.set(true)
-                    // NOT userInitiatedStop: that latch means "stay off", and it
-                    // would make the restart's own auto-reconnect refuse to fire.
-                    stopTunnel(notify = false, teardownService = false)
-                    // Off the worker on purpose. `worker` is single-threaded and the
-                    // native core occupies it for the whole session, so a task queued
-                    // here would not run until the core had exited — which is the
-                    // very thing we are waiting for, and on the SOCKS-mode paths it
-                    // can be seconds. ladderScheduler is idle while connected.
-                    ladderScheduler.schedule({
-                        try {
-                            // Two things have to be true before the restart can run,
-                            // and they finish at different moments:
-                            //
-                            //  * the core has to be out of the way, or
-                            //    NativeCore.start() returns "already running";
-                            //  * `connected` has to be back to false, because
-                            //    startTunnel() opens with
-                            //    `connected.compareAndSet(false, true)` and RETURNS
-                            //    SILENTLY if it loses. On the native paths that flag
-                            //    is cleared in the core's `finally`, which runs a
-                            //    moment AFTER isRunning() goes false — waiting only on
-                            //    the core would race it, the restart would no-op, and
-                            //    the notification's Reconnect would read as Disconnect
-                            //    all over again. On the SOCKS-front paths stopTunnel
-                            //    already cleared it inline, so this costs nothing.
-                            var waited = 0
-                            while ((NativeCore.isRunning() || connected.get()) &&
-                                waited < RECONNECT_CORE_WAIT_MS
-                            ) {
-                                Thread.sleep(RECONNECT_POLL_MS)
-                                waited += RECONNECT_POLL_MS.toInt()
-                            }
-                            if (NativeCore.isRunning() || connected.get()) {
-                                // Restarting anyway is not a retry, it is a
-                                // wrong-reason failure: raiseOuterLeg refuses a rung
-                                // while the core is up, and startTunnel's CAS refuses
-                                // the whole start while the old session still holds
-                                // `connected` — either way the user would be left with
-                                // a live notification over a dead tunnel. Report it.
-                                ConnectionLog.record(
-                                    "Quick reconnect: the previous session was still shutting down " +
-                                        "after ${RECONNECT_CORE_WAIT_MS / 1000}s; not restarting"
-                                )
-                                reconnectRequested.set(false)
-                                sendStatus(STATUS_FAILED, Strings.t("Reconnect timed out — tap the dial to connect"))
-                                return@schedule
-                            }
-                            // The user can press Disconnect inside the settle window,
-                            // and that latch means "stay off" — startAsForeground would
-                            // otherwise land on a service that is ending.
-                            if (userInitiatedStop.get()) {
-                                ConnectionLog.record(
-                                    "Quick reconnect abandoned: the user disconnected while waiting"
-                                )
-                                reconnectRequested.set(false)
-                                return@schedule
-                            }
-                            reconnectAttempts = 0
-                            startTunnel(config)
-                        } catch (e: Exception) {
-                            ConnectionLog.record("Quick reconnect failed: ${e.message}")
-                            reconnectRequested.set(false)
-                        }
-                        // Deliberately no `finally` clear. isRunning() going false and
-                        // the core's Kotlin `finally` block running are not the same
-                        // instant, and that block is the one reader that must still see
-                        // the latch — clearing it from this thread could win the race
-                        // and hand the old session a stopSelf() under the restart.
-                        // Every reader consumes the latch itself instead, and
-                        // sendStatus clears it on CONNECTED, so it cannot outlive the
-                        // reconnect it belongs to.
-                    }, RECONNECT_SETTLE_MS, TimeUnit.MILLISECONDS)
+                    requestQuickReconnect("user")
                 }
             }
             ACTION_NOTIFICATION_HEALTH -> {
@@ -2200,6 +2229,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // The country is resolved by the UI from this address; the
                         // core cannot tell one from inside the tunnel.
                         sendExitIp(ip)
+                        // And by the exit-country preference, which must fire even
+                        // with no activity alive — the rotation is the service's
+                        // job, not the card's.
+                        evaluateExitCountry(ip)
                         repostNotification()
                     }
                 }
@@ -3202,6 +3235,55 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
 
     /**
+     * Tear the tunnel down and bring it back without a VPN consent dialog.
+     *
+     * The body of the notification's Reconnect action, extracted so the exit
+     * rotation can use the identical machinery: latch the restart, tear down
+     * without ending the service, then wait off the worker for the core and
+     * the `connected` flag to both let go before starting again. The original
+     * comment block — why the latch is set before the teardown, why the wait
+     * cannot live on `worker`, why there is no finally-clear of the latch —
+     * still applies to every line of it and is not repeated here.
+     */
+    private fun requestQuickReconnect(reason: String) {
+        val config = storedConfig ?: return
+        // Latched BEFORE the teardown, because the teardown is what races us.
+        reconnectRequested.set(true)
+        // NOT userInitiatedStop: that latch means "stay off".
+        stopTunnel(notify = false, teardownService = false)
+        ladderScheduler.schedule({
+            try {
+                var waited = 0
+                while ((NativeCore.isRunning() || connected.get()) &&
+                    waited < RECONNECT_CORE_WAIT_MS
+                ) {
+                    Thread.sleep(RECONNECT_POLL_MS)
+                    waited += RECONNECT_POLL_MS.toInt()
+                }
+                if (NativeCore.isRunning() || connected.get()) {
+                    ConnectionLog.record(
+                        "Quick reconnect ($reason): the previous session was still shutting down " +
+                            "after ${RECONNECT_CORE_WAIT_MS / 1000}s; not restarting"
+                    )
+                    reconnectRequested.set(false)
+                    sendStatus(STATUS_FAILED, Strings.t("Reconnect timed out — tap the dial to connect"))
+                    return@schedule
+                }
+                if (userInitiatedStop.get()) {
+                    ConnectionLog.record("Quick reconnect ($reason) abandoned: the user disconnected")
+                    reconnectRequested.set(false)
+                    return@schedule
+                }
+                reconnectAttempts = 0
+                startTunnel(config)
+            } catch (e: Exception) {
+                ConnectionLog.record("Quick reconnect ($reason) failed: ${e.message}")
+                reconnectRequested.set(false)
+            }
+        }, RECONNECT_SETTLE_MS, TimeUnit.MILLISECONDS)
+    }
+
+    /**
      * Re-dial after a backoff, until it works or the user intervenes.
      *
      * Backoff is 5s, 15s, 30s, 60s, then 120s forever. Capped rather than
@@ -3632,9 +3714,65 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         reconnectTask?.cancel(false)
         reconnectTask = null
         nativeExitWasUnexpected = false
-        storedConfig = config
+        // The protocol of THIS config, parsed before anything consults it:
+        // exitPin() compares the saved pin against it, and a stale value from
+        // the previous session would let a pin saved for one transport be
+        // injected into another.
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
+        // Exit-country preference: latched for the whole session, like
+        // proxyMode below. The rotation must not change target mid-flight, and
+        // the budget resets here so a quick reconnect (which passes straight
+        // through startTunnel) keeps its remaining rotations while a fresh
+        // user connect gets all of them back.
+        val wantedCountry = getSharedPreferences("settings", MODE_PRIVATE)
+            .getString(EXIT_COUNTRY_PREF, EXIT_COUNTRY_AUTO)?.trim()?.uppercase(Locale.US)
+        sessionExitCountry = wantedCountry?.takeIf { it != EXIT_COUNTRY_AUTO && it.length == 2 }
+        exitCountryEvaluated = false
+        // PREFERRED-EXIT PIN: the endpoint a previous session verified exits in
+        // the wanted country is tried FIRST, as a forced peer. This is the
+        // "start with the tested English endpoint" half of the ordering; the
+        // caches were already cleared when it was banked, so the fall-through
+        // after a failed pin is a fresh scan — "if it fails, continue with the
+        // rest". Only on a direct WARP connect with the preference active:
+        // the chain's outer legs scan by design (CoreConfig.forced_peer), a
+        // pin makes no sense for a transport it did not come from, and a
+        // user's own manual endpoint (already in forced_peer) always wins
+        // over ours.
+        val exitPinPeer = if (sessionExitCountry != null &&
+            !config.contains(CHAIN_PROTOCOL_MARKER) &&
+            !config.contains("\"forced_peer\"")
+        ) {
+            exitPin()
+        } else {
+            null
+        }
+        val effectiveConfig = if (exitPinPeer != null) {
+            runCatching {
+                val json = JSONObject(config)
+                json.put("forced_peer", exitPinPeer)
+                json.toString()
+            }.getOrElse { config }
+        } else {
+            config
+        }
+        // Must be set AFTER the pin decision above and must not be reset below:
+        // the fail paths clear the pin only when this is true, and an
+        // unconditional reset a few lines down would disable that safety and
+        // loop the reconnect on a dead endpoint.
+        startedWithExitPin = exitPinPeer != null
+        storedConfig = effectiveConfig
+        unpinnedStoredConfig = if (exitPinPeer != null) config else null
+        // The budget is spent across the whole chase, not per reconnect: a
+        // rotation's own startTunnel pass (and a notification Reconnect, the
+        // same machinery) must inherit what is left rather than being handed
+        // a fresh three. Only a genuinely new user-initiated connect resets
+        // it, which is what the pending flag distinguishes.
+        if (exitRotationPending.compareAndSet(true, false)) {
+            if (sessionExitCountry == null) exitRotationsLeft = 0
+        } else {
+            exitRotationsLeft = if (sessionExitCountry != null) EXIT_ROTATION_BUDGET else 0
+        }
         // The country belongs to the session that just ended. Left set, the
         // notification would label a fresh tunnel with the previous exit's
         // country until something overwrote it.
@@ -3884,7 +4022,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (proxyMode) {
                     val port = CoreConfig.proxyListenPort(this@MsnGuardVpnService)
                     val host = CoreConfig.proxyBindHost(this@MsnGuardVpnService)
-                    NativeCore.prepare(config)
+                    NativeCore.prepare(effectiveConfig)
                     TunnelStatus.isProxyMode = true
                     TunnelStatus.isNativeTunMode = false
                     ConnectionLog.record(
@@ -3905,7 +4043,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     startWatchdog()
                     // Blocks until the core exits, exactly like the VPN branch's
                     // NativeCore.start below.
-                    val proxyResult = NativeCore.startProxy(config)
+                    val proxyResult = NativeCore.startProxy(effectiveConfig)
                     // Teardown is NOT done here. `return@execute` from inside a try
                     // still runs the shared `finally`, so detaching, flushing the
                     // counters and deciding between reconnect and stopSelf all happen
@@ -3918,6 +4056,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         val detail = NativeCore.lastError()
                             .ifBlank { "Tunnel exited with code $proxyResult" }
                         ConnectionLog.record("SOCKS proxy tunnel exited: $detail")
+                        // Same pin discipline as the VPN branch's runtime exit.
+                        if (startedWithExitPin) {
+                            clearExitPin("the pinned endpoint failed")
+                            startedWithExitPin = false
+                            // See the VPN branch: the retry must not re-inject
+                            // the peer that just died.
+                            storedConfig = unpinnedStoredConfig ?: storedConfig
+                        }
                         if (!willAutoReconnect()) sendStatus(STATUS_FAILED, detail)
                     } else if (stopRequested.get()) {
                         // Not under a quick reconnect: MainActivity's DISCONNECTED
@@ -3938,7 +4084,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 }
 
                 // VPN MODE: the Rust core binds the Android TUN directly.
-                val addresses = NativeCore.prepare(config)
+                val addresses = NativeCore.prepare(effectiveConfig)
                 if (addresses.organization.isNotBlank()) {
                     ConnectionLog.record("Zero Trust organization ${addresses.organization}")
                 }
@@ -3951,8 +4097,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // and a WARP identity without a v6 address must not get a
                     // v6 default route.
                     .applyTunnelAddresses(addresses)
-                    .applyDns(config, addresses)
-                    .applyGatewayProxy(config, addresses)
+                    .applyDns(effectiveConfig, addresses)
+                    .applyGatewayProxy(effectiveConfig, addresses)
                     .applyLanAccess(addresses)
                     .applySplitTunneling()
                     // applySplitTunneling() handles app exclusion per mode.
@@ -3972,7 +4118,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // settling tunnel; strikes need NATIVE_STRIKES_BEFORE_RECONNECT
                 // ticks of screen-on zero-rx after the baseline.
                 startWatchdog()
-                val result = NativeCore.start(config, tun!!.fd)
+                val result = NativeCore.start(effectiveConfig, tun!!.fd)
 
                 // Did the tunnel end on its own, i.e. without the user asking?
                 // That is the case auto-reconnect exists for, and it has to be
@@ -3981,6 +4127,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (result != 0 && !stopRequested.get()) {
                     val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
                     ConnectionLog.record("Native tunnel exited: $detail")
+                    // A pinned endpoint that failed its handshake is a fact
+                    // about that edge, not about the preference — drop the pin
+                    // NOW, before the auto-reconnect below retries, or the
+                    // retry would re-inject the same dead peer and loop on it
+                    // forever. The retry then connects unpinned (fresh scan).
+                    if (startedWithExitPin) {
+                        clearExitPin("the pinned endpoint failed")
+                        startedWithExitPin = false
+                        // storedConfig still carries the dead pin; the retry
+                        // must fall back to the clean original.
+                        storedConfig = unpinnedStoredConfig ?: storedConfig
+                    }
                     if (!willAutoReconnect()) sendStatus(STATUS_FAILED, detail)
                 } else if (stopRequested.get()) {
                     // Same as the SOCKS branch above: no DISCONNECTED under a pending
@@ -3999,6 +4157,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
                 Log.e(LOG_TAG, "Tunnel failed: $detail", error)
                 sendStatus(STATUS_FAILED, detail)
+                // Setup failures reject the pinned config the same way the
+                // runtime exit above does; same cure, same reason.
+                if (startedWithExitPin) {
+                    clearExitPin("the pinned endpoint was rejected at setup")
+                    startedWithExitPin = false
+                    // Same fallback: the config Android or the core rejected
+                    // must not carry the rejected pin into anything later.
+                    storedConfig = unpinnedStoredConfig ?: storedConfig
+                }
                 // A setup failure is not a dropped tunnel: there is nothing to
                 // restore, and retrying a config Android or the core rejected
                 // would loop. Reported and left to the user.
@@ -4585,6 +4752,220 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .setPackage(packageName)
             .putExtra(EXTRA_EXIT_IP, ip))
     }
+
+    // ── Preferred exit country: pin, evaluate, rotate ────────────────────────
+
+    /**
+     * The file the core's own lastconn lands in for a given protocol.
+     *
+     * Must mirror `derive_sibling_path` in main.rs exactly: base name, a dash,
+     * the suffix, then the extension re-attached. `aether.toml` + "gool-lastconn"
+     * → `aether-gool-lastconn.toml`. Drifting from the core's spelling would
+     * silently read the wrong file — the symptom would be "the pin is always
+     * missing", not an error.
+     *
+     * MASQUE and plain WireGuard deliberately share the plain lastconn file:
+     * run_masque saves into it (main.rs `lastconn::save` at the `using
+     * cloudflare edge` line), because it is the same identity dialling the
+     * same edge pool.
+     */
+    private fun coreLastconnFile(protocol: String): File {
+        val base = File(filesDir, "aether.toml")
+        val name = base.nameWithoutExtension
+        val ext = base.extension
+        val suffix = when (protocol) {
+            "gool" -> "gool-lastconn"
+            "mim" -> "mim-lastconn"
+            else -> "lastconn"
+        }
+        return File(filesDir, "$name-$suffix.$ext")
+    }
+
+    /**
+     * Reads the endpoint of the running session's transport, as the core
+     * recorded it.
+     *
+     * Every WARP transport writes its working peer to a lastconn file the
+     * moment the tunnel is raised (run_masque/run_wireguard/run_gool/run_mim
+     * all `lastconn::save` BEFORE the data plane starts, and only when the
+     * peer was not forced): on a CONNECTED session the file IS this session's
+     * gateway. MASQUE shares plain WireGuard's `aether-lastconn.toml` — it
+     * is the same identity dialling the same edge, and the gateway cache JSON
+     * is an rtt-sorted pool, not a record of what carried this session.
+     */
+    private fun currentSessionEndpoint(): String {
+        val direct = when (currentProtocol) {
+            "MASQUE", "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
+            "GOOL" -> readLastconnPeer(coreLastconnFile("gool"))
+            "MIM" -> readLastconnPeer(coreLastconnFile("mim"))
+            else -> ""
+        }
+        return direct
+    }
+
+    /** `peer = "ip:port"` from a lastconn TOML, or "" when unreadable. */
+    private fun readLastconnPeer(file: File): String =
+        runCatching {
+            Regex("peer\\s*=\\s*\"([^\"]+)\"")
+                .find(file.readText())?.groupValues?.get(1)
+        }.getOrNull().orEmpty()
+
+    /**
+     * Saves the working endpoint of a session whose exit country MATCHED the
+     * preference, as the pin for the next connect.
+     */
+    private fun saveExitPin(endpoint: String) {
+        if (endpoint.isBlank()) return
+        runCatching {
+            File(filesDir, EXIT_PIN_FILE).writeText(
+                JSONObject()
+                    .put("endpoint", endpoint)
+                    .put("protocol", currentProtocol)
+                    .put("country", sessionExitCountry ?: "")
+                    .put("ts", System.currentTimeMillis())
+                    .toString()
+            )
+            ConnectionLog.record(
+                "Preferred exit pinned: ${sessionExitCountry ?: "?"} endpoint saved for the next connect"
+            )
+        }
+    }
+
+    /** The pinned endpoint for this transport, or null when none is usable. */
+    private fun exitPin(): String? {
+        val pin = runCatching {
+            JSONObject(File(filesDir, EXIT_PIN_FILE).readText())
+        }.getOrNull() ?: return null
+        // A pin from another transport is not a fact about this one — each
+        // transport validates its endpoint against its own identity.
+        if (pin.optString("protocol") != currentProtocol) return null
+        val endpoint = pin.optString("endpoint")
+        return endpoint.takeIf { it.isNotBlank() }
+    }
+
+    /** Deletes the pin. Idempotent; never throws. */
+    private fun clearExitPin(reason: String) {
+        val file = File(filesDir, EXIT_PIN_FILE)
+        if (file.exists() && file.delete()) {
+            ConnectionLog.record("Preferred-exit pin dropped: $reason")
+        }
+    }
+
+    /**
+     * The endpoint caches this transport owns, cleared before a rotation.
+     *
+     * The rotation exists to get a DIFFERENT exit; every cached gateway this
+     * session just proved wrong would be tried first again and the reconnect
+     * would land back on the same exit. lastconn files are per-transport
+     * (aether-lastconn / -gool- / -mim-, all siblings of the config), the
+     * MASQUE gateway cache is the JSON, and a manual endpoint is the user's
+     * own pin — never deleted, because the user set it by hand and the
+     * rotation has no mandate over it.
+     */
+    private fun clearEndpointCaches() {
+        val targets = listOf(
+            coreLastconnFile("wireguard"),
+            coreLastconnFile("gool"),
+            coreLastconnFile("mim"),
+            File(filesDir, "masque-gateway-cache.json"),
+        )
+        for (file in targets) {
+            if (file.exists()) file.delete()
+        }
+    }
+
+    /**
+     * Decides the tunnel's fate from its measured exit country.
+     *
+     * Runs once per session, off the main thread, only on the WARP transports
+     * with a preference set. The cases:
+     *
+     *  - MATCH: the endpoint is pinned for the next connect and the session
+     *    stays. This is the "tested English endpoint" being banked.
+     *  - MISMATCH with budget: the caches are cleared and the tunnel is
+     *    rotated (quick reconnect — no VPN consent, no notification churn),
+     *    spending one unit of the budget. Each rotation re-rolls the anycast
+     *    dice; three is the budget, then the tunnel keeps what it has.
+     *  - MISMATCH without budget: logged and kept. A working tunnel beats a
+     *    perfect one, and the log line tells the user why the exit card shows
+     *    a country other than the preference.
+     *
+     * A rotation only fires from a session this service started for the user
+     * (generation-checked), never when the user is mid-disconnect, and never
+     * on proxy mode, where rotating would kill a listener another device is
+     * actively using over the LAN.
+     */
+    private fun evaluateExitCountry(ip: String) {
+        val wanted = sessionExitCountry ?: return
+        if (exitCountryEvaluated) return
+        if (proxyMode || chainMode || psiphonVpnMode) return
+        if (!isWarpTransport(currentProtocol)) return
+        exitCountryEvaluated = true
+
+        worker.execute {
+            val actual = ExitGeo.countryOf(ip)
+            if (actual == null) {
+                // Unknown is not "wrong": geolocation is down or slow, and
+                // tearing up a working tunnel over an unanswered question is
+                // the worse failure. Next connect re-asks.
+                ConnectionLog.record("Exit country unknown; leaving the tunnel as it is")
+                return@execute
+            }
+            if (actual == wanted) {
+                ConnectionLog.record("Exit country $actual matches the preference")
+                // On a pinned session the lastconn files are NOT this session's
+                // endpoint — the core does not save a forced peer — so the pin
+                // being verified is re-banked as-is (its timestamp refreshed).
+                // On an unpinned session the lastconn IS this session's edge.
+                saveExitPin(if (startedWithExitPin) (exitPin() ?: currentSessionEndpoint()) else currentSessionEndpoint())
+                return@execute
+            }
+            if (exitRotationsLeft <= 0) {
+                ConnectionLog.record(
+                    "Exit is $actual, wanted $wanted — rotation budget spent; staying on $actual"
+                )
+                return@execute
+            }
+            exitRotationsLeft--
+            ConnectionLog.record(
+                "Exit is $actual, wanted $wanted — rotating the gateway (${exitRotationsLeft + 1} left)"
+            )
+            clearEndpointCaches()
+            // If this session connected through a pin, the pin's exit is now
+            // proven wrong — the rotation must not re-inject it, or every
+            // rotation would land back on the same exit and the whole budget
+            // would be spent going in a circle. Drop the pin file (it no
+            // longer delivers the wanted country) and fall back to the
+            // unpinned config for the reconnect.
+            if (startedWithExitPin) {
+                clearExitPin("its exit stopped matching the preference")
+                startedWithExitPin = false
+                storedConfig = unpinnedStoredConfig ?: storedConfig
+            }
+            // Latch BEFORE the teardown so the restart's own startTunnel pass
+            // inherits the remaining budget instead of resetting it.
+            exitRotationPending.set(true)
+            ladderScheduler.schedule({
+                try {
+                    if (userInitiatedStop.get() || !connected.get()) return@schedule
+                    requestQuickReconnect("exit country rotation")
+                } catch (e: Exception) {
+                    ConnectionLog.record("Exit rotation failed to restart: ${e.message}")
+                }
+            }, 800, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    /**
+     * Whether [protocol] is one whose exit is a WARP edge this app can rotate.
+     *
+     * The config's names, uppercased: masque, wireguard, gool (Warp-on-Warp),
+     * mim (MASQUE-on-MASQUE). Everything else — psiphon, tor, shard, the chain
+     * — exits somewhere the rotation cannot influence.
+     */
+    private fun isWarpTransport(protocol: String): Boolean =
+        protocol == "MASQUE" || protocol == "WIREGUARD" ||
+            protocol == "GOOL" || protocol == "MIM"
 
     private fun startAsForeground() {
         val manager = getSystemService(NotificationManager::class.java)
