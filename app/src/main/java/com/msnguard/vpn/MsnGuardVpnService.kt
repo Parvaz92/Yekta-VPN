@@ -165,6 +165,20 @@ private class PsiphonStrategy(
 
 class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
+
+    /**
+     * The exit-country geo verdict gets its own thread, NOT [worker].
+     *
+     * [worker] is occupied for the WHOLE session: startTunnel submits
+     * NativeCore.start() to it and that call blocks until the tunnel exits,
+     * so a verdict queued there runs only after the session is already dead.
+     * The v1.9.4 field log showed every "Exit is IR" arriving 15-72s late —
+     * always after the user had switched transports — and the rotation then
+     * firing on a corpse (the quick reconnect no-opped because connected was
+     * already false). On this executor the verdict lands 2-10s after the
+     * exit is measured, while the tunnel is still alive to be rotated.
+     */
+    private val exitGeoExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val connected = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
     private val vpnModeActive = AtomicBoolean(false)
@@ -2058,6 +2072,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // up would leave the service un-stoppable: every teardown path reads
                 // the latch and declines to end the service while it is set.
                 reconnectRequested.set(false)
+                // And the exit-rotation latch: a verdict still in flight when the
+                // user disconnected must not leak into the NEXT user connect, where
+                // startTunnel would read it as "rotation restart" and open the new
+                // session with a zeroed rotation budget (the "every swap says
+                // (3 left) yet nothing rotates" v1.9.4 signature).
+                exitRotationPending.set(false)
                 // And the seal: Disconnect must take the blocking TUN down with the
                 // session. Left latched, failAndStop would rebuild it on the way out
                 // and the device would stay sealed after the user asked to stop.
@@ -2093,6 +2113,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         stopTunnel(notify = false)
         cancelLadderTimer()
         ladderScheduler.shutdownNow()
+        // Its tasks are short (two HTTP timeouts worst case) and shutting
+        // down here is what makes an in-flight verdict's own queueing the
+        // LAST thing the executor ever does — a rejected execute() from a
+        // race with onEvent is swallowed by the runCatching at the call
+        // site, unlike the process-killing rejection the v1.9.3 crash had.
+        exitGeoExecutor.shutdownNow()
         worker.shutdownNow()
         super.onDestroy()
     }
@@ -4956,14 +4982,29 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // crash dialog.
         val generation = sessionGeneration
 
-        worker.execute {
+        // Not worker.execute: see the executor's own doc — the verdict must
+        // land while the tunnel is still alive, and worker is blocked inside
+        // NativeCore.start() for the whole session. runCatching for the same
+        // reason as the schedule below: a verdict queued in the teardown race
+        // must not kill the process on a rejected execute().
+        runCatching {
+            exitGeoExecutor.execute {
             // The session that measured this address must still be the live
             // one when the answer arrives — see the snapshot comment above.
+            // Re-checked AFTER the geo answer (up to 2×5s later), because the
+            // whole point of this check is to drop verdicts whose session died
+            // while the HTTP request was in flight.
             if (generation != sessionGeneration) {
                 ConnectionLog.record("Exit-country answer arrived after the session changed; ignored")
                 return@execute
             }
             val actual = ExitGeo.countryOf(ip)
+            if (generation != sessionGeneration) {
+                // The lookup itself can span a teardown; the generation check
+                // before it only covered the moment of queuing.
+                ConnectionLog.record("Exit-country answer arrived after the session changed; ignored")
+                return@execute
+            }
             if (actual == null) {
                 // Unknown is not "wrong": geolocation is down or slow, and
                 // tearing up a working tunnel over an unanswered question is
@@ -5026,13 +5067,34 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             runCatching {
                 ladderScheduler.schedule({
                     try {
-                        if (userInitiatedStop.get() || !connected.get()) return@schedule
+                        if (userInitiatedStop.get()) {
+                            // No-op rot: the user asked for the tunnel off.
+                            // The pending latch must not survive into the
+                            // next user connect, where it would read as "this
+                            // is a rotation's restart" and zero the fresh
+                            // budget (the "always (3 left)" v1.9.4 log).
+                            exitRotationPending.set(false)
+                            return@schedule
+                        }
+                        if (!connected.get()) {
+                            // The tunnel died between verdict and timer. The
+                            // session is gone; nothing to rotate — the next
+                            // user connect must get the full budget back,
+                            // not inherit this dead chase's latch.
+                            exitRotationPending.set(false)
+                            ConnectionLog.record(
+                                "Exit rotation skipped: the tunnel already ended"
+                            )
+                            return@schedule
+                        }
                         requestQuickReconnect("exit country rotation")
                     } catch (e: Exception) {
+                        exitRotationPending.set(false)
                         ConnectionLog.record("Exit rotation failed to restart: ${e.message}")
                     }
                 }, 800, TimeUnit.MILLISECONDS)
             }.onFailure { exitRotationPending.set(false) }
+        }
         }
     }
 
