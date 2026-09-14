@@ -229,8 +229,12 @@ object RemotePolicy {
     /** The transports an exit endpoint can be injected into. */
     private val WARP_TRANSPORTS = setOf("MASQUE", "WIREGUARD", "GOOL", "MIM")
 
-    /** One validated entry: an endpoint, the country it exits in, who may dial it. */
-    private class ExitEndpoint(val endpoint: String, val country: String, val transports: List<String>)
+    /**
+     * One validated entry: an endpoint, the country it exits in, who may
+     * dial it. Public because the service reads it through
+     * [exitEndpointsFor]; everything else in the validator stays private.
+     */
+    class ExitEndpoint(val endpoint: String, val country: String, val transports: List<String>)
 
     /**
      * Two-label public suffixes a `*.` entry may not expand to.
