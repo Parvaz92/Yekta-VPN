@@ -404,7 +404,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     /**
      * Whether the running session was started with the pinned preferred
-     * endpoint (forced_peer injected from [EXIT_PIN_FILE]).
+     * endpoint (forced_peer injected from [EXIT_PIN_FILE] or from a
+     * remote-policy seed).
      *
      * Only meaningful for the failure path: a pinned connect that dies must
      * delete the pin BEFORE the auto-reconnect retries, or the retry re-pins
@@ -413,6 +414,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     @Volatile
     private var startedWithExitPin = false
+
+    /**
+     * The policy seed consumed by the current chase, if any.
+     *
+     * A rotation drops the pin and reconnects — but the seed is not the pin:
+     * `exitPin()` still returns null and startTunnel would hand the SAME seed
+     * to the reconnect, looping the chase on one proven-wrong endpoint. This
+     * holds what was tried so the chase moves past it.
+     */
+    @Volatile
+    private var consumedExitSeed: String? = null
 
     /** Guards against a second exit-country evaluation in one session. */
     @Volatile
@@ -3767,13 +3779,38 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // pin makes no sense for a transport it did not come from, and a
         // user's own manual endpoint (already in forced_peer) always wins
         // over ours.
-        val exitPinPeer = if (sessionExitCountry != null &&
+        //
+        // When no pin exists yet, the REMOTE-POLICY seeds fill the slot: the
+        // one gateway this phone ever measured exiting GB is not in any seed
+        // list the core walks, so a fresh preference connect would spend its
+        // whole rotation budget re-rolling the IR/DE anycast. A policy seed
+        // ranks BELOW a banked pin (measured on this device) and the pin
+        // machinery verifies it: if the forced peer's exit matches, it is
+        // banked as a real pin; if not, the rotation drops it and scans.
+        var exitPinPeer = if (sessionExitCountry != null &&
             !config.contains(CHAIN_PROTOCOL_MARKER) &&
             !config.contains("\"forced_peer\"")
         ) {
             exitPin()
         } else {
             null
+        }
+        if (exitPinPeer == null && sessionExitCountry != null &&
+            !config.contains(CHAIN_PROTOCOL_MARKER) &&
+            !config.contains("\"forced_peer\"")
+        ) {
+            // Skip the seed this chase already spent: a rotation proved it
+            // wrong (or dead) and reconnecting onto it again would burn the
+            // whole budget on one endpoint.
+            val seed = RemotePolicy.exitEndpointsFor(this, sessionExitCountry!!, currentProtocol)
+                .firstOrNull { it.endpoint != consumedExitSeed }
+            if (seed != null) {
+                exitPinPeer = seed.endpoint
+                consumedExitSeed = seed.endpoint
+                ConnectionLog.record(
+                    "Preferred-exit seed from policy: ${seed.endpoint} for $currentProtocol"
+                )
+            }
         }
         val effectiveConfig = if (exitPinPeer != null) {
             runCatching {
@@ -3799,6 +3836,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (exitRotationPending.compareAndSet(true, false)) {
             if (sessionExitCountry == null) exitRotationsLeft = 0
         } else {
+            // A genuinely new user-initiated connect: the whole chase starts
+            // over, so the seed the previous chase burned is eligible again —
+            // endpoints drift, and "wrong this hour" is not "wrong forever".
+            consumedExitSeed = null
             exitRotationsLeft = if (sessionExitCountry != null) EXIT_ROTATION_BUDGET else 0
         }
         // The country belongs to the session that just ended. Left set, the
@@ -4889,6 +4930,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * MASQUE gateway cache is the JSON, and a manual endpoint is the user's
      * own pin — never deleted, because the user set it by hand and the
      * rotation has no mandate over it.
+     *
+     * The registration files are deliberately NOT touched. The v1.9.4
+     * rotation deleted them on the theory that the egress country follows the
+     * registered device; measured against the real registration API, the
+     * answer carries no country field at all, and the v1.9.3 log shows the
+     * same phone reaching GB through GOOL's gateway while its MASQUE/WG
+     * gateways stayed IR/DE. The country follows the gateway, so rolling the
+     * identity only destroyed the one working GB setup (the WoW regression)
+     * and re-registered from an Iranian address.
      */
     private fun clearEndpointCaches() {
         val targets = listOf(
@@ -4898,47 +4948,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             File(filesDir, "masque-gateway-cache.json"),
         )
         for (file in targets) {
-            if (file.exists()) file.delete()
-        }
-    }
-
-    /**
-     * The registration files the core loads an identity from, per transport —
-     * the same `derive_sibling_path` spelling main.rs uses (`aether.toml` +
-     * suffix + extension; `team-<scope>` when a Zero Trust team is set).
-     *
-     * The field log proved WHY a rotation must roll the identity too: three
-     * "Exit is IR, wanted GB" rotations on WireGuard, two on MASQUE — every
-     * one reconnected through a DIFFERENT gateway and every one still exited
-     * IR, while GOOL (whose identity lives in its own `aether-secondary.toml`)
-     * reached GB on the first connect. Cloudflare maps the egress RANGE per
-     * registered device, so the same identity keeps drawing the same country
-     * whatever gateway it dials. Deleting the identity file forces the core
-     * to register a fresh device next start, which re-rolls the anycast dice.
-     */
-    private fun clearIdentityFiles() {
-        // The identity file per transport, mirroring main.rs exactly:
-        //   warp_config_path:  aether.toml, or aether-team-<scope>.toml
-        //   masque_config_path: aether-masque.toml, or aether-team-<scope>.toml
-        //   GOOL = warp + "-secondary"; MIM = masque + "-secondary".
-        // Under a team, MASQUE and WireGuard share one file — that is the
-        // core's own layout, so a team-scope rotation rolls both; a file that
-        // does not exist is a no-op.
-        val scope = SecureStore.getSecret(this, "zero_trust_team").trim()
-        val team = if (scope.isBlank()) "" else "aether-team-$scope"
-        // Narrow blast radius: only the rotating transport's registration
-        // rolls. A rotation on WireGuard has no mandate over MASQUE's device
-        // (and vice versa) — re-provisioning the wrong transport would burn
-        // its saved endpoint history for nothing.
-        val targets = when (currentProtocol) {
-            "WIREGUARD" -> listOf("aether", team).filter { it.isNotBlank() }
-            "GOOL" -> listOf("aether-secondary", "$team-secondary")
-            "MASQUE" -> listOf("aether-masque", team).filter { it.isNotBlank() }
-            "MIM" -> listOf("aether-masque-secondary", "$team-secondary")
-            else -> return
-        }
-        for (name in targets.distinct()) {
-            val file = File(filesDir, "$name.toml")
             if (file.exists()) file.delete()
         }
     }
@@ -5032,12 +5041,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "Exit is $actual, wanted $wanted — rotating the gateway (${exitRotationsLeft + 1} left)"
             )
             clearEndpointCaches()
-            // Roll the registration too: the field log showed the same identity
-            // redrawing the same wrong country across gateway swaps (WireGuard
-            // rotated 3×, MASQUE 2×, every exit still IR/DE) while GOOL — whose
-            // identity lives in its own file — reached GB first try. The egress
-            // range follows the registered device, not the gateway.
-            clearIdentityFiles()
+            // The identity is NOT rolled. This used to delete the registration
+            // file on every rotation (v1.9.4), on the theory that the egress
+            // country is bound to the registered device. Measured against the
+            // real registration API: the answer carries no country field at
+            // all — client_v4, peers, ports, but nothing geolocation-shaped —
+            // and the v1.9.3 field log shows the same identity reaching GB on
+            // GOOL's gateway while MASQUE gateways stayed IR/DE with theirs.
+            // The exit follows the GATEWAY, not the identity; rolling the
+            // registration burned the working GOOL setup (the WoW regression)
+            // and re-registered from an Iranian source address, which only
+            // redraws the same regional anycast. The caches cleared above are
+            // what actually steer the next dial.
             // If this session connected through a pin, the pin's exit is now
             // proven wrong — the rotation must not re-inject it, or every
             // rotation would land back on the same exit and the whole budget
