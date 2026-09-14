@@ -1369,6 +1369,13 @@ class MainActivity : Activity() {
             // never end up smaller than the English layout's, even on a short
             // screen: it floors at LOCALIZED_DIAL_FLOOR and lets the console
             // scroll instead, exactly as it did before the fit existed.
+            //
+            // v1.9.4: the floor rose 0.90 → 0.94. v1.9.3's AI MODE chip made
+            // the chip line 8dp taller, and on fa/zh consoles the fit pass
+            // answered by pushing the dial UNDER the old 0.90 floor-down
+            // path — the user saw a dial smaller than any 1.8.x build. The
+            // chip line has been compacted (2dp vertical padding, 2dp top
+            // margin) so 0.94 fits; anything left over scrolls.
             val floor = if (localizedTypography) LOCALIZED_DIAL_FLOOR else OrbitDialView.MIN_SIZE_SCALE
             val target = (current * (dialBox - delta).toFloat() / dialBox)
                 .coerceIn(floor, 1f)
@@ -1435,24 +1442,30 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             chipLatency.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
             chipProtocol.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
+            // AI MODE sits BETWEEN the latency chip and the transport chip —
+            // the middle of the line, not the end — so the eye reaches it
+            // between the two facts it relates to: the measured latency and
+            // the transport that produced it.
             addView(chipLatency)
             addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)))
-            addView(chipProtocol)
-            // The AI MODE pill rides the same centered line, one separator
-            // away. GONE (not INVISIBLE) when the transport does not apply, so
-            // the row re-centers and never keeps a hole — same rule as the slot
-            // cards below the rail. The separator follows the chip's visibility
-            // in renderAiChip(), so a GONE chip never leaves an orphan dot.
+            addView(chipAiMode)
+            // The separator between AI MODE and the transport chip, tracked so
+            // it can follow the chip if it is ever hidden again.
             addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)).apply {
                 chipAiSeparator = this
-                visibility = View.GONE
             })
-            addView(chipAiMode)
+            addView(chipProtocol)
         }
         addView(chipLine, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(7) })
+        ).apply {
+            // 7dp → 2dp: the chip line sits between the dial block and the
+            // metric tiles, and the 5dp handed back here goes straight back
+            // to the dial through fitConsoleToViewport — part of restoring
+            // the pre-v1.9.3 dial size ("the connect button got smaller").
+            topMargin = dp(2)
+        })
 
         val tiles = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -6664,38 +6677,67 @@ class MainActivity : Activity() {
      * The Exit-country engine only applies to the three WARP transports
      * (MASQUE/WireGuard/WoW): Psiphon, Tor and SHARD pick their exit through
      * their own engines, which already have country preferences of their own
-     * (EGRESS_REGION_PREF, tor exit nodes, SHARD node selection). Hiding the
-     * chip on those rather than showing it disabled keeps the chip line clean
-     * — the same GONE-not-disabled rule the slot cards follow.
+     * (EGRESS_REGION_PREF, tor exit nodes, SHARD node selection).
      */
     private fun aiChipApplies(): Boolean = when (selectedProtocol) {
         Protocol.MASQUE, Protocol.WIREGUARD, Protocol.WARP_IN_WARP -> true
         else -> false
     }
 
-    /** Repaints the AI MODE chip: shown only on the WARP transports. */
+    /**
+     * The AI Mode accent: neon blue, not the violet the upload tile uses.
+     *
+     * A palette member would be the cleaner shape, but the chip is the only
+     * consumer, and adding a `neonBlue` to Palette would give both themes a
+     * second blue next to their connected-green — the palettes were measured
+     * per-surface, and a new field skips that work. Local it is; the light
+     * theme needs the darker sibling for letters (see AppAppearance for the
+     * 4.5:1 rule).
+     */
+    private fun aiNeonBlue(): Int = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
+        0xFF0E86C7.toInt() else 0xFF00C8FF.toInt()
+
+    private fun aiNeonBlueText(): Int = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
+        0xFF075E92.toInt() else 0xFF7FDFFF.toInt()
+
+    /** Repaints the AI MODE chip: lit on the WARP transports, pinned-lit on the others. */
     private fun renderAiChip() {
         if (!::chipAiMode.isInitialized) return
         val applies = aiChipApplies()
-        chipAiMode.visibility = if (applies) View.VISIBLE else View.GONE
-        chipAiSeparator?.visibility = if (applies) View.VISIBLE else View.GONE
-        if (!applies) return
-        val on = aiModeOn()
+        // Psiphon, Tor and SHARD pick their exit country through their own
+        // engines (EGRESS_REGION_PREF, Tor exit nodes, SHARD node ranking) —
+        // AI Mode is effectively ALWAYS ON there and the user cannot turn it
+        // off. The chip stays visible and lit instead of disappearing, so the
+        // row does not jump around when the transport changes; the tap is
+        // locked and the description says why.
+        val pinned = !applies
+        chipAiMode.visibility = View.VISIBLE
+        chipAiSeparator?.visibility = View.VISIBLE
+        val on = pinned || aiModeOn()
         val lit = on && modeControlsEnabled
-        val fill = if (lit) Sculpt.blend(palette.surface, palette.violet, 0.16f)
+        val fill = if (lit) Sculpt.blend(palette.surface, aiNeonBlue(), 0.20f)
         else Sculpt.blend(palette.surface, palette.ink, 0.02f)
         chipAiMode.background = Sculpt.sculptedBackground(
             resources.displayMetrics.density,
             fill, 999,
-            Sculpt.withAlpha(if (lit) palette.violet else palette.ink, if (lit) 0.4f else 0.10f),
+            Sculpt.withAlpha(if (lit) aiNeonBlue() else palette.ink, if (lit) 0.5f else 0.10f),
         )
-        chipAiMode.setPadding(dp(10), dp(4), dp(10), dp(4))
-        chipAiMode.setTextColor(if (lit) palette.violetText else palette.faint)
-        // isEnabled=false on the view both swallows the tap and dims it via
-        // the alpha below — the rail's exact lock contract.
-        chipAiMode.isEnabled = modeControlsEnabled
-        chipAiMode.alpha = if (modeControlsEnabled) 1f else 0.45f
+        // 2dp vertical padding, half the v1.9.3 value: the taller chip line
+        // cost the dial 8dp through fitConsoleToViewport, which is the
+        // "connect button got smaller" field report. 2dp keeps the pill shape
+        // readable at 12sp without stealing dial height.
+        chipAiMode.setPadding(dp(10), dp(2), dp(10), dp(2))
+        chipAiMode.setTextColor(if (lit) aiNeonBlueText() else palette.faint)
+        // Lock contract, two cases:
+        //  - WARP transports: the rail's lock — disabled while connected
+        //    (the pref only takes effect next connect anyway), tappable
+        //    while disconnected.
+        //  - pinned transports: always lit, never tappable — there is
+        //    nothing to switch, the engines already choose the exit.
+        chipAiMode.isEnabled = !pinned && modeControlsEnabled
+        chipAiMode.alpha = if (pinned || modeControlsEnabled) 1f else 0.45f
         chipAiMode.contentDescription = when {
+            pinned -> "AI Mode فعال است؛ این پروتکل خودش کشور خروجی را انتخاب می‌کند"
             !modeControlsEnabled -> "AI Mode قفل است تا اتصال قطع شود"
             on -> "AI Mode روشن است؛ آی‌پی خروجی انگلیس می‌شود"
             else -> "AI Mode خاموش است؛ سریع‌ترین مسیر انتخاب می‌شود"
@@ -6703,11 +6745,18 @@ class MainActivity : Activity() {
     }
 
     /** The AI Mode preference: ON = GB preferred, OFF = auto (fastest). */
-    private fun aiModeOn(): Boolean =
-        preferences().getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
-            ?.trim()?.uppercase(Locale.US) !in listOf(
-                MsnGuardVpnService.EXIT_COUNTRY_AUTO, "",
-            )
+    private fun aiModeOn(): Boolean {
+        val pref = preferences()
+            .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
+            ?.trim()?.uppercase(Locale.US)
+        val auto = MsnGuardVpnService.EXIT_COUNTRY_AUTO.uppercase(Locale.US)
+        // BOTH sides uppercase: the pref file has always stored lowercase
+        // "auto" (written by setAiMode and chooseExitCountry), so comparing a
+        // uppercased read against the lowercase constant made aiModeOn()
+        // return true for "auto" — every tap just wrote another "cleared"
+        // line instead of arming GB. The "button never flips" field report.
+        return pref != null && pref != auto && pref != "" && pref.length == 2
+    }
 
     private fun setAiMode(on: Boolean) {
         val target = if (on) "GB" else MsnGuardVpnService.EXIT_COUNTRY_AUTO
@@ -7163,11 +7212,12 @@ class MainActivity : Activity() {
          * used to make fitConsoleToViewport shrink the dial well below the
          * English layout's settled size; the user's requirement is that the
          * connect dial in Persian and Chinese be as large as the English one.
-         * 0.90 keeps a small safety margin under 1.0 (the English ideal) while
-         * the now-compact text block means the floor is rarely hit; below it
-         * the console scrolls instead of shrinking the dial further.
+         * Raised 0.90 → 0.94 in v1.9.4: v1.9.3's AI MODE chip had made the
+         * chip line 8dp taller, pushing the dial below 0.90 — the "connect
+         * button got smaller" report. The chip line is compact again (2dp
+         * padding/margins), so 0.94 holds; anything left over scrolls.
          */
-        const val LOCALIZED_DIAL_FLOOR = 0.90f
+        const val LOCALIZED_DIAL_FLOOR = 0.94f
         /**
          * Spare room required before the dial is allowed to grow back.
          *
