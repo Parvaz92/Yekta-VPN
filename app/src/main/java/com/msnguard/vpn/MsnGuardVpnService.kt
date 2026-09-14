@@ -4877,6 +4877,47 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * The registration files the core loads an identity from, per transport —
+     * the same `derive_sibling_path` spelling main.rs uses (`aether.toml` +
+     * suffix + extension; `team-<scope>` when a Zero Trust team is set).
+     *
+     * The field log proved WHY a rotation must roll the identity too: three
+     * "Exit is IR, wanted GB" rotations on WireGuard, two on MASQUE — every
+     * one reconnected through a DIFFERENT gateway and every one still exited
+     * IR, while GOOL (whose identity lives in its own `aether-secondary.toml`)
+     * reached GB on the first connect. Cloudflare maps the egress RANGE per
+     * registered device, so the same identity keeps drawing the same country
+     * whatever gateway it dials. Deleting the identity file forces the core
+     * to register a fresh device next start, which re-rolls the anycast dice.
+     */
+    private fun clearIdentityFiles() {
+        // The identity file per transport, mirroring main.rs exactly:
+        //   warp_config_path:  aether.toml, or aether-team-<scope>.toml
+        //   masque_config_path: aether-masque.toml, or aether-team-<scope>.toml
+        //   GOOL = warp + "-secondary"; MIM = masque + "-secondary".
+        // Under a team, MASQUE and WireGuard share one file — that is the
+        // core's own layout, so a team-scope rotation rolls both; a file that
+        // does not exist is a no-op.
+        val scope = SecureStore.getSecret(this, "zero_trust_team").trim()
+        val team = if (scope.isBlank()) "" else "aether-team-$scope"
+        // Narrow blast radius: only the rotating transport's registration
+        // rolls. A rotation on WireGuard has no mandate over MASQUE's device
+        // (and vice versa) — re-provisioning the wrong transport would burn
+        // its saved endpoint history for nothing.
+        val targets = when (currentProtocol) {
+            "WIREGUARD" -> listOf("aether", team).filter { it.isNotBlank() }
+            "GOOL" -> listOf("aether-secondary", "$team-secondary")
+            "MASQUE" -> listOf("aether-masque", team).filter { it.isNotBlank() }
+            "MIM" -> listOf("aether-masque-secondary", "$team-secondary")
+            else -> return
+        }
+        for (name in targets.distinct()) {
+            val file = File(filesDir, "$name.toml")
+            if (file.exists()) file.delete()
+        }
+    }
+
+    /**
      * Decides the tunnel's fate from its measured exit country.
      *
      * Runs once per session, off the main thread, only on the WARP transports
@@ -4903,8 +4944,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (proxyMode || chainMode || psiphonVpnMode) return
         if (!isWarpTransport(currentProtocol)) return
         exitCountryEvaluated = true
+        // Snapshotted at entry: the geo lookups below can take up to twice
+        // ExitGeo's timeout on a slow carrier, and everything this method then
+        // decides — rotate or stay — is a fact about THE SESSION THAT MEASURED
+        // the address, not whatever session owns the fields by the time the
+        // answer lands. Without the guard a stale answer from a session the
+        // user already switched away from tore down the NEXT session's tunnel
+        // mid-handshake ("switching protocols with a country set hangs the
+        // app"), and after onDestroy() the schedule() on the dead scheduler
+        // was the process-killing RejectedExecutionException in the field
+        // crash dialog.
+        val generation = sessionGeneration
 
         worker.execute {
+            // The session that measured this address must still be the live
+            // one when the answer arrives — see the snapshot comment above.
+            if (generation != sessionGeneration) {
+                ConnectionLog.record("Exit-country answer arrived after the session changed; ignored")
+                return@execute
+            }
             val actual = ExitGeo.countryOf(ip)
             if (actual == null) {
                 // Unknown is not "wrong": geolocation is down or slow, and
@@ -4933,6 +4991,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "Exit is $actual, wanted $wanted — rotating the gateway (${exitRotationsLeft + 1} left)"
             )
             clearEndpointCaches()
+            // Roll the registration too: the field log showed the same identity
+            // redrawing the same wrong country across gateway swaps (WireGuard
+            // rotated 3×, MASQUE 2×, every exit still IR/DE) while GOOL — whose
+            // identity lives in its own file — reached GB first try. The egress
+            // range follows the registered device, not the gateway.
+            clearIdentityFiles()
             // If this session connected through a pin, the pin's exit is now
             // proven wrong — the rotation must not re-inject it, or every
             // rotation would land back on the same exit and the whole budget
@@ -4944,17 +5008,31 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 startedWithExitPin = false
                 storedConfig = unpinnedStoredConfig ?: storedConfig
             }
-            // Latch BEFORE the teardown so the restart's own startTunnel pass
-            // inherits the remaining budget instead of resetting it.
+            // The geo answer can straddle a teardown: the user switching
+            // transports while ExitGeo is still inside its HTTP timeouts
+            // destroys the service, and onDestroy()'s shutdownNow() kills this
+            // scheduler before the line below runs. Scheduling on the dead
+            // executor threw RejectedExecutionException out of this worker
+            // task — uncaught, it killed the whole process (the field crash:
+            // "Task … rejected from ScheduledThreadPoolExecutor[Terminated]").
+            // A rejection here is not an error: there is no session left to
+            // rotate, so the latch must be rolled back too — a stale pending
+            // flag would zero the NEXT session's rotation budget.
+            //
+            // Latch BEFORE the schedule so the restart's own startTunnel pass
+            // inherits the remaining budget instead of resetting it; rolled
+            // back if the schedule could not land.
             exitRotationPending.set(true)
-            ladderScheduler.schedule({
-                try {
-                    if (userInitiatedStop.get() || !connected.get()) return@schedule
-                    requestQuickReconnect("exit country rotation")
-                } catch (e: Exception) {
-                    ConnectionLog.record("Exit rotation failed to restart: ${e.message}")
-                }
-            }, 800, TimeUnit.MILLISECONDS)
+            runCatching {
+                ladderScheduler.schedule({
+                    try {
+                        if (userInitiatedStop.get() || !connected.get()) return@schedule
+                        requestQuickReconnect("exit country rotation")
+                    } catch (e: Exception) {
+                        ConnectionLog.record("Exit rotation failed to restart: ${e.message}")
+                    }
+                }, 800, TimeUnit.MILLISECONDS)
+            }.onFailure { exitRotationPending.set(false) }
         }
     }
 
