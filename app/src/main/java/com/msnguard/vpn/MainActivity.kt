@@ -48,6 +48,7 @@ import android.graphics.Typeface
 import android.widget.LinearLayout.LayoutParams
 import androidx.core.content.FileProvider
 import java.io.File
+import java.util.Locale
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -4532,7 +4533,8 @@ class MainActivity : Activity() {
             options = options,
             selected = preferences()
                 .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
-                ?.trim()?.uppercase(Locale.US),
+                ?.trim()?.uppercase(Locale.US)
+                ?: MsnGuardVpnService.EXIT_COUNTRY_AUTO,
             label = { code ->
                 if (code == MsnGuardVpnService.EXIT_COUNTRY_AUTO) Strings.t("Automatic")
                 else PsiphonRegions.label(code)
