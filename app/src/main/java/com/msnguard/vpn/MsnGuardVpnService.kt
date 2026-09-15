@@ -426,6 +426,27 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     @Volatile
     private var consumedExitSeed: String? = null
 
+    /**
+     * Every policy seed this chase has spent, in order (v1.9.7).
+     *
+     * [consumedExitSeed] only remembers the LAST one, which was enough when
+     * the policy carried a single GB seed. The AI-country list (GB/US/IT)
+     * needs the chase to walk every seed once — a rotation must move to the
+     * NEXT seed, not ping-pong between two. Cleared on a fresh user connect,
+     * alongside [consumedExitSeed].
+     */
+    @Volatile
+    private var exitSeedHistory: MutableList<String> = ArrayList()
+
+    /**
+     * The countries AI Mode may exit in (v1.9.7): Gemini opens from GB, US
+     * and IT exits. The geo verdict accepts any of them, and the seed walk
+     * tries every policy endpoint whose country is in this set — in file
+     * order, GB first because the field-tested GB endpoint is the known-good
+     * one.
+     */
+    private val AI_COUNTRIES = listOf("GB", "US", "IT")
+
     /** Guards against a second exit-country evaluation in one session. */
     @Volatile
     private var exitCountryEvaluated = false
@@ -837,13 +858,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * A preference, not a constraint — the Psiphon `EGRESS_REGION_PREF`
          * semantics, applied where the exit is a Cloudflare anycast address
          * nobody can pin from the config alone. The service enforces it after
-         * the fact: it geolocates the address the core measured and rotates
-         * gateways until the exit lands in the wanted country, or the rotation
-         * budget ([EXIT_ROTATION_BUDGET]) is spent — after which whatever exit
-         * answered keeps the session, because a working tunnel beats a perfect
-         * one. That is the field-tested behaviour Taraneh described: UK egress
-         * ranges open the sanctioned sites, other ranges do not, and the exits
-         * handed out vary per connect.
+         * AI Mode (v1.9.7): this is the pref the home-screen AI MODE chip
+         * writes — ON = "GB", OFF = "auto" — honoured ONLY on GOOL (WoW)
+         * connects; startTunnel latches it to null on every other transport.
+         * The chase forces the policy's AI-country seeds (GB, then US/IT) as
+         * the GOOL peer and rotates through them until the measured exit
+         * lands in one of those countries or the seed list is spent.
          *
          * NOT read by Psiphon/Tor/SHARD: their exits are chosen by their own
          * engines, which already have country preferences of their own
@@ -855,15 +875,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXIT_COUNTRY_AUTO = "auto"
 
         /**
-         * How many endpoint rotations one user-initiated connect may spend
-         * chasing the preferred exit country.
+         * The floor of endpoint rotations one user-initiated connect may
+         * spend chasing the AI-country exit (v1.9.7).
          *
-         * Bounded because each rotation is a full reconnect (scan included when
-         * the cache was the wrong exit's) on a metered phone battery, and the
-         * anycast mapping is a lottery: an unbounded loop could spend the whole
-         * evening rescanning. Three is the field number — Taraneh's report has
-         * the UK edge appearing within a handful of reconnects on her carrier —
-         * and on budget exhaustion the session keeps the exit it has.
+         * The actual budget is the AI-country seed count from the remote
+         * policy (see startTunnel): each seed gets exactly one attempt, so
+         * the chase walks a bounded list rather than gambling the anycast.
+         * This constant is the FLOOR — a policy with fewer seeds still gets
+         * three attempts (the 1.9.6 number, kept so an empty-ish policy
+         * cannot shrink the chase to nothing), and the "working tunnel beats
+         * a perfect one" ceiling still applies when the list is spent.
          */
         const val EXIT_ROTATION_BUDGET = 3
 
@@ -3769,6 +3790,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .getString(EXIT_COUNTRY_PREF, EXIT_COUNTRY_AUTO)?.trim()?.uppercase(Locale.US)
         sessionExitCountry = wantedCountry?.takeIf { it != EXIT_COUNTRY_AUTO && it.length == 2 }
         exitCountryEvaluated = false
+        // AI MODE (v1.9.7): the preference is only honoured on GOOL (WoW). The
+        // field reports are unambiguous — a manual GB endpoint carried traffic
+        // on WoW and never on MASQUE/WireGuard — and MASQUE cannot even dial a
+        // forced MASQUE peer on a WireGuard port (its port list has no 890).
+        // Latching null here, for any transport but GOOL, is the whole fix:
+        // the chip is GOOL-only in the UI, and this guard is what enforces it
+        // even for a stale pref left by an older build (setAiMode wrote GB
+        // under MASQUE in ≤1.9.6) or a restored backup.
+        if (sessionExitCountry != null && currentProtocol != "GOOL") {
+            sessionExitCountry = null
+        }
         // PREFERRED-EXIT PIN: the endpoint a previous session verified exits in
         // the wanted country is tried FIRST, as a forced peer. This is the
         // "start with the tested English endpoint" half of the ordering; the
@@ -3795,20 +3827,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         } else {
             null
         }
-        if (exitPinPeer == null && sessionExitCountry != null &&
+        if (sessionExitCountry != null &&
+            exitPinPeer == null &&
             !config.contains(CHAIN_PROTOCOL_MARKER) &&
             !config.contains("\"forced_peer\"")
         ) {
-            // Skip the seed this chase already spent: a rotation proved it
+            // Skip every seed this chase already spent: a rotation proved it
             // wrong (or dead) and reconnecting onto it again would burn the
-            // whole budget on one endpoint.
-            val seed = RemotePolicy.exitEndpointsFor(this, sessionExitCountry!!, currentProtocol)
-                .firstOrNull { it.endpoint != consumedExitSeed }
+            // whole budget on one endpoint. This replaces the single-seed
+            // skip of v1.9.6 — the chase now walks the whole policy list
+            // (GB, US, IT) in file order before it ever falls back to a scan.
+            val triedSeeds = exitSeedHistory.toSet()
+            val seed = RemotePolicy.exitEndpointsFor(this, AI_COUNTRIES, currentProtocol)
+                .firstOrNull { it.endpoint !in triedSeeds }
             if (seed != null) {
                 exitPinPeer = seed.endpoint
                 consumedExitSeed = seed.endpoint
+                exitSeedHistory.add(seed.endpoint)
                 ConnectionLog.record(
-                    "Preferred-exit seed from policy: ${seed.endpoint} for $currentProtocol"
+                    "AI Mode seed from policy: ${seed.endpoint} (${seed.country})"
                 )
             }
         }
@@ -3840,7 +3877,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // over, so the seed the previous chase burned is eligible again —
             // endpoints drift, and "wrong this hour" is not "wrong forever".
             consumedExitSeed = null
-            exitRotationsLeft = if (sessionExitCountry != null) EXIT_ROTATION_BUDGET else 0
+            exitSeedHistory.clear()
+            // v1.9.7: the budget IS the seed walk. Every AI-country seed in
+            // the policy file gets exactly one attempt; a wrong-exit verdict
+            // moves the chase to the NEXT seed rather than gambling the
+            // anycast again. When the list runs out the chase keeps the exit
+            // it has — a working tunnel beats a perfect one, and this is the
+            // same ceiling that stopped the unbounded evening loop in 1.9.6.
+            exitRotationsLeft = if (sessionExitCountry != null) {
+                RemotePolicy.exitEndpointsFor(this, AI_COUNTRIES, currentProtocol).size
+                    .coerceAtLeast(EXIT_ROTATION_BUDGET)
+            } else {
+                0
+            }
         }
         // The country belongs to the session that just ended. Left set, the
         // notification would label a fresh tunnel with the previous exit's
@@ -5021,7 +5070,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 ConnectionLog.record("Exit country unknown; leaving the tunnel as it is")
                 return@execute
             }
-            if (actual == wanted) {
+            // AI Mode accepts ANY of the AI countries (v1.9.7): GB, US and IT
+            // exits all open Gemini, and the seed walk tries them in policy
+            // order. The verdict matches as soon as the measured exit lands
+            // in one of them — the pin is then banked for the next connect.
+            if (actual == wanted || (sessionExitCountry != null && actual in AI_COUNTRIES)) {
                 ConnectionLog.record("Exit country $actual matches the preference")
                 // On a pinned session the lastconn files are NOT this session's
                 // endpoint — the core does not save a forced peer — so the pin
