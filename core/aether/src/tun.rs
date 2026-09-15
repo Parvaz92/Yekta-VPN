@@ -272,6 +272,16 @@ fn fold_checksum(mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
+/// Parse IPv4 header and return header length (IHL * 4) if valid
+fn parse_ipv4_header(packet: &[u8]) -> Option<usize> {
+    if packet.len() < 20 { return None; }
+    let version = packet[0] >> 4;
+    if version != 4 { return None; }
+    let ihl = (packet[0] & 0x0f) as usize * 4;
+    if ihl < 20 || packet.len() < ihl { return None; }
+    Some(ihl)
+}
+
 fn recompute_tcp_checksum(packet: &mut [u8], ip_header_len: usize, version: u8) {
     let tcp_len = packet.len() - ip_header_len;
     packet[ip_header_len + 16..ip_header_len + 18].copy_from_slice(&[0, 0]);
@@ -373,6 +383,48 @@ pub async fn bridge(
                 if clamp_tcp_mss(&mut outbound, crate::wireguard::inner_mtu_hint()) {
                     clamped_syns += 1;
                 }
+                
+                // SMART DNS SPLIT: Intercept outbound DNS queries (UDP port 53)
+                // Only for IPv4 packets with UDP payload to port 53
+                if let Some(ihl) = parse_ipv4_header(&outbound) {
+                    if outbound.len() >= ihl + 8 {
+                        let udp = &outbound[ihl..];
+                        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+                        if dst_port == 53 && udp.len() > 8 {
+                            // This is a DNS query - try to process through Smart DNS
+                            if let Some(smart_dns) = crate::smart_dns::smart_dns() {
+                                if let Some((response, _used_anti_sanction)) = smart_dns.process_query(&outbound, ihl).await {
+                                    // Send the DNS response back through the TUN
+                                    // Swap src/dst for response
+                                    let mut resp_packet = response;
+                                    // Update IP header: swap src/dst, recalc checksum
+                                    if resp_packet.len() >= 20 {
+                                        resp_packet[12..16].copy_from_slice(&outbound[16..20]); // src = original dst
+                                        resp_packet[16..20].copy_from_slice(&outbound[12..16]); // dst = original src
+                                        // Recalculate IP checksum
+                                        let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
+                                        resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+                                        // Update UDP checksum (pseudo-header changed)
+                                        let udp_start = ihl;
+                                        let udp_len = resp_packet.len() - udp_start;
+                                        resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&[0, 0]); // zero checksum
+                                        let mut sum = ones_complement_sum(&resp_packet[12..20], 0);
+                                        sum += 17u32; // UDP protocol
+                                        sum += udp_len as u32;
+                                        sum = ones_complement_sum(&resp_packet[udp_start..], sum);
+                                        let mut udp_csum = fold_checksum(sum);
+                                        if udp_csum == 0 { udp_csum = 0xffff; }
+                                        resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
+                                        
+                                        let _ = write_packet(&tun, &resp_packet).await;
+                                        continue; // Skip sending original query to tunnel
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 outbound_tx.send(outbound).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },

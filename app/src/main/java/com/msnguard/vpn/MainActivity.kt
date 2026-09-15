@@ -151,6 +151,8 @@ class MainActivity : Activity() {
      */
     private var pendingBackupJson: String? = null
     private var settingsBackupRow: OrbitSettingsRow? = null
+    private var manualEndpointRow: OrbitSettingsRow? = null
+    private var gatewayCacheRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
     private var receiverRegistered = false
     private var autoPingRunning = false
@@ -630,7 +632,9 @@ class MainActivity : Activity() {
                 // Same lock contract as the transport rail: while connected the
                 // chip is dimmed and isEnabled=false swallows the tap silently —
                 // the pref only takes effect next connect anyway.
-                if (!isEnabled || !aiChipApplies()) return@setOnClickListener
+                // Functional only on toggleable protocols (MASQUE/WireGuard/WoW).
+                // Symbolic protocols (Psiphon/Tor/SHARD) are always-on, non-clickable.
+                if (!isEnabled || !aiModeFunctional()) return@setOnClickListener
                 performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 setAiMode(!aiModeOn())
             }
@@ -3585,8 +3589,15 @@ class MainActivity : Activity() {
         content.addView(sectionLabel(Strings.t("ROUTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
-        addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
+        val manualEndpointRow = addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
+        val gatewayCacheRow = addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
+        // v1.9.8: AI Mode now applies to all protocols — symbolic on Psiphon/Tor/SHARD,
+        // functional on MASQUE/WireGuard/WoW via Smart DNS Split.
+        lateinit var aiModeRow: OrbitSettingsRow
+        aiModeRow = addControl(Strings.t("AI Mode"), if (aiModeOn()) Strings.t("On") else Strings.t("Off")) {
+            setAiMode(!aiModeOn())
+            aiModeRow.setValue(if (aiModeOn()) Strings.t("On") else Strings.t("Off"))
+        }
         // v1.9.7: the Exit-country row is GONE. The engine behind it never
         // worked from the Settings side (the field reports: rotations landed
         // IR/DE on every pick), and AI Mode on the WoW chip now owns this
@@ -4508,6 +4519,7 @@ class MainActivity : Activity() {
                 "Fresh scan next time" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).apply()
                 else -> File(filesDir, "masque-gateway-cache.json").delete()
             }
+            gatewayCacheRow?.setValue(defaultEndpointDiscovery().label)
         }
     )
 
@@ -4638,23 +4650,25 @@ class MainActivity : Activity() {
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         buttons.addView(createSettingsButton(Strings.t("Clear")) {
-            preferences().edit().remove(MANUAL_ENDPOINT).apply()
-            field.setText("")
-        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+                    preferences().edit().remove(MANUAL_ENDPOINT).apply()
+                    field.setText("")
+                    manualEndpointRow?.setValue(Strings.t("Automatic"))
+                }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(Strings.t("Save")) {
-            val endpoint = field.text.toString().trim()
-            val validEndpoint = endpoint.isBlank() || Regex("^(?:\\d{1,3}(?:\\.\\d{1,3}){3}|\\[[0-9a-fA-F:]+]):([1-9]\\d{0,4})$")
-                .matchEntire(endpoint)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..65535 } == true
-            if (!validEndpoint) {
-                field.error = Strings.t("Use numeric IP:port")
-                return@createSettingsButton
-            }
-            preferences().edit().apply {
-                if (endpoint.isBlank()) remove(MANUAL_ENDPOINT) else putString(MANUAL_ENDPOINT, endpoint)
-            }.apply()
-            dialog.dismiss()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
-        sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
+                            val endpoint = field.text.toString().trim()
+                            val validEndpoint = endpoint.isBlank() || Regex("^(?:\\\\d{1,3}(?:\\\\.\\\\d{1,3}){3}|\\\\[[0-9a-fA-F:]+]):([1-9]\\\\d{0,4})$")
+                                .matchEntire(endpoint)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..65535 } == true
+                            if (!validEndpoint) {
+                                field.error = Strings.t("Use numeric IP:port")
+                                return@createSettingsButton
+                            }
+                            preferences().edit().apply {
+                                if (endpoint.isBlank()) remove(MANUAL_ENDPOINT) else putString(MANUAL_ENDPOINT, endpoint)
+                            }.apply()
+                            manualEndpointRow?.setValue(manualEndpoint() ?: Strings.t("Automatic"))
+                            dialog.dismiss()
+                        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+                sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
             addView(sheet)
@@ -6619,7 +6633,23 @@ class MainActivity : Activity() {
      * hidden (not pinned-lit): a control that cannot obey is worse than no
      * control, and the user asked for exactly that.
      */
-    private fun aiChipApplies(): Boolean = selectedProtocol == Protocol.WARP_IN_WARP
+    /** Returns true for protocols where AI Mode is either toggleable or symbolic. */
+    private fun aiModeVisible(): Boolean {
+        return selectedProtocol.aiModeBehavior != AiModeBehavior.HIDDEN
+    }
+
+    /** Returns true for protocols where AI Mode is functional (toggleable). */
+    private fun aiModeFunctional(): Boolean {
+        return selectedProtocol.aiModeBehavior == AiModeBehavior.TOGGLEABLE
+    }
+
+    /** Returns true for protocols where AI Mode is symbolic only (always on). */
+    private fun aiModeSymbolic(): Boolean {
+        return selectedProtocol.aiModeBehavior == AiModeBehavior.ALWAYS_ON_SYMBOLIC
+    }
+
+    /** The AI Mode chip applies to toggleable protocols for settings. */
+    private fun aiChipApplies(): Boolean = aiModeFunctional()
 
     /**
      * The AI Mode accent: neon blue, not the violet the upload tile uses.
@@ -6637,96 +6667,52 @@ class MainActivity : Activity() {
     private fun aiNeonBlueText(): Int = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
         0xFF075E92.toInt() else 0xFF7FDFFF.toInt()
 
-    /** Repaints the AI MODE chip: visible and live on WoW, GONE everywhere else. */
+    /** Repaints the AI MODE chip: visible on all protocols that support AI Mode,
+     * functional (toggleable) on MASQUE/WireGuard/WoW, symbolic (always-on) on Psiphon/Tor/SHARD. */
     private fun renderAiChip() {
         if (!::chipAiMode.isInitialized) return
-        val applies = aiChipApplies()
-        // v1.9.7: the chip exists only on WoW. On every other transport —
-        // including the ones whose own engines pick a country — it is GONE
-        // rather than pinned-lit: the field report was that a lit-but-dead
-        // pill on MASQUE/WireGuard misled, and hiding it is the one-tap
-        // app's honest answer ("this switch does nothing here"). The
-        // separator hides with it, so the chip line re-centers with no
-        // orphan dot.
-        chipAiMode.visibility = if (applies) View.VISIBLE else View.GONE
-        chipAiSeparator?.visibility = if (applies) View.VISIBLE else View.GONE
-        val pinned = !applies
-        val on = aiModeOn()
-        val lit = applies && on && modeControlsEnabled
+        val visible = aiModeVisible()
+        val functional = aiModeFunctional()
+        val symbolic = aiModeSymbolic()
+        val on = if (symbolic) true else aiModeOn()  // Symbolic protocols always appear ON
+        val modeEnabled = modeControlsEnabled
+
+        chipAiMode.visibility = if (visible) View.VISIBLE else View.GONE
+        chipAiSeparator?.visibility = if (visible) View.VISIBLE else View.GONE
+
+        val lit = (functional && on && modeEnabled) || (symbolic && modeEnabled)
         val fill = if (lit) Sculpt.blend(palette.surface, aiNeonBlue(), 0.20f)
         else Sculpt.blend(palette.surface, palette.ink, 0.02f)
+
         chipAiMode.background = Sculpt.sculptedBackground(
             resources.displayMetrics.density,
             fill, 999,
             Sculpt.withAlpha(if (lit) aiNeonBlue() else palette.ink, if (lit) 0.5f else 0.10f),
         )
-        // 2dp vertical padding, half the v1.9.3 value: the taller chip line
-        // cost the dial 8dp through fitConsoleToViewport, which is the
-        // "connect button got smaller" field report. 2dp keeps the pill shape
-        // readable at 12sp without stealing dial height.
         chipAiMode.setPadding(dp(10), dp(2), dp(10), dp(2))
         chipAiMode.setTextColor(if (lit) aiNeonBlueText() else palette.faint)
-        // Lock contract: while connected the chip is disabled and the tap is
-        // swallowed silently (the pref only takes effect next connect anyway).
-        chipAiMode.isEnabled = applies && modeControlsEnabled
-        chipAiMode.alpha = if (applies && !modeControlsEnabled) 0.45f else 1f
+        chipAiMode.isEnabled = functional && modeEnabled
+        chipAiMode.alpha = if (visible && !modeEnabled) 0.45f else 1f
         chipAiMode.contentDescription = when {
-            !applies -> "AI Mode فقط برای وارپ در وارپ فعال است"
-            !modeControlsEnabled -> "AI Mode قفل است تا اتصال قطع شود"
-            on -> "AI Mode روشن است؛ خروجی انگلیس، آمریکا یا ایتالیا می‌شود"
-            else -> "AI Mode خاموش است؛ سریع‌ترین مسیر انتخاب می‌شود"
+            !visible -> "AI Mode در این پروتکل پشتیبانی نمی‌شود"
+            symbolic -> "AI Mode نمادین: برای Psiphon/Tor/SHARD همیشه روشن (بدون عملکرد)"
+            !modeEnabled -> "AI Mode قفل است تا اتصال قطع شود"
+            on -> "AI Mode روشن: Split DNS برای Gemini فعال است"
+            else -> "AI Mode خاموش: DNS معمولی استفاده می‌شود"
         }
     }
 
-    /** The AI Mode preference: ON = chase an AI country, OFF = auto (fastest). */
+    /** The AI Mode preference: ON = Smart DNS Split for Gemini (on toggleable protocols),
+     * OFF = normal DNS. Stored as a separate boolean pref (not tied to exit country). */
     private fun aiModeOn(): Boolean {
-        val pref = preferences()
-            .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
-            ?.trim()?.uppercase(Locale.US)
-        val auto = MsnGuardVpnService.EXIT_COUNTRY_AUTO.uppercase(Locale.US)
-        // BOTH sides uppercase: the pref file has always stored lowercase
-        // "auto" (written by setAiMode and chooseExitCountry), so comparing a
-        // uppercased read against the lowercase constant made aiModeOn()
-        // return true for "auto" — every tap just wrote another "cleared"
-        // line instead of arming GB. The "button never flips" field report.
-        return pref != null && pref != auto && pref != "" && pref.length == 2
+        return preferences().getBoolean("ai_mode_enabled", false)
     }
 
     private fun setAiMode(on: Boolean) {
-        if (on) {
-            // Arm only with a seed in hand: the chase walks the policy's
-            // AI-country endpoints as forced peers (GB first, then US/IT), and
-            // without any seed the promise "the exit lands in GB/US/IT" has
-            // nothing behind it. RemotePolicy.refreshIfDue ran in onCreate,
-            // so the cache is at most one fetch away from current.
-            val seeds = RemotePolicy.exitEndpointsFor(
-                this,
-                listOf("GB", "US", "IT"),
-                Protocol.WARP_IN_WARP.coreName.uppercase(Locale.US),
-            )
-            if (seeds.isEmpty()) {
-                toastShort(Strings.t("AI Mode is not ready — try again in a moment"))
-                ConnectionLog.record("AI Mode arm refused: no AI-country seed in the policy")
-                return
-            }
-            preferences().edit()
-                .putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, "GB")
-                .apply()
-            ConnectionLog.record(
-                "AI Mode armed — exit pinned to GB/US/IT (${seeds.size} seed(s) in the policy)"
-            )
-        } else {
-            preferences().edit()
-                .putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
-                .apply()
-            ConnectionLog.record(
-                Strings.t("Preferred exit country cleared — the edge chooses")
-            )
-        }
+        preferences().edit().putBoolean("ai_mode_enabled", on).apply()
         renderAiChip()
-        // The settings page can be open behind the dial; its Exit-country row
-        // must not keep a stale value after the chip changed the same pref.
-        refreshPsiphonRows()
+        // If we're connected and AI Mode changed, we'd need to reconnect for it to take effect.
+        // The pref is read at VPN start in MsnGuardVpnService.
     }
 
     private fun obfuscationProfile(): ObfuscationProfile = preferences()
@@ -6922,11 +6908,22 @@ class MainActivity : Activity() {
         }
     }
 
+    /** AI Mode behavior for each protocol. */
+    private enum class AiModeBehavior {
+        /** Always visible, permanently ON (symbolic only — no actual function). */
+        ALWAYS_ON_SYMBOLIC,
+        /** Visible and toggleable — functional via Smart DNS Split. */
+        TOGGLEABLE,
+        /** Hidden — protocol doesn't support AI Mode. */
+        HIDDEN
+    }
+
     private enum class Protocol(
         val enLabel: String,
         val coreName: String,
         val enDescription: String,
         val androidAvailable: Boolean = true,
+        val aiModeBehavior: AiModeBehavior = AiModeBehavior.HIDDEN,
     ) {
         /** Localized at call time so a language switch refreshes every rail/page. */
         // ORDER IS THE UI. Both the home-screen rail and the Connection mode page
@@ -6938,11 +6935,11 @@ class MainActivity : Activity() {
         // move for a user who does not know what any of these words mean. MASQUE
         // follows because it survives the carriers WireGuard is blocked on, and the
         // one-time Auto Scan ([AUTO_SCAN_LADDER]) walks them in exactly this order.
-        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
-        MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
-        WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
-        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel"),
-        TOR("Tor", "tor", "Onion routing; slowest but hardest to block"),
+        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true, AiModeBehavior.TOGGLEABLE),
+        MASQUE("MASQUE", "masque", "HTTP/3 tunnel", true, AiModeBehavior.TOGGLEABLE),
+        WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true, AiModeBehavior.TOGGLEABLE),
+        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC),
+        TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC),
 
         /**
          * Public proxy nodes, picked automatically.
@@ -6951,7 +6948,7 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup");
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC);
 
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)

@@ -1846,6 +1846,12 @@ async fn run_masque_tunnel(
     let local_task = if let Some(fd) = options.tun_fd {
         tokio::spawn(async move { while addr_rx.recv().await.is_some() {} });
         log::info!("[+] Android TUN bridge active");
+        
+        // Initialize Smart DNS Split for this tunnel
+        if let Err(e) = crate::smart_dns::init_smart_dns().await {
+            log::warn!("[tun] Smart DNS init failed: {}", e);
+        }
+        
         tokio::spawn(tun::bridge(
             fd,
             parse_local_v4(&identity.ipv4),

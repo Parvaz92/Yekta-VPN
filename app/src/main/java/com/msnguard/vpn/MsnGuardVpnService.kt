@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.service.quicksettings.TileService
@@ -4387,6 +4388,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         stopPsiphonTunnel()
         NativeCore.stop()
         TunnelStatus.isNativeTunMode = false
+        // Stop Smart DNS Split if it was running
+        SmartDnsSplit.getInstance(this).stop()
         // Unconditional, like isNativeTunMode above: this flag is what keeps
         // isActive() true, so leaving it set after a teardown would make the UI
         // claim a proxy is up forever. Cleared for every path, including the ones
@@ -5624,40 +5627,57 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     private fun Builder.applyDns(config: String, addresses: NativeCore.TunnelAddresses): Builder {
-        // OURS, kept over upstream's version — this is load-bearing for Psiphon.
-        //
-        // Carrier DNS on Iranian mobile networks is both censored and rejected by
-        // Psiphon's SOCKS5 (reply 5), so public resolvers are forced first and any
-        // carrier-supplied server is filtered out rather than merely appended
-        // after. Upstream instead uses 1.1.1.1/1.0.0.1 only as a *fallback* when
-        // the config lists nothing, which would let carrier DNS through.
-        val forcedDns = listOf("1.1.1.1", "8.8.8.8")
-        forcedDns.forEach { addDnsServer(InetAddress.getByName(it)) }
+        // Check if AI Mode (Smart DNS Split) is enabled for this protocol
+        val prefs = this@MsnGuardVpnService.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val aiModeEnabled = prefs.getBoolean("ai_mode_enabled", false)
+        val protocol = currentProtocol.uppercase()
+        val isToggleableProtocol = protocol.contains("MASQUE") || protocol.contains("WIREGUARD") || protocol.contains("GOOL")
+        val useSmartDns = aiModeEnabled && isToggleableProtocol
 
-        // From upstream v0.8.0: advertise a v6 resolver when the identity has a
-        // v6 address, otherwise v6-only lookups have nowhere to go.
-        if (addresses.ipv6.isNotBlank()) {
-            runCatching { addDnsServer(InetAddress.getByName("2606:4700:4700::1111")) }
-        }
+        if (useSmartDns) {
+            // Start Smart DNS Split engine
+            val smartDns = SmartDnsSplit.getInstance(this@MsnGuardVpnService)
+            smartDns.start()
+            // Use our local DNS server
+            val localDns = smartDns.getLocalDnsAddress()
+            addDnsServer(localDns.address)
+            ConnectionLog.record("Smart DNS Split enabled for Gemini domains (local DNS: ${localDns.address.hostAddress}:${localDns.port})")
+        } else {
+            // OURS, kept over upstream's version — this is load-bearing for Psiphon.
+            //
+            // Carrier DNS on Iranian mobile networks is both censored and rejected by
+            // Psiphon's SOCKS5 (reply 5), so public resolvers are forced first and any
+            // carrier-supplied server is filtered out rather than merely appended
+            // after. Upstream instead uses 1.1.1.1/1.0.0.1 only as a *fallback* when
+            // the config lists nothing, which would let carrier DNS through.
+            val forcedDns = listOf("1.1.1.1", "8.8.8.8")
+            forcedDns.forEach { addDnsServer(InetAddress.getByName(it)) }
 
-        // Also add any DNS servers from config (for non-Psiphon protocols).
-        val configured = JSONObject(config).optString("dns_servers")
-        configured.split(',', ';', ' ', '\n')
-            .map(String::trim)
-            .filter(String::isNotEmpty)
-            .mapNotNull { entry ->
-                val address = when {
-                    entry.startsWith('[') -> entry.substringAfter('[').substringBefore(']')
-                    entry.count { it == ':' } == 1 -> entry.substringBefore(':')
-                    else -> entry
-                }
-                runCatching { InetAddress.getByName(address) }.getOrNull()
+            // From upstream v0.8.0: advertise a v6 resolver when the identity has a
+            // v6 address, otherwise v6-only lookups have nowhere to go.
+            if (addresses.ipv6.isNotBlank()) {
+                runCatching { addDnsServer(InetAddress.getByName("2606:4700:4700::1111")) }
             }
-            .distinct()
-            .filter { it.hostAddress !in forcedDns }
-            .forEach { addDnsServer(it) }
 
-        ConnectionLog.record("DNS forced to public resolvers, carrier DNS excluded")
+            // Also add any DNS servers from config (for non-Psiphon protocols).
+            val configured = JSONObject(config).optString("dns_servers")
+            configured.split(',', ';', ' ', '\n')
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .mapNotNull { entry ->
+                    val address = when {
+                        entry.startsWith('[') -> entry.substringAfter('[').substringBefore(']')
+                        entry.count { it == ':' } == 1 -> entry.substringBefore(':')
+                        else -> entry
+                    }
+                    runCatching { InetAddress.getByName(address) }.getOrNull()
+                }
+                .distinct()
+                .filter { it.hostAddress !in forcedDns }
+                .forEach { addDnsServer(it) }
+
+            ConnectionLog.record("DNS forced to public resolvers, carrier DNS excluded")
+        }
         return this
     }
 }
