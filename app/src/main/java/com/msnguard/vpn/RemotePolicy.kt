@@ -359,8 +359,17 @@ object RemotePolicy {
      * then behaves exactly as before this list existed.
      */
     fun exitEndpointsFor(context: Context, country: String, transport: String): List<ExitEndpoint> =
+        exitEndpointsFor(context, listOf(country), transport)
+
+    /**
+     * The multi-country form (v1.9.7 AI Mode): every seed whose country is in
+     * [countries] and whose transports list admits [transport], in FILE order —
+     * the caller walks them first-to-last and the GB seed sits first in the
+     * shipped file, so the field-tested endpoint is tried before any other.
+     */
+    fun exitEndpointsFor(context: Context, countries: List<String>, transport: String): List<ExitEndpoint> =
         policy(context).exitEndpoints.filter {
-            it.country == country && transport in it.transports
+            it.country in countries && transport in it.transports
         }
 
     private fun policy(context: Context): Policy {

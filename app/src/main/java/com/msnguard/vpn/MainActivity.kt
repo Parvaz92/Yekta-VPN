@@ -608,11 +608,13 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             letterSpacing = spacing(0.08f)
         }
-        // AI MODE: a one-tap shortcut for the Exit-country preference, not a
-        // separate engine. ON = the preferred exit is set (any country picked in
-        // Settings counts as ON — GB is the default only because Taraneh's field
-        // report measured UK edges opening the sanctioned sites); OFF = the
-        // preference is auto, i.e. whichever Cloudflare edge answers first.
+        // AI MODE (v1.9.7): a one-tap switch, WoW only. ON = the next WoW
+        // connect is forced through a proven AI-country endpoint (GB first,
+        // then US/IT from the remote policy) and the geo verdict keeps
+        // rotating through the seed list until the exit lands in one of
+        // them; OFF = auto, whichever edge answers first. The chip is GONE
+        // on every other transport — the field reports measured the manual
+        // endpoint carrying traffic on WoW and nothing else.
         // It lives in the chip line so the home screen gains no height: the row
         // is centered and wrap_content, and the pill is WRAP_CONTENT itself.
         chipAiMode = label(Strings.t("AI MODE"), 12f, MUTED, TypefaceStyle.MEDIUM).apply {
@@ -3585,19 +3587,11 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(26) })
         addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
         addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
-        // Preferred exit country and custom DNS: both are WARP-transport
-        // knobs, so they live under ROUTING with the endpoint controls. The
-        // country row reads like Psiphon's "Preferred country" on purpose —
-        // to the user it is the same question, answered by a different engine.
-        lateinit var exitCountryRow: OrbitSettingsRow
-        exitCountryRow = addControl(Strings.t("Exit country"), exitCountryLabel()) {
-            chooseExitCountry {
-                exitCountryRow.setValue(exitCountryLabel())
-                // The AI MODE chip reads the same preference — repaint it so the
-                // pill cannot claim OFF while the row just set Germany.
-                renderAiChip()
-            }
-        }
+        // v1.9.7: the Exit-country row is GONE. The engine behind it never
+        // worked from the Settings side (the field reports: rotations landed
+        // IR/DE on every pick), and AI Mode on the WoW chip now owns this
+        // preference end-to-end — one writer, one switch, nothing stale to
+        // repaint. exitCountryLabel/chooseExitCountry were removed with it.
         lateinit var dnsRow: OrbitSettingsRow
         dnsRow = addControl(Strings.t("Custom DNS"), customDnsLabel()) {
             editCustomDns { dnsRow.setValue(customDnsLabel()) }
@@ -4516,62 +4510,6 @@ class MainActivity : Activity() {
             }
         }
     )
-
-    /**
-     * Row value for the exit-country preference: the flag+name, or Automatic.
-     */
-    private fun exitCountryLabel(): String {
-        val stored = preferences()
-            .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
-            ?.trim()?.uppercase(Locale.US).orEmpty()
-        if (stored.isEmpty() || stored == MsnGuardVpnService.EXIT_COUNTRY_AUTO) return Strings.t("Automatic")
-        return PsiphonRegions.label(stored)
-    }
-
-    /**
-     * Picker for the WARP transports' preferred exit country.
-     *
-     * Same shape as Psiphon's [chooseEgressRegion] and for the same reason:
-     * the wording "tries this country first, falls back to everything" is the
-     * honest description of a preference that must never wedge a tunnel.
-     * The list is the shared country table — Cloudflare's anycast egress
-     * spans it — with the two-letter codes the service compares against
-     * geolocation answers.
-     */
-    private fun chooseExitCountry(after: (() -> Unit)? = null) {
-        val options = listOf(MsnGuardVpnService.EXIT_COUNTRY_AUTO) + PsiphonRegions.options(this)
-        showChoiceSheet(
-            title = Strings.t("Exit country"),
-            subtitle = Strings.t("Tries to come out in this country first. If it will not connect, any exit is used."),
-            options = options,
-            selected = preferences()
-                .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
-                ?.trim()?.uppercase(Locale.US)
-                ?: MsnGuardVpnService.EXIT_COUNTRY_AUTO,
-            label = { code ->
-                if (code == MsnGuardVpnService.EXIT_COUNTRY_AUTO) Strings.t("Automatic")
-                else PsiphonRegions.label(code)
-            },
-            description = { code ->
-                if (code == MsnGuardVpnService.EXIT_COUNTRY_AUTO) {
-                    Strings.t("Fastest — whichever Cloudflare edge answers first")
-                } else {
-                    Strings.t("Sanctioned sites often open on some countries' exits and not others")
-                }
-            },
-            scrollable = true,
-        ) { chosen ->
-            preferences().edit().putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, chosen).apply()
-            ConnectionLog.record(
-                if (chosen == MsnGuardVpnService.EXIT_COUNTRY_AUTO) {
-                    Strings.t("Preferred exit country cleared — the edge chooses")
-                } else {
-                    "Preferred exit country set to ${PsiphonRegions.name(chosen)} ($chosen)"
-                }
-            )
-            after?.invoke()
-        }
-    }
 
     /** Row value for the custom-DNS box: the servers, or Automatic. */
     private fun customDnsLabel(): String {
@@ -6674,15 +6612,14 @@ class MainActivity : Activity() {
     /**
      * Whether the AI Mode shortcut can act on the selected transport.
      *
-     * The Exit-country engine only applies to the three WARP transports
-     * (MASQUE/WireGuard/WoW): Psiphon, Tor and SHARD pick their exit through
-     * their own engines, which already have country preferences of their own
-     * (EGRESS_REGION_PREF, tor exit nodes, SHARD node selection).
+     * v1.9.7: WoW (GOOL) ONLY. The field reports on the manual endpoint were
+     * unambiguous — 188.114.96.96:890 carried traffic on WoW and never on
+     * MASQUE or WireGuard — and the engine's seed/pin/rotation chase is
+     * built around a forced GOOL peer. On every other transport the chip is
+     * hidden (not pinned-lit): a control that cannot obey is worse than no
+     * control, and the user asked for exactly that.
      */
-    private fun aiChipApplies(): Boolean = when (selectedProtocol) {
-        Protocol.MASQUE, Protocol.WIREGUARD, Protocol.WARP_IN_WARP -> true
-        else -> false
-    }
+    private fun aiChipApplies(): Boolean = selectedProtocol == Protocol.WARP_IN_WARP
 
     /**
      * The AI Mode accent: neon blue, not the violet the upload tile uses.
@@ -6700,21 +6637,22 @@ class MainActivity : Activity() {
     private fun aiNeonBlueText(): Int = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
         0xFF075E92.toInt() else 0xFF7FDFFF.toInt()
 
-    /** Repaints the AI MODE chip: lit on the WARP transports, pinned-lit on the others. */
+    /** Repaints the AI MODE chip: visible and live on WoW, GONE everywhere else. */
     private fun renderAiChip() {
         if (!::chipAiMode.isInitialized) return
         val applies = aiChipApplies()
-        // Psiphon, Tor and SHARD pick their exit country through their own
-        // engines (EGRESS_REGION_PREF, Tor exit nodes, SHARD node ranking) —
-        // AI Mode is effectively ALWAYS ON there and the user cannot turn it
-        // off. The chip stays visible and lit instead of disappearing, so the
-        // row does not jump around when the transport changes; the tap is
-        // locked and the description says why.
+        // v1.9.7: the chip exists only on WoW. On every other transport —
+        // including the ones whose own engines pick a country — it is GONE
+        // rather than pinned-lit: the field report was that a lit-but-dead
+        // pill on MASQUE/WireGuard misled, and hiding it is the one-tap
+        // app's honest answer ("this switch does nothing here"). The
+        // separator hides with it, so the chip line re-centers with no
+        // orphan dot.
+        chipAiMode.visibility = if (applies) View.VISIBLE else View.GONE
+        chipAiSeparator?.visibility = if (applies) View.VISIBLE else View.GONE
         val pinned = !applies
-        chipAiMode.visibility = View.VISIBLE
-        chipAiSeparator?.visibility = View.VISIBLE
-        val on = pinned || aiModeOn()
-        val lit = on && modeControlsEnabled
+        val on = aiModeOn()
+        val lit = applies && on && modeControlsEnabled
         val fill = if (lit) Sculpt.blend(palette.surface, aiNeonBlue(), 0.20f)
         else Sculpt.blend(palette.surface, palette.ink, 0.02f)
         chipAiMode.background = Sculpt.sculptedBackground(
@@ -6728,23 +6666,19 @@ class MainActivity : Activity() {
         // readable at 12sp without stealing dial height.
         chipAiMode.setPadding(dp(10), dp(2), dp(10), dp(2))
         chipAiMode.setTextColor(if (lit) aiNeonBlueText() else palette.faint)
-        // Lock contract, two cases:
-        //  - WARP transports: the rail's lock — disabled while connected
-        //    (the pref only takes effect next connect anyway), tappable
-        //    while disconnected.
-        //  - pinned transports: always lit, never tappable — there is
-        //    nothing to switch, the engines already choose the exit.
-        chipAiMode.isEnabled = !pinned && modeControlsEnabled
-        chipAiMode.alpha = if (pinned || modeControlsEnabled) 1f else 0.45f
+        // Lock contract: while connected the chip is disabled and the tap is
+        // swallowed silently (the pref only takes effect next connect anyway).
+        chipAiMode.isEnabled = applies && modeControlsEnabled
+        chipAiMode.alpha = if (applies && !modeControlsEnabled) 0.45f else 1f
         chipAiMode.contentDescription = when {
-            pinned -> "AI Mode فعال است؛ این پروتکل خودش کشور خروجی را انتخاب می‌کند"
+            !applies -> "AI Mode فقط برای وارپ در وارپ فعال است"
             !modeControlsEnabled -> "AI Mode قفل است تا اتصال قطع شود"
-            on -> "AI Mode روشن است؛ آی‌پی خروجی انگلیس می‌شود"
+            on -> "AI Mode روشن است؛ خروجی انگلیس، آمریکا یا ایتالیا می‌شود"
             else -> "AI Mode خاموش است؛ سریع‌ترین مسیر انتخاب می‌شود"
         }
     }
 
-    /** The AI Mode preference: ON = GB preferred, OFF = auto (fastest). */
+    /** The AI Mode preference: ON = chase an AI country, OFF = auto (fastest). */
     private fun aiModeOn(): Boolean {
         val pref = preferences()
             .getString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
@@ -6759,15 +6693,36 @@ class MainActivity : Activity() {
     }
 
     private fun setAiMode(on: Boolean) {
-        val target = if (on) "GB" else MsnGuardVpnService.EXIT_COUNTRY_AUTO
-        preferences().edit().putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, target).apply()
-        ConnectionLog.record(
-            if (on) {
-                "AI Mode armed — exit country pinned to United Kingdom (GB)"
-            } else {
+        if (on) {
+            // Arm only with a seed in hand: the chase walks the policy's
+            // AI-country endpoints as forced peers (GB first, then US/IT), and
+            // without any seed the promise "the exit lands in GB/US/IT" has
+            // nothing behind it. RemotePolicy.refreshIfDue ran in onCreate,
+            // so the cache is at most one fetch away from current.
+            val seeds = RemotePolicy.exitEndpointsFor(
+                this,
+                listOf("GB", "US", "IT"),
+                Protocol.WARP_IN_WARP.coreName.uppercase(Locale.US),
+            )
+            if (seeds.isEmpty()) {
+                toastShort(Strings.t("AI Mode is not ready — try again in a moment"))
+                ConnectionLog.record("AI Mode arm refused: no AI-country seed in the policy")
+                return
+            }
+            preferences().edit()
+                .putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, "GB")
+                .apply()
+            ConnectionLog.record(
+                "AI Mode armed — exit pinned to GB/US/IT (${seeds.size} seed(s) in the policy)"
+            )
+        } else {
+            preferences().edit()
+                .putString(MsnGuardVpnService.EXIT_COUNTRY_PREF, MsnGuardVpnService.EXIT_COUNTRY_AUTO)
+                .apply()
+            ConnectionLog.record(
                 Strings.t("Preferred exit country cleared — the edge chooses")
-            },
-        )
+            )
+        }
         renderAiChip()
         // The settings page can be open behind the dial; its Exit-country row
         // must not keep a stale value after the chip changed the same pref.

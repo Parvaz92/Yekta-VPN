@@ -37,6 +37,7 @@ object Strings {
         "ARMED" to Triple("ARMED", "آماده‌به‌کار", "已就绪"),
         "Adjust traffic-shape padding for filtered networks" to Triple("Adjust traffic-shape padding for filtered networks", "تنظیم پدینگ شکل‌دهی ترافیک برای شبکه‌های دارای فیلترینگ", "调整数据包填充以对抗网络审查"),
         "AI MODE" to Triple("AI MODE", "حالت AI", "AI 模式"),
+        "AI Mode is not ready — try again in a moment" to Triple("AI Mode is not ready — try again in a moment", "حالت AI آماده نیست — کمی بعد دوباره امتحان کن", "AI 模式尚未就绪 — 请稍后再试"),
         "Advanced obfuscation" to Triple("Advanced obfuscation", "مخفی‌سازی پیشرفته", "高级混淆设置"),
         "Aggressive" to Triple("Aggressive", "شدید", "强力"),
         "All" to Triple("All", "همه", "全部"),
