@@ -45,6 +45,9 @@ jobs:
           cargo install cargo-ndk
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+      - name: Add cargo-ndk to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Setup signing keystore
         env:
           AETHERY_KEYSTORE_BASE64: ${{ secrets.AETHERY_KEYSTORE_BASE64 }}

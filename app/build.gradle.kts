@@ -141,6 +141,9 @@ targetAbis.forEach { abi ->
             commandLine("bash", buildScript.absolutePath, "--abi", abi)
         }
         environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+        environment("ANDROID_SDK_ROOT", android.sdkDirectory.absolutePath)
+        environment("ANDROID_NDK_HOME", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+        environment("ANDROID_NDK_ROOT", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
         inputs.dir(rootProject.file("core/aether/src"))
         inputs.file(rootProject.file("core/aether/Cargo.toml"))
         inputs.dir(rootProject.file("core/quiche"))
