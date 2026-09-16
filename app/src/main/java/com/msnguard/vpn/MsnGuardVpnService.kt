@@ -5636,22 +5636,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // OURS, kept over upstream's version — this is load-bearing for Psiphon.
         //
         // Carrier DNS on Iranian mobile networks is both censored and rejected by
-        // Psiphon's SOCKS5 (reply 5), so public resolvers are forced first and any
+        // Psiphon's SOCKS5 (reply 5), so public resolvers are forced and any
         // carrier-supplied server is filtered out rather than merely appended
         // after. Upstream instead uses 1.1.1.1/1.0.0.1 only as a *fallback* when
         // the config lists nothing, which would let carrier DNS through.
-        val forcedDns = listOf("1.1.1.1", "8.8.8.8")
-        forcedDns.forEach { addDnsServer(InetAddress.getByName(it)) }
-
-        // From upstream v0.8.0: advertise a v6 resolver when the identity has a
-        // v6 address, otherwise v6-only lookups have nowhere to go.
-        if (addresses.ipv6.isNotBlank()) {
-            runCatching { addDnsServer(InetAddress.getByName("2606:4700:4700::1111")) }
-        }
-
-        // Also add any DNS servers from config (for non-Psiphon protocols).
+        //
+        // v1.9.8: the user's custom DNS list, when present, takes precedence over
+        // the public resolvers — it is added FIRST, so Android asks it before
+        // 1.1.1.1. The field log proved the previous order was useless: the
+        // custom servers were appended after 1.1.1.1/8.8.8.8 and Android never
+        // got around to asking them.
         val configured = JSONObject(config).optString("dns_servers")
-        configured.split(',', ';', ' ', '\n')
+        val custom = configured.split(',', ';', ' ', '\n')
             .map(String::trim)
             .filter(String::isNotEmpty)
             .mapNotNull { entry ->
@@ -5663,10 +5659,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 runCatching { InetAddress.getByName(address) }.getOrNull()
             }
             .distinct()
-            .filter { it.hostAddress !in forcedDns }
-            .forEach { addDnsServer(it) }
 
-        ConnectionLog.record("DNS forced to public resolvers, carrier DNS excluded")
+        // Custom resolvers first — that is the whole point of the setting.
+        custom.forEach { addDnsServer(it) }
+
+        val forcedDns = listOf("1.1.1.1", "8.8.8.8")
+        forcedDns.forEach { addDnsServer(InetAddress.getByName(it)) }
+
+        // From upstream v0.8.0: advertise a v6 resolver when the identity has a
+        // v6 address, otherwise v6-only lookups have nowhere to go.
+        if (addresses.ipv6.isNotBlank()) {
+            runCatching { addDnsServer(InetAddress.getByName("2606:4700:4700::1111")) }
+        }
+
+        // Carrier-supplied servers are deliberately NOT added: on Iranian mobile
+        // networks the carrier DNS is both censored and rejected by Psiphon's
+        // SOCKS5 (reply 5). Only custom + public resolvers are advertised.
+
+        ConnectionLog.record(if (custom.isEmpty()) "DNS forced to public resolvers, carrier DNS excluded"
+            else "Custom DNS first: ${custom.joinToString(", ") { it.hostAddress }}, then public resolvers")
         return this
     }
 }
