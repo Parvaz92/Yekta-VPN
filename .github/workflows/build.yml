@@ -30,6 +30,13 @@ jobs:
           /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "ndk;26.3.11579264" "cmake;3.22.1" > /dev/null || true
           /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --list_installed | head -10
 
+      - name: Set Android SDK/NDK env
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/26.3.11579264" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=/usr/local/lib/android/sdk/ndk/26.3.11579264" >> $GITHUB_ENV
+
       - name: Install Rust and targets
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
