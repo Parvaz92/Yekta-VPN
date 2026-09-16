@@ -34,6 +34,7 @@ dependencies = [
  "libc",
  "log",
  "octets",
+ "once_cell",
  "parking_lot",
  "quiche",
  "rand",

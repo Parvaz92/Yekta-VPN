@@ -55,9 +55,9 @@ pub struct SmartDnsSplit {
     /// Semaphore to limit concurrent queries
     semaphore: Arc<Semaphore>,
     /// Anti-sanction DNS sockets (pre-connected)
-    anti_sanction_sockets: Vec<UdpSocket>,
+    anti_sanction_sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// Default DNS sockets (pre-connected)
-    default_sockets: Vec<UdpSocket>,
+    default_sockets: Arc<Vec<Arc<UdpSocket>>>,
 }
 
 impl SmartDnsSplit {
@@ -74,7 +74,7 @@ impl SmartDnsSplit {
                 .map_err(AetherError::Io)?;
             sock.connect(addr).await.map_err(AetherError::Io)?;
             crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
-            anti_sanction_sockets.push(sock);
+            anti_sanction_sockets.push(Arc::new(sock));
         }
 
         // Pre-connect default DNS sockets
@@ -85,14 +85,14 @@ impl SmartDnsSplit {
                 .map_err(AetherError::Io)?;
             sock.connect(addr).await.map_err(AetherError::Io)?;
             crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
-            default_sockets.push(sock);
+            default_sockets.push(Arc::new(sock));
         }
 
         Ok(Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
-            anti_sanction_sockets,
-            default_sockets,
+            anti_sanction_sockets: anti_sanction_sockets.into(),
+            default_sockets: default_sockets.into(),
         })
     }
 
@@ -189,15 +189,15 @@ impl SmartDnsSplit {
     }
 
     /// Query multiple DNS servers in parallel, return first successful response
-    async fn parallel_query(&self, sockets: &[UdpSocket], query: &[u8], expected_id: u16, name: &str) -> Result<Vec<u8>> {
+    async fn parallel_query(&self, sockets: Arc<Vec<Arc<UdpSocket>>>, query: Vec<u8>, expected_id: u16, name: String) -> Result<Vec<u8>> {
         let permit = self.semaphore.acquire().await.map_err(|_| AetherError::Other("semaphore closed".into()))?;
-        
+
         let mut handles = Vec::new();
-        for sock in sockets {
-            let sock = sock.clone();
-            let query = query.to_vec();
-            let expected_id = expected_id;
-            let name = name.to_string();
+        let query = Arc::new(query);
+        let name = Arc::new(name);
+        for sock in sockets.iter().cloned() {
+            let query = query.clone();
+            let name = name.clone();
             handles.push(tokio::spawn(async move {
                 let deadline = Instant::now() + QUERY_TIMEOUT;
                 sock.send(&query).await.ok()?;
@@ -283,25 +283,26 @@ impl SmartDnsSplit {
 
         // Build fresh query with new transaction ID
         let (query, new_id) = Self::build_query(&domain, qtype);
+        let query2 = query.clone();
 
         // Choose DNS path
         let (response, used_anti_sanction) = if is_gemini {
             // Race anti-sanction servers
-            match self.parallel_query(&self.anti_sanction_sockets, &query, new_id, &domain).await {
+            match self.parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, domain.clone()).await {
                 Ok(resp) => (resp, true),
                 Err(_) => {
                     // Fallback to default DNS
-                    match self.parallel_query(&self.default_sockets, &query, new_id, &domain).await {
+                    match self.parallel_query(self.default_sockets.clone(), query.clone(), new_id, domain.clone()).await {
                         Ok(resp) => (resp, false),
-                        Err(e) => return Some((Self::build_error_response(&query, new_id), true)),
+                        Err(_e) => return Some((Self::build_error_response(&query2, new_id), true)),
                     }
                 }
             }
         } else {
             // Normal path: default DNS only
-            match self.parallel_query(&self.default_sockets, &query, new_id, &domain).await {
+            match self.parallel_query(self.default_sockets.clone(), query.clone(), new_id, domain.clone()).await {
                 Ok(resp) => (resp, false),
-                Err(_) => return Some((Self::build_error_response(&query, new_id), false)),
+                Err(_) => return Some((Self::build_error_response(&query2, new_id), false)),
             }
         };
 
