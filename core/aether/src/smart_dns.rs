@@ -201,6 +201,10 @@ pub struct SmartDnsSplit {
     default_sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// DoT/DoH endpoints. When non-empty, the encrypted path is preferred.
     encrypted_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
+    /// The user's own resolvers (any transport), set from `smart_dns_servers`.
+    /// The engine prefers these for Gemini lookups — the whole point of the
+    /// Custom DNS setting. Empty until set_resolvers() runs.
+    user_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
 }
 
 impl SmartDnsSplit {
@@ -249,6 +253,7 @@ impl SmartDnsSplit {
             anti_sanction_sockets: anti_sanction_sockets.into(),
             default_sockets: default_sockets.into(),
             encrypted_resolvers: Arc::new(RwLock::new(Vec::new())),
+            user_resolvers: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -347,6 +352,51 @@ impl SmartDnsSplit {
         drop(permit);
 
         result.ok_or_else(|| AetherError::Other("All DNS queries failed".into()))
+    }
+
+    /// Query the user's own plain-UDP endpoints in parallel.
+    /// Sockets are opened on the spot — the user's list can change at runtime —
+    /// and each socket is protected (kept outside the tunnel) when its target is
+    /// a private address, since private IPs are unroutable through the tunnel.
+    async fn query_endpoints(&self, endpoints: &[DnsEndpoint], query: Vec<u8>, expected_id: u16, name: String, qtype: u16) -> Result<Vec<u8>> {
+        let mut socks: Vec<Arc<UdpSocket>> = Vec::with_capacity(endpoints.len());
+        for ep in endpoints {
+            let addr = format!("{}:53", ep.address);
+            let bind_addr = if ep.address.parse::<std::net::IpAddr>().map(|i| i.is_ipv4()).unwrap_or(true) { "0.0.0.0:0" } else { "[::]:0" };
+            match UdpSocket::bind(bind_addr).await {
+                Ok(sock) => {
+                    let sock = Arc::new(sock);
+                    // Only private resolvers (e.g. the Iranian 10.202.10.x /
+                    // 78.157.42.x ranges) must be kept outside the tunnel — they
+                    // are unroutable through it. Public resolvers must stay
+                    // inside, otherwise the local network blocks them outright.
+                    let is_private = ep.address
+                        .parse::<std::net::IpAddr>()
+                        .map(|ip| match ip {
+                            std::net::IpAddr::V4(v4) => v4.is_private(),
+                            std::net::IpAddr::V6(v6) => {
+                                let seg = v6.segments();
+                                (seg[0] & 0xfe00) == 0xfc00 // unique-local fd00::/8
+                            }
+                        })
+                        .unwrap_or(false);
+                    if is_private {
+                        crate::platform::protect_socket(&sock);
+                    }
+                    if let Err(e) = sock.connect(addr).await {
+                        log::warn!("[smart-dns] user resolver {} unreachable: {e}", ep.address);
+                        continue;
+                    }
+                    socks.push(sock);
+                }
+                Err(e) => log::warn!("[smart-dns] bind for {} failed: {e}", ep.address),
+            }
+        }
+        if socks.is_empty() {
+            return Err(AetherError::Other("no user resolver socket could be opened".into()));
+        }
+        log::info!("[smart-dns] querying {} user resolver(s) for {name} (type {qtype})", socks.len());
+        self.parallel_query(Arc::new(socks), query, expected_id, name, qtype).await
     }
 
     /// Resolve over DoT/DoH. Preferred over plain UDP when configured — it is the
@@ -468,6 +518,15 @@ impl SmartDnsSplit {
         let domain = labels.join(".");
         let is_gemini = Self::is_gemini_domain(&domain);
 
+        // Diagnostic: without this the engine looks dead when it is merely
+        // receiving nothing. The field log showed init + ready but zero
+        // per-query lines, which was indistinguishable from "queries never
+        // arrive at the TUN" and "queries arrive but the parser rejects them".
+        log::info!(
+            "[smart-dns] qtype={qtype} name={domain} gemini={is_gemini} len={}",
+            payload.len()
+        );
+
         // Only Gemini queries are intercepted. Everything else must flow through
         // the tunnel's normal path — intercepting every query was the previous
         // build's fatal flaw and broke all DNS on the device.
@@ -519,6 +578,38 @@ impl SmartDnsSplit {
         }
 
         let (query, new_id) = Self::build_query(&domain, qtype);
+
+        // Prefer the user's own resolvers when configured — that is the entire
+        // point of the Custom DNS setting. Fall back to the built-in
+        // anti-sanction list, then to the public defaults.
+        let user = self.user_resolvers.read().clone();
+        let plain_user: Vec<_> = user
+            .iter()
+            .filter(|e| e.transport == DnsTransport::Plain)
+            .cloned()
+            .collect();
+        if !plain_user.is_empty() {
+            match self.query_endpoints(&plain_user, query.clone(), new_id, domain.clone(), qtype).await {
+                Ok(resp) => {
+                    let mut to_cache = resp.clone();
+                    if to_cache.len() >= 2 && payload.len() >= 2 {
+                        to_cache[0] = payload[0];
+                        to_cache[1] = payload[1];
+                    }
+                    {
+                        let mut cache = self.cache.write();
+                        if cache.len() > 1024 { cache.clear(); }
+                        cache.insert(cache_key.clone(), CachedResponse {
+                            data: to_cache,
+                            expires: Instant::now() + CACHE_TTL,
+                        });
+                    }
+                    return Some((resp, true));
+                }
+                Err(e) => log::warn!("[smart-dns] user resolvers failed for {domain} ({e}); falling back"),
+            }
+        }
+
         let query2 = query.clone();
 
         let (response, used_anti_sanction) = match self
@@ -576,21 +667,19 @@ pub fn smart_dns() -> Option<&'static SmartDnsSplit> {
     SMART_DNS.get()
 }
 
-/// Replace the engine's encrypted (DoT/DoH) resolver list at runtime.
-/// Called after init_smart_dns() once the user's `smart_dns_servers` string
-/// has been parsed — the plain-UDP entries in it are Android's business and are
-/// filtered out by the caller. Mirrors RethinkDNS's updateTun: reconfigure
+/// Replace the engine's resolver list at runtime. Called after
+/// init_smart_dns() once the user's `smart_dns_servers` string has been parsed.
+/// Plain-UDP entries are kept for the engine's own resolution path (Gemini
+/// lookups) AND are already handed to Android by applyDns(); encrypted entries
+/// are spoken by the core alone. Mirrors RethinkDNS's updateTun: reconfigure
 /// without tearing the tunnel down.
-pub fn set_resolvers(encrypted: Vec<DnsEndpoint>) {
+pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
     if let Some(engine) = SMART_DNS.get() {
-        let only_encrypted: Vec<_> = encrypted.into_iter()
-            .filter(|e| e.transport != DnsTransport::Plain)
-            .collect();
-        let count = only_encrypted.len();
-        let mut guard = engine.encrypted_resolvers.write();
+        let count = resolvers.len();
+        let mut guard = engine.user_resolvers.write();
         guard.clear();
-        guard.extend(only_encrypted);
-        log::info!("[smart-dns] resolvers updated: {count} encrypted (DoT/DoH) endpoint(s)");
+        guard.extend(resolvers);
+        log::info!("[smart-dns] resolvers updated: {count} endpoint(s) from user list");
     } else {
         log::warn!("[smart-dns] set_resolvers called before init_smart_dns — ignored");
     }

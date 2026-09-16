@@ -1912,11 +1912,11 @@ async fn run_masque_tunnel(
                     .filter(|e| e.transport != crate::smart_dns::DnsTransport::Plain)
                     .cloned()
                     .collect();
-                if let Some(engine) = crate::smart_dns::smart_dns() {
-                    engine.set_encrypted_resolvers(encrypted);
-                }
-                log::info!("[smart-dns] user resolvers: {} parsed, {} encrypted", parsed.len(),
-                    crate::smart_dns::smart_dns().map_or(0, |e| if e.has_encrypted() { 1 } else { 0 }));
+                // All parsed endpoints (plain + encrypted) go to the engine: it
+                // needs the user's plain resolvers for its own Gemini lookups too,
+                // not just the DoT/DoH ones.
+                crate::smart_dns::set_resolvers(parsed);
+                log::info!("[smart-dns] resolvers pushed to engine (plain+encrypted)");
             }
         }
         
@@ -2866,17 +2866,13 @@ async fn run_warp_in_warp(
                 .split([',', ';', ' ', '\n', '\r'])
                 .filter_map(crate::smart_dns::DnsEndpoint::parse)
                 .collect();
-            let encrypted: Vec<_> = parsed
-                .iter()
-                .filter(|e| e.transport != crate::smart_dns::DnsTransport::Plain)
-                .cloned()
-                .collect();
-            if encrypted.is_empty() {
-                log::info!("[smart-dns] no encrypted (DoT/DoH) entries in user list");
+            let resolvers: Vec<_> = parsed.clone();
+            if resolvers.is_empty() {
+                log::info!("[smart-dns] no resolvers in user list");
             } else {
-                let n = encrypted.len();
-                crate::smart_dns::set_resolvers(encrypted);
-                log::info!("[smart-dns] {n} encrypted resolver(s) from user list");
+                let n = resolvers.len();
+                crate::smart_dns::set_resolvers(resolvers);
+                log::info!("[smart-dns] {n} resolver(s) from user list pushed to engine");
             }
         }
         log::info!(
