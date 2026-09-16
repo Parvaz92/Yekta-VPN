@@ -2849,6 +2849,37 @@ async fn run_warp_in_warp(
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
+    // WoW is the one transport AI Mode is actually enabled for, so the Smart
+    // DNS Split engine has to be standing up *here* — run_masque_tunnel's init
+    // site is never reached on this path, and without it tun::bridge sees
+    // smart_dns()==None and silently forwards every query through the tunnel.
+    if options.smart_dns {
+        if let Err(e) = crate::smart_dns::init_smart_dns().await {
+            log::warn!("[tun] Smart DNS init failed: {}", e);
+        } else if let Some(list) = options.smart_dns_servers.as_deref() {
+            let parsed: Vec<_> = list
+                .split([',', ';', ' ', '\n', '\r'])
+                .filter_map(crate::smart_dns::DnsEndpoint::parse)
+                .collect();
+            let encrypted: Vec<_> = parsed
+                .iter()
+                .filter(|e| e.transport != crate::smart_dns::DnsTransport::Plain)
+                .cloned()
+                .collect();
+            if encrypted.is_empty() {
+                log::info!("[smart-dns] no encrypted (DoT/DoH) entries in user list");
+            } else {
+                let n = encrypted.len();
+                crate::smart_dns::set_resolvers(encrypted);
+                log::info!("[smart-dns] {n} encrypted resolver(s) from user list");
+            }
+        }
+        log::info!(
+            "[smart-dns] AI Mode ON for WoW (smart_dns={} encrypted={})",
+            options.smart_dns,
+            crate::smart_dns::smart_dns().map_or(0, |e| if e.has_encrypted() { 1 } else { 0 })
+        );
+    }
     let mut http_task = None;
     let (mut inner_exit, mut local_task): (TunnelExit, TunnelExit) = if let Some(fd) =
         options.tun_fd

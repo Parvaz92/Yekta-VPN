@@ -225,8 +225,7 @@ impl SmartDnsSplit {
             // hijacked or poisoned on the carrier.
             #[cfg(target_os = "android")]
             {
-                let fd = std::os::fd::AsRawFd::as_raw_fd(&sock);
-                if let Err(e) = crate::platform::protect_socket(fd) {
+                if let Err(e) = crate::platform::protect_socket(&sock) {
                     log::warn!("[smart-dns] protect({server}) failed: {e}");
                 }
             }
@@ -575,4 +574,24 @@ pub async fn init_smart_dns() -> Result<()> {
 /// Get the global Smart DNS engine
 pub fn smart_dns() -> Option<&'static SmartDnsSplit> {
     SMART_DNS.get()
+}
+
+/// Replace the engine's encrypted (DoT/DoH) resolver list at runtime.
+/// Called after init_smart_dns() once the user's `smart_dns_servers` string
+/// has been parsed — the plain-UDP entries in it are Android's business and are
+/// filtered out by the caller. Mirrors RethinkDNS's updateTun: reconfigure
+/// without tearing the tunnel down.
+pub fn set_resolvers(encrypted: Vec<DnsEndpoint>) {
+    if let Some(engine) = SMART_DNS.get() {
+        let only_encrypted: Vec<_> = encrypted.into_iter()
+            .filter(|e| e.transport != DnsTransport::Plain)
+            .collect();
+        let count = only_encrypted.len();
+        let mut guard = engine.encrypted_resolvers.write();
+        guard.clear();
+        guard.extend(only_encrypted);
+        log::info!("[smart-dns] resolvers updated: {count} encrypted (DoT/DoH) endpoint(s)");
+    } else {
+        log::warn!("[smart-dns] set_resolvers called before init_smart_dns — ignored");
+    }
 }
