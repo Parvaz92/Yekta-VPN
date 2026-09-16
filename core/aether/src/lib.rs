@@ -14,6 +14,7 @@ mod masque;
 mod masque_h2;
 mod netstack;
 mod noize;
+pub mod platform;
 mod prober;
 mod quic;
 mod routing;

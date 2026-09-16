@@ -205,7 +205,7 @@ impl SmartDnsSplit {
                 loop {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() { return None; }
-                    let n = timeout(remaining, sock.recv(&mut buf)).await.ok()??;
+                    let n = timeout(remaining, sock.recv(&mut buf)).await.ok()?.ok()?;
                     let resp = &buf[..n];
                     if Self::response_matches(resp, expected_id, &name, 1) {
                         return Some(resp.to_vec());
