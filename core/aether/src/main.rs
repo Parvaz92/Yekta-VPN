@@ -69,6 +69,8 @@ pub struct StartOptions {
     /// though the code to serve it was already here. Carried in the config now, and
     /// the environment variable is still honoured as a fallback for the CLI.
     pub http_proxy: Option<SocketAddr>,
+    /// AI Mode: run the Smart DNS Split engine inside the TUN bridge.
+    pub smart_dns: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +169,7 @@ impl StartOptions {
             gateway: false,
             upstream_proxy: None,
             http_proxy: None,
+            smart_dns: false,
         }
     }
 
@@ -1847,9 +1850,13 @@ async fn run_masque_tunnel(
         tokio::spawn(async move { while addr_rx.recv().await.is_some() {} });
         log::info!("[+] Android TUN bridge active");
         
-        // Initialize Smart DNS Split for this tunnel
-        if let Err(e) = crate::smart_dns::init_smart_dns().await {
-            log::warn!("[tun] Smart DNS init failed: {}", e);
+        // Smart DNS Split: stands up only when AI Mode was requested. The engine
+        // is inert for every non-Gemini query (see process_query), so a tunnel
+        // with it off never touches this.
+        if options.smart_dns {
+            if let Err(e) = crate::smart_dns::init_smart_dns().await {
+                log::warn!("[tun] Smart DNS init failed: {}", e);
+            }
         }
         
         tokio::spawn(tun::bridge(
@@ -1857,6 +1864,7 @@ async fn run_masque_tunnel(
             parse_local_v4(&identity.ipv4),
             inbound_rx,
             outbound_tx,
+            options.smart_dns,
         ))
     } else {
         let stack = netstack::spawn(
@@ -2420,7 +2428,7 @@ async fn run_wireguard_tunnel(
     let mut http_task = None;
     let local_task = if let Some(fd) = options.tun_fd {
         log::info!("[+] Android TUN bridge active");
-        tokio::spawn(tun::bridge(fd, ipv4, inbound_rx, outbound_tx))
+        tokio::spawn(tun::bridge(fd, ipv4, inbound_rx, outbound_tx, options.smart_dns))
     } else {
         let stack = netstack::spawn(
             &identity.ipv4,
@@ -2833,7 +2841,7 @@ async fn run_warp_in_warp(
                 .map_err(|e| AetherError::Other(format!("[inner] {e}")))
         });
         let local_task =
-            tokio::spawn(tun::bridge(fd, secondary_ipv4, inbound_rx, outbound_tx));
+            tokio::spawn(tun::bridge(fd, secondary_ipv4, inbound_rx, outbound_tx, options.smart_dns));
         (inner_exit, local_task)
     } else {
         let (inner_stack, inner_exit) = establish_wg(
@@ -3115,6 +3123,7 @@ async fn establish_masque(
                 parse_local_v4(&identity.ipv4),
                 inbound_rx,
                 outbound_tx,
+                options.smart_dns,
             ))),
         )
     } else {

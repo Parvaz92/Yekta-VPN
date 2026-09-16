@@ -3589,8 +3589,12 @@ class MainActivity : Activity() {
         content.addView(sectionLabel(Strings.t("ROUTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val manualEndpointRow = addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
-        val gatewayCacheRow = addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
+        // v1.9.8: assign to the class fields, not local vals. A previous build
+        // declared `val manualEndpointRow` here, which shadowed the field —
+        // later setValue() calls hit a null field and the displayed value never
+        // refreshed until the screen was rebuilt.
+        manualEndpointRow = addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
+        gatewayCacheRow = addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
         // v1.9.8: AI Mode now applies to all protocols — symbolic on Psiphon/Tor/SHARD,
         // functional on MASQUE/WireGuard/WoW via Smart DNS Split.
         lateinit var aiModeRow: OrbitSettingsRow
@@ -6709,6 +6713,9 @@ class MainActivity : Activity() {
     }
 
     private fun setAiMode(on: Boolean) {
+        // v1.9.8: never let a stored "on" survive onto a protocol where AI Mode
+        // is hidden — that was the first half of the Auto-Scan connect failure.
+        if (on && !aiModeVisible()) return
         preferences().edit().putBoolean("ai_mode_enabled", on).apply()
         renderAiChip()
         // If we're connected and AI Mode changed, we'd need to reconnect for it to take effect.
@@ -6935,8 +6942,11 @@ class MainActivity : Activity() {
         // move for a user who does not know what any of these words mean. MASQUE
         // follows because it survives the carriers WireGuard is blocked on, and the
         // one-time Auto Scan ([AUTO_SCAN_LADDER]) walks them in exactly this order.
-        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true, AiModeBehavior.TOGGLEABLE),
-        MASQUE("MASQUE", "masque", "HTTP/3 tunnel", true, AiModeBehavior.TOGGLEABLE),
+        // v1.9.8: AI Mode is WOW-only per spec. Masque/WireGuard carry no
+        // split-DNS function, so the row is hidden and the flag forced off —
+        // a stale stored "on" value can no longer break those protocols.
+        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true, AiModeBehavior.HIDDEN),
+        MASQUE("MASQUE", "masque", "HTTP/3 tunnel", true, AiModeBehavior.HIDDEN),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true, AiModeBehavior.TOGGLEABLE),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC),

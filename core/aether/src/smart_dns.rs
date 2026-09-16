@@ -258,6 +258,13 @@ impl SmartDnsSplit {
         let domain = labels.join(".");
         let is_gemini = Self::is_gemini_domain(&domain);
 
+        // Non-Gemini queries are NOT handled here. They must continue through
+        // the tunnel's normal path — intercepting every query was the previous
+        // build's fatal flaw (it broke all DNS on the device).
+        if !is_gemini {
+            return None;
+        }
+
         // Build cache key (domain + qtype, without transaction ID)
         let mut cache_key = Vec::new();
         cache_key.extend_from_slice(&[0, 0]); // placeholder for ID

@@ -128,6 +128,9 @@ struct NativeStartOptions {
     /// already loaded and running, so LAN sharing on the WARP transports had no way
     /// to ask for the HTTP listener at all before this field existed.
     http_proxy: Option<String>,
+    /// AI Mode: enable the Smart DNS Split engine inside the TUN bridge.
+    /// Default false; honoured on MASQUE/WireGuard/WoW only.
+    smart_dns: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -164,6 +167,7 @@ impl Default for NativeStartOptions {
             gateway: false,
             upstream_proxy: None,
             http_proxy: None,
+            smart_dns: false,
         }
     }
 }
@@ -222,6 +226,11 @@ impl TryFrom<NativeStartOptions> for StartOptions {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),
         };
+        // AI Mode: the core's TUN bridge reads this to decide whether to stand
+        // up the Smart DNS Split engine. Transports that never take that bridge
+        // (Psiphon, Tor, SHARD) ignore it, which is exactly the "symbolic only"
+        // behaviour the UI promises for those protocols.
+        options.smart_dns = value.smart_dns;
         Ok(options)
     }
 }

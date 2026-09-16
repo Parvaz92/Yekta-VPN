@@ -183,6 +183,13 @@ object CoreConfig {
             putOpt("access_token", SecureStore.getSecret(context, "zero_trust_token").ifBlank { null })
             putOpt("access_email", SecureStore.getSecret(context, "zero_trust_email").ifBlank { null })
             put("gateway", prefs.getBoolean("zero_trust_gateway", false))
+            // AI Mode (Smart DNS Split). Default OFF. Guarded by the current
+            // protocol: AI Mode is functional on WoW ("gool") only. MASQUE and
+            // WireGuard carry no split engine, so a stale stored "on" is forced
+            // to false here rather than sent to the core. Psiphon/Tor/SHARD never
+            // take tun::bridge, so the flag is inert for them by construction.
+            val protoForAi = effectiveProtocol
+            put("smart_dns", protoForAi == "gool" && prefs.getBoolean("ai_mode_enabled", false))
             // Psiphon-over-WARP: the core's SOCKS listener is the upstream proxy
             // Psiphon dials, so the core itself needs no upstream. Left unset.
         }.toString()
