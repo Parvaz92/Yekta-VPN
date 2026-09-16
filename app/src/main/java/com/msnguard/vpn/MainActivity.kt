@@ -4541,15 +4541,16 @@ class MainActivity : Activity() {
      * inside the tunnel (socks.rs `resolver_addresses`), and applyDns puts
      * the same list on the TUN. This dialog is only the tap that fills it.
      *
-     * Plain UDP is what the core speaks; DoT/DoH need a TLS DNS client in
-     * the Rust core and are NOT offered here — the hint says what works
-     * rather than advertising an encryption the tunnel does not perform.
+     * Plain UDP, DoT and DoH are all accepted. Prefixes select the transport:
+     * `tls://` for DoT, `https://` (or `doh:`) for DoH; bare hosts stay plain
+     * UDP. Encrypted entries are handled by the Rust core, because Android
+     * itself cannot speak DoT/DoH to a VpnService resolver list.
      */
     private fun editCustomDns(after: (() -> Unit)? = null) {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val field = EditText(this).apply {
             setText(preferences().getString(CUSTOM_DNS, "").orEmpty())
-            hint = Strings.t("1.1.1.1, 8.8.8.8")
+            hint = Strings.t("1.1.1.1, tls://dns.google, https://cloudflare-dns.com/dns-query")
             setTextColor(INK)
             setHintTextColor(MUTED)
             setSingleLine(true)
@@ -4568,7 +4569,7 @@ class MainActivity : Activity() {
             addView(label(Strings.t("Custom DNS"), 22f, INK, TypefaceStyle.MEDIUM))
         })
         sheet.addView(label(
-            Strings.t("Resolvers the tunnel answers DNS from, comma-separated. Plain UDP; leave blank for automatic."),
+            Strings.t("Resolvers the tunnel answers DNS from, comma-separated. Bare host = plain UDP; tls:// = DoT; https:// (or doh:) = DoH. Encrypted entries are resolved by the core, not Android. Leave blank for automatic."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
