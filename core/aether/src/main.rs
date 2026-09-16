@@ -444,7 +444,12 @@ pub fn initialize() {
         struct UiLog;
         impl log::Log for UiLog {
             fn enabled(&self, metadata: &log::Metadata) -> bool {
-                metadata.level() <= log::Level::Info
+                // Only our own crate's info lines go to the UI. smoltcp/quiche/
+                // hickory are chatty at info and would flood the app log — they
+                // stay on stdout (logcat) instead, which is where a developer
+                // looks for them anyway.
+                metadata.level() == log::Level::Info
+                    && metadata.target().starts_with("aether")
             }
             fn log(&self, record: &log::Record) {
                 if !self.enabled(record.metadata()) {
