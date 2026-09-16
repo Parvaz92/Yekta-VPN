@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::RwLock;
@@ -41,6 +41,12 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 const MAX_CONCURRENT_QUERIES: usize = 32;
 
+/// The synthetic DNS address advertised to Android — RethinkDNS's trick: instead
+/// of listening on a port the OS cannot reach, advertise a fake resolver IP and
+/// intercept every packet bound for it in the TUN bridge. This makes the split
+/// engine the authoritative resolver for the device without a userspace server.
+pub const FAKE_DNS_V4: &str = "10.111.222.53";
+
 /// Cached DNS response
 #[derive(Clone)]
 struct CachedResponse {
@@ -48,16 +54,153 @@ struct CachedResponse {
     expires: Instant,
 }
 
+/// Resolver transport: plain UDP, DNS-over-TLS, or DNS-over-HTTPS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnsTransport {
+    Plain,
+    Dot,
+    Doh,
+}
+
+/// A single resolver endpoint with its transport.
+#[derive(Clone, Debug)]
+pub struct DnsEndpoint {
+    /// Plain: "1.2.3.4". DoT: "dns.example.com". DoH: the full URL.
+    pub address: String,
+    pub transport: DnsTransport,
+    /// TLS SNI / authority for DoT and DoH.
+    pub name: Option<String>,
+}
+
+impl DnsEndpoint {
+    /// Parse a user-supplied DNS entry. Accepts:
+    ///   1.2.3.4                            -> plain UDP
+    ///   1.2.3.4:53                         -> plain UDP with explicit port
+    ///   tls://dns.example.com              -> DoT on :853
+    ///   https://dns.example.com/dns-query  -> DoH
+    ///   doh:dns.example.com                -> DoH at /dns-query
+    pub fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let lower = raw.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("doh://")) {
+            let host = host_of(rest);
+            return Some(DnsEndpoint {
+                address: format!("https://{rest}"),
+                transport: DnsTransport::Doh,
+                name: Some(host.to_string()),
+            });
+        }
+        if let Some(rest) = lower.strip_prefix("tls://").or_else(|| lower.strip_prefix("dot://")) {
+            let (host, _port) = split_host_port(rest, 853);
+            return Some(DnsEndpoint {
+                address: host.to_string(),
+                transport: DnsTransport::Dot,
+                name: Some(host.to_string()),
+            });
+        }
+        if let Some(rest) = lower.strip_prefix("doh:") {
+            let (host, _port) = split_host_port(rest, 443);
+            return Some(DnsEndpoint {
+                address: format!("https://{host}/dns-query"),
+                transport: DnsTransport::Doh,
+                name: Some(host.to_string()),
+            });
+        }
+        if let Some(rest) = lower.strip_prefix("dot:") {
+            let (host, _port) = split_host_port(rest, 853);
+            return Some(DnsEndpoint {
+                address: host.to_string(),
+                transport: DnsTransport::Dot,
+                name: Some(host.to_string()),
+            });
+        }
+        // Plain UDP, with or without a port. Reject anything URL-ish.
+        let (host, _port) = split_host_port(raw, u16::from(DNS_PORT));
+        if host.contains("://") || host.contains('/') || host.is_empty() {
+            return None;
+        }
+        Some(DnsEndpoint {
+            address: host.to_string(),
+            transport: DnsTransport::Plain,
+            name: None,
+        })
+    }
+
+    /// Port the user wrote into `address`, if any.
+    fn explicit_port(&self) -> Option<u16> {
+        match self.transport {
+            DnsTransport::Plain | DnsTransport::Dot => host_port(&self.address),
+            DnsTransport::Doh => url_port(&self.address),
+        }
+    }
+}
+
+/// Split "host" / "host:port", defaulting the port when absent.
+fn split_host_port(raw: &str, default_port: u16) -> (&str, u16) {
+    if let Some(rest) = raw.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let host = &rest[..end];
+            let port = rest[end + 1..].strip_prefix(':').and_then(|p| p.parse().ok());
+            return (host, port.unwrap_or(default_port));
+        }
+    }
+    match raw.matches(':').count() {
+        0 => (raw, default_port),
+        1 => {
+            let (h, p) = raw.rsplit_once(':').unwrap();
+            (h, p.parse().unwrap_or(default_port))
+        }
+        _ => (raw, default_port), // bare v6, no port
+    }
+}
+
+/// Port of a bare host:port string, if a port is present.
+fn host_port(raw: &str) -> Option<u16> {
+    if raw.starts_with('[') {
+        return raw
+            .find(']')
+            .and_then(|end| raw[end + 1..].strip_prefix(':'))
+            .and_then(|p| p.parse().ok());
+    }
+    if raw.matches(':').count() == 1 {
+        return raw.rsplit_once(':').and_then(|(_, p)| p.parse().ok());
+    }
+    None
+}
+
+/// Port inside an https:// URL, if present.
+fn url_port(raw: &str) -> Option<u16> {
+    let after_scheme = raw.strip_prefix("https://").or_else(|| raw.strip_prefix("http://"))?;
+    let end = after_scheme
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_scheme.len());
+    host_port(&after_scheme[..end])
+}
+
+/// The authority of a URL-ish string, minus path/query and user:pass@.
+fn host_of(urlish: &str) -> &str {
+    let end = urlish
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(urlish.len());
+    let authority = &urlish[..end];
+    authority.rsplit('@').next().unwrap_or(authority)
+}
+
 /// Smart DNS Split Engine
 pub struct SmartDnsSplit {
-    /// In-memory cache for Gemini responses (RAM only)
+    /// In-memory cache for responses (RAM only)
     cache: Arc<RwLock<HashMap<Vec<u8>, CachedResponse>>>,
-    /// Semaphore to limit concurrent queries
+    /// Limits concurrent queries
     semaphore: Arc<Semaphore>,
-    /// Anti-sanction DNS sockets (pre-connected)
+    /// Anti-sanction DNS sockets (pre-connected, plain UDP)
     anti_sanction_sockets: Arc<Vec<Arc<UdpSocket>>>,
-    /// Default DNS sockets (pre-connected)
+    /// Default DNS sockets (pre-connected, plain UDP)
     default_sockets: Arc<Vec<Arc<UdpSocket>>>,
+    /// DoT/DoH endpoints. When non-empty, the encrypted path is preferred.
+    encrypted_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
 }
 
 impl SmartDnsSplit {
@@ -66,29 +209,38 @@ impl SmartDnsSplit {
         let mut anti_sanction_sockets = Vec::new();
         let mut default_sockets = Vec::new();
 
-        // Pre-connect anti-sanction DNS sockets
         for server in ANTI_SANCTION_DNS {
-            let addr: SocketAddr = format!("{}:{}", server, DNS_PORT).parse()
-                .map_err(|e| AetherError::Other(format!("Invalid anti-sanction DNS {}: {}]", server, e)))?;
+            let addr: SocketAddr = format!("{server}:{DNS_PORT}").parse()
+                .map_err(|e| AetherError::Other(format!("Invalid anti-sanction DNS {server}: {e}")))?;
             let sock = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
                 .map_err(AetherError::Io)?;
             sock.connect(addr).await.map_err(AetherError::Io)?;
-            // IMPORTANT: these queries must leave through the TUNNEL, not the
-            // carrier. protect_socket() routes them outside the VPN, where every
-            // one of these resolvers is either blocked (Iran) or simply
-            // unreachable. The previous build protected them, which is why AI
-            // Mode never resolved anything even when the flag was on.
-            // No protect_socket() here.
+            // Per-socket protect, RethinkDNS pattern #5. The anti-sanction
+            // resolvers are Iranian private-space addresses (10.202.10.x,
+            // 78.157.42.x). They are only routable from the carrier network, so
+            // their queries must ride OUTSIDE the tunnel. Sending them through
+            // the VPN exit — which is what removing protect() did in 8b4e76a —
+            // makes them unroutable and every Gemini lookup fails. Public
+            // resolvers below take the tunnel instead, because plain 53 is
+            // hijacked or poisoned on the carrier.
+            #[cfg(target_os = "android")]
+            {
+                let fd = std::os::fd::AsRawFd::as_raw_fd(&sock);
+                if let Err(e) = crate::platform::protect_socket(fd) {
+                    log::warn!("[smart-dns] protect({server}) failed: {e}");
+                }
+            }
             anti_sanction_sockets.push(Arc::new(sock));
         }
 
-        // Pre-connect default DNS sockets
         for server in DEFAULT_DNS {
-            let addr: SocketAddr = format!("{}:{}", server, DNS_PORT).parse()
-                .map_err(|e| AetherError::Other(format!("Invalid default DNS {}: {}]", server, e)))?;
+            let addr: SocketAddr = format!("{server}:{DNS_PORT}").parse()
+                .map_err(|e| AetherError::Other(format!("Invalid default DNS {server}: {e}")))?;
             let sock = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
                 .map_err(AetherError::Io)?;
             sock.connect(addr).await.map_err(AetherError::Io)?;
+            // Public resolvers must ride the tunnel: on Iranian carriers plain 53
+            // to 1.1.1.1 is hijacked and poisoned. Not protected on purpose.
             default_sockets.push(Arc::new(sock));
         }
 
@@ -97,15 +249,26 @@ impl SmartDnsSplit {
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             anti_sanction_sockets: anti_sanction_sockets.into(),
             default_sockets: default_sockets.into(),
+            encrypted_resolvers: Arc::new(RwLock::new(Vec::new())),
         })
+    }
+
+    /// Replace the DoT/DoH resolver set. Picked up live, no reconnect needed.
+    pub fn set_encrypted_resolvers(&self, endpoints: Vec<DnsEndpoint>) {
+        let mut guard = self.encrypted_resolvers.write();
+        guard.clear();
+        guard.extend(endpoints);
+        log::info!("[smart-dns] encrypted resolvers updated: {} endpoint(s)", guard.len());
+    }
+
+    pub fn has_encrypted(&self) -> bool {
+        !self.encrypted_resolvers.read().is_empty()
     }
 
     /// Check if a domain is a Gemini domain (exact or subdomain match)
     fn is_gemini_domain(name: &str) -> bool {
         let name = name.to_lowercase();
-        GEMINI_DOMAINS.iter().any(|d| {
-            name == *d || name.ends_with(&format!(".{}", d))
-        })
+        GEMINI_DOMAINS.iter().any(|d| name == *d || name.ends_with(&format!(".{d}")))
     }
 
     /// Build a DNS query packet
@@ -144,56 +307,13 @@ impl SmartDnsSplit {
             if !resp[pos..end].eq_ignore_ascii_case(label.as_bytes()) { return false; }
             pos = end;
         }
-        if resp.get(pos) != Some(&0) { return false; }
-        pos += 1;
-        if pos + 4 > resp.len() { return false; }
-        u16::from_be_bytes([resp[pos], resp[pos + 1]]) == expected_qtype
+        if pos + 5 > resp.len() { return false; }
+        let qtype = u16::from_be_bytes([resp[pos + 2], resp[pos + 3]]);
+        qtype == expected_qtype
     }
 
-    /// Extract first A record from response
-    fn extract_a_record(resp: &[u8]) -> Option<Ipv4Addr> {
-        if resp.len() < 12 { return None; }
-        let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
-        let mut pos = 12;
-        // skip question
-        for _ in 0..u16::from_be_bytes([resp[4], resp[5]]) as usize {
-            pos = Self::skip_name(resp, pos)?;
-            pos += 4; // type + class
-        }
-        // parse answers
-        for _ in 0..ancount {
-            pos = Self::skip_name(resp, pos)?;
-            if pos + 10 > resp.len() { return None; }
-            let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
-            let rdlen = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
-            pos += 10;
-            if pos + rdlen > resp.len() { return None; }
-            if rtype == 1 && rdlen == 4 { // A record
-                return Some(Ipv4Addr::new(resp[pos], resp[pos+1], resp[pos+2], resp[pos+3]));
-            }
-            pos += rdlen;
-        }
-        None
-    }
-
-    /// Skip a domain name (handles compression)
-    fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
-        for _ in 0..20 {
-            if pos >= buf.len() { return None; }
-            let len = buf[pos];
-            if len & 0xC0 == 0xC0 {
-                return Some(pos + 2);
-            }
-            if len == 0 {
-                return Some(pos + 1);
-            }
-            pos += 1 + len as usize;
-        }
-        None
-    }
-
-    /// Query multiple DNS servers in parallel, return first successful response
-    async fn parallel_query(&self, sockets: Arc<Vec<Arc<UdpSocket>>>, query: Vec<u8>, expected_id: u16, name: String) -> Result<Vec<u8>> {
+    /// Query multiple plain-UDP servers in parallel; first answer wins.
+    async fn parallel_query(&self, sockets: Arc<Vec<Arc<UdpSocket>>>, query: Vec<u8>, expected_id: u16, name: String, qtype: u16) -> Result<Vec<u8>> {
         let permit = self.semaphore.acquire().await.map_err(|_| AetherError::Other("semaphore closed".into()))?;
 
         let mut handles = Vec::new();
@@ -211,14 +331,13 @@ impl SmartDnsSplit {
                     if remaining.is_zero() { return None; }
                     let n = timeout(remaining, sock.recv(&mut buf)).await.ok()?.ok()?;
                     let resp = &buf[..n];
-                    if Self::response_matches(resp, expected_id, &name, 1) {
+                    if Self::response_matches(resp, expected_id, &name, qtype) {
                         return Some(resp.to_vec());
                     }
                 }
             }));
         }
 
-        // Wait for first successful response
         let mut result = None;
         for handle in handles {
             if let Ok(Some(resp)) = handle.await {
@@ -227,12 +346,102 @@ impl SmartDnsSplit {
             }
         }
         drop(permit);
-        
+
         result.ok_or_else(|| AetherError::Other("All DNS queries failed".into()))
     }
 
-    /// Process a DNS query from the TUN
-    /// Returns (response_data, is_gemini) where is_gemini indicates if anti-sanction path was used
+    /// Resolve over DoT/DoH. Preferred over plain UDP when configured — it is the
+    /// only path that survives a network which hijacks port 53.
+    async fn encrypted_query(&self, domain: &str, qtype: u16) -> Result<Vec<u8>> {
+        let endpoints = self.encrypted_resolvers.read().clone();
+        if endpoints.is_empty() {
+            return Err(AetherError::Other("no encrypted resolvers".into()));
+        }
+        use hickory_proto::op::{Message, MessageType, OpCode, Query};
+        use hickory_proto::rr::{Name, RecordType};
+
+        let name = Name::from_utf8(domain)
+            .map_err(|e| AetherError::Other(format!("invalid name {domain}: {e}")))?;
+        let mut message = Message::new();
+        message.set_id(rand::random::<u16>());
+        message.set_message_type(MessageType::Query);
+        message.set_op_code(OpCode::Query);
+        message.set_recursion_desired(true);
+        message.add_query(Query::query(name, RecordType::from(qtype)));
+        let query_bytes = message.to_vec()
+            .map_err(|e| AetherError::Other(format!("encode query: {e}")))?;
+
+        let mut last_err = String::new();
+        for ep in &endpoints {
+            let attempt = match ep.transport {
+                DnsTransport::Dot => self.dot_query(ep, &query_bytes).await,
+                DnsTransport::Doh => self.doh_query(ep, &query_bytes).await,
+                DnsTransport::Plain => continue,
+            };
+            match attempt {
+                Ok(resp) => {
+                    // A well-formed reply is enough; the resolver already framed it.
+                    if hickory_proto::op::Message::from_vec(&resp).is_err() {
+                        last_err = format!("bad response from {}", ep.address);
+                        continue;
+                    }
+                    log::info!("[smart-dns] {} answered over {:?} for {}", ep.address, ep.transport, domain);
+                    return Ok(resp);
+                }
+                Err(e) => last_err = format!("{}: {e}", ep.address),
+            }
+        }
+        Err(AetherError::Other(format!("all encrypted resolvers failed: {last_err}")))
+    }
+
+    async fn dot_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let port = ep.explicit_port().unwrap_or(853);
+        let addr = format!("{}:{port}", ep.address);
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(AetherError::Io)?;
+        // Two-byte length prefix, per RFC 1035 §4.2.2.
+        let len = u16::try_from(query.len())
+            .map_err(|_| AetherError::Other("DoT query too long".to_string()))?;
+        stream.write_all(&len.to_be_bytes()).await.map_err(AetherError::Io)?;
+        stream.write_all(query).await.map_err(AetherError::Io)?;
+        let mut len_buf = [0u8; 2];
+        stream.read_exact(&mut len_buf).await.map_err(AetherError::Io)?;
+        let resp_len = usize::from(u16::from_be_bytes(len_buf));
+        let mut buf = vec![0u8; resp_len];
+        stream.read_exact(&mut buf).await.map_err(AetherError::Io)?;
+        Ok(buf)
+    }
+
+    async fn doh_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
+        // DoH as an HTTP POST with application/dns-message. reqwest already
+        // speaks rustls, so no second TLS stack enters the binary.
+        let url = if ep.address.starts_with("https://") {
+            ep.address.clone()
+        } else {
+            format!("https://{}/dns-query", ep.address)
+        };
+        let client = reqwest::Client::builder()
+            .timeout(QUERY_TIMEOUT)
+            .build()
+            .map_err(|e| AetherError::Other(format!("doh client: {e}")))?;
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/dns-message")
+            .body(query.to_vec())
+            .send()
+            .await
+            .map_err(|e| AetherError::Other(format!("doh send: {e}")))?;
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| AetherError::Other(format!("doh body: {e}")))
+    }
+
+    /// Process a DNS query from the TUN.
+    /// Returns (response_data, is_gemini); None lets the query take the tunnel's
+    /// normal path untouched.
     pub async fn process_query(&self, packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)> {
         if packet.len() < ihl + 8 { return None; }
         let udp = &packet[ihl..];
@@ -242,40 +451,36 @@ impl SmartDnsSplit {
         let payload = &udp[8..];
         if payload.len() < 12 { return None; }
 
-        // Parse question to get domain name
         let mut pos = 12;
         let mut labels = Vec::new();
         loop {
             if pos >= payload.len() { return None; }
             let len = payload[pos];
             if len == 0 { pos += 1; break; }
-            if len & 0xC0 == 0xC0 { return None; } // compression in query not expected
+            if len & 0xC0 == 0xC0 { return None; } // compression not expected in a query
             pos += 1;
             if pos + len as usize > payload.len() { return None; }
-            labels.push(String::from_utf8_lossy(&payload[pos..pos+len as usize]).to_string());
+            labels.push(String::from_utf8_lossy(&payload[pos..pos + len as usize]).to_string());
             pos += len as usize;
         }
         if pos + 4 > payload.len() { return None; }
-        let qtype = u16::from_be_bytes([payload[pos], payload[pos+1]]);
-        if qtype != 1 { return None; } // Only A records
+        let qtype = u16::from_be_bytes([payload[pos], payload[pos + 1]]);
 
         let domain = labels.join(".");
         let is_gemini = Self::is_gemini_domain(&domain);
 
-        // Non-Gemini queries are NOT handled here. They must continue through
+        // Only Gemini queries are intercepted. Everything else must flow through
         // the tunnel's normal path — intercepting every query was the previous
-        // build's fatal flaw (it broke all DNS on the device).
+        // build's fatal flaw and broke all DNS on the device.
         if !is_gemini {
             return None;
         }
 
-        // Build cache key (domain + qtype, without transaction ID)
         let mut cache_key = Vec::new();
-        cache_key.extend_from_slice(&[0, 0]); // placeholder for ID
-        cache_key.extend_from_slice(&payload[2..]); // everything after ID
+        cache_key.extend_from_slice(&[0, 0]); // placeholder for the transaction ID
+        cache_key.extend_from_slice(&payload[2..]);
 
-        // Check cache first (only for Gemini domains)
-        if is_gemini {
+        {
             let cached = {
                 let cache = self.cache.read();
                 cache.get(&cache_key).and_then(|c| {
@@ -283,7 +488,6 @@ impl SmartDnsSplit {
                 })
             };
             if let Some(mut resp) = cached {
-                // Restore transaction ID from original query
                 if resp.len() >= 2 && payload.len() >= 2 {
                     resp[0] = payload[0];
                     resp[1] = payload[1];
@@ -292,33 +496,49 @@ impl SmartDnsSplit {
             }
         }
 
-        // Build fresh query with new transaction ID
+        // Prefer DoT/DoH when configured — plain 53 is hijacked on many networks.
+        if self.has_encrypted() {
+            match self.encrypted_query(&domain, qtype).await {
+                Ok(resp) => {
+                    let mut to_cache = resp.clone();
+                    if to_cache.len() >= 2 && payload.len() >= 2 {
+                        to_cache[0] = payload[0];
+                        to_cache[1] = payload[1];
+                    }
+                    {
+                        let mut cache = self.cache.write();
+                        if cache.len() > 1024 { cache.clear(); }
+                        cache.insert(cache_key, CachedResponse {
+                            data: to_cache,
+                            expires: Instant::now() + CACHE_TTL,
+                        });
+                    }
+                    return Some((resp, true));
+                }
+                Err(e) => log::warn!("[smart-dns] encrypted query for {domain} failed ({e}); falling back to UDP"),
+            }
+        }
+
         let (query, new_id) = Self::build_query(&domain, qtype);
         let query2 = query.clone();
 
-        // Choose DNS path
-        let (response, used_anti_sanction) = if is_gemini {
-            // Race anti-sanction servers
-            match self.parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, domain.clone()).await {
-                Ok(resp) => (resp, true),
-                Err(_) => {
-                    // Fallback to default DNS
-                    match self.parallel_query(self.default_sockets.clone(), query.clone(), new_id, domain.clone()).await {
-                        Ok(resp) => (resp, false),
-                        Err(_e) => return Some((Self::build_error_response(&query2, new_id), true)),
-                    }
+        let (response, used_anti_sanction) = match self
+            .parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, domain.clone(), qtype)
+            .await
+        {
+            Ok(resp) => (resp, true),
+            Err(_) => {
+                match self
+                    .parallel_query(self.default_sockets.clone(), query, new_id, domain, qtype)
+                    .await
+                {
+                    Ok(resp) => (resp, false),
+                    Err(_) => return Some((Self::build_error_response(&query2, new_id), true)),
                 }
-            }
-        } else {
-            // Normal path: default DNS only
-            match self.parallel_query(self.default_sockets.clone(), query.clone(), new_id, domain.clone()).await {
-                Ok(resp) => (resp, false),
-                Err(_) => return Some((Self::build_error_response(&query2, new_id), false)),
             }
         };
 
-        // Cache Gemini responses
-        if is_gemini {
+        {
             let mut cache = self.cache.write();
             if cache.len() > 1024 { cache.clear(); }
             cache.insert(cache_key, CachedResponse {
@@ -345,10 +565,10 @@ static SMART_DNS: once_cell::sync::OnceCell<SmartDnsSplit> = once_cell::sync::On
 
 /// Initialize the global Smart DNS engine
 pub async fn init_smart_dns() -> Result<()> {
-    log::info!("[smart-dns] AI Mode ON — standing up Smart DNS Split engine (Gemini-only, {} anti-sanction resolvers)", ANTI_SANCTION_DNS.len());
+    log::info!("[smart-dns] AI Mode ON — standing up Smart DNS Split (Gemini-only, {} anti-sanction UDP + DoT/DoH)", ANTI_SANCTION_DNS.len());
     let engine = SmartDnsSplit::new().await?;
     SMART_DNS.set(engine).map_err(|_| AetherError::Other("Smart DNS already initialized".into()))?;
-    log::info!("[smart-dns] engine ready: pre-connected sockets up, cache live");
+    log::info!("[smart-dns] engine ready: plain-UDP sockets up, DoT/DoH on demand");
     Ok(())
 }
 

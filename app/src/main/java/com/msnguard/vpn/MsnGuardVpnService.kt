@@ -5651,9 +5651,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .map(String::trim)
             .filter(String::isNotEmpty)
             .mapNotNull { entry ->
+                // Keep DoT/DoH URLs and bracketed/IPv6 forms intact. Only strip a
+                // single trailing :port on a plain v4 address. The old `count == 1`
+                // test silently dropped every v6 address and every tls:// / https://
+                // entry the user typed.
                 val address = when {
+                    entry.startsWith("https://", ignoreCase = true) ||
+                        entry.startsWith("tls://", ignoreCase = true) ||
+                        entry.startsWith("dot://", ignoreCase = true) ||
+                        entry.startsWith("doh://", ignoreCase = true) ||
+                        entry.startsWith("doh:", ignoreCase = true) ||
+                        entry.startsWith("dot:", ignoreCase = true) -> entry
+
                     entry.startsWith('[') -> entry.substringAfter('[').substringBefore(']')
+
+                    // A bare v4 with a port ("1.2.3.4:53"). A bare v6 has 2+ colons
+                    // and must survive untouched.
                     entry.count { it == ':' } == 1 -> entry.substringBefore(':')
+
                     else -> entry
                 }
                 runCatching { InetAddress.getByName(address) }.getOrNull()

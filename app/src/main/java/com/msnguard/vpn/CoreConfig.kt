@@ -192,6 +192,13 @@ object CoreConfig {
             val aiOn = protoForAi == "gool" && prefs.getBoolean("ai_mode_enabled", false)
             android.util.Log.i("MsnGuard", "CoreConfig: protocol=$protoForAi ai_mode_enabled=${prefs.getBoolean("ai_mode_enabled", false)} -> smart_dns=$aiOn")
             put("smart_dns", aiOn)
+            // The user's custom DNS list, forwarded to the Smart DNS Split engine.
+            // Plain UDP entries are consumed by applyDns() (they go to Android);
+            // anything with a tls:// / https:// / doh: prefix is picked up by the
+            // core's DoT/DoH path instead, because Android cannot speak those.
+            if (aiOn) {
+                putOpt("smart_dns_servers", text("dns_servers").ifBlank { null })
+            }
             // Psiphon-over-WARP: the core's SOCKS listener is the upstream proxy
             // Psiphon dials, so the core itself needs no upstream. Left unset.
         }.toString()

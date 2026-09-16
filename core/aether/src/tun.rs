@@ -395,32 +395,47 @@ pub async fn bridge(
                             let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
                             if dst_port == 53 && udp.len() > 8 {
                                 if let Some(smart_dns) = crate::smart_dns::smart_dns() {
-                                    if let Some((response, _is_gemini)) = smart_dns.process_query(&outbound, ihl).await {
-                                        // Send the DNS response back through the TUN
-                                        // Swap src/dst for response
-                                        let mut resp_packet = response;
-                                        // Update IP header: swap src/dst, recalc checksum
-                                        if resp_packet.len() >= 20 {
-                                            resp_packet[12..16].copy_from_slice(&outbound[16..20]); // src = original dst
-                                            resp_packet[16..20].copy_from_slice(&outbound[12..16]); // dst = original src
-                                            // Recalculate IP checksum
-                                            let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
-                                            resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
-                                            // Update UDP checksum (pseudo-header changed)
-                                            let udp_start = ihl;
-                                            let udp_len = resp_packet.len() - udp_start;
-                                            resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&[0, 0]); // zero checksum
-                                            let mut sum = ones_complement_sum(&resp_packet[12..20], 0);
-                                            sum += 17u32; // UDP protocol
-                                            sum += udp_len as u32;
-                                            sum = ones_complement_sum(&resp_packet[udp_start..], sum);
-                                            let mut udp_csum = fold_checksum(sum);
-                                            if udp_csum == 0 { udp_csum = 0xffff; }
-                                            resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
-                                            
-                                            let _ = write_packet(&tun, &resp_packet).await;
-                                            continue; // Skip sending original query to tunnel
-                                        }
+                                    // process_query returns a bare DNS payload, not a
+                                    // full IP packet. Rebuild the IP+UDP headers around
+                                    // it; the old code treated the payload as a whole
+                                    // packet and wrote into it at IP-header offsets,
+                                    // corrupting every intercepted reply.
+                                    if let Some((payload, _is_gemini)) = smart_dns.process_query(&outbound, ihl).await {
+                                        let src_ip = &outbound[12..16];
+                                        let dst_ip = &outbound[16..20];
+                                        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+                                        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+
+                                        let udp_len = 8 + payload.len();
+                                        let total_len = 20 + udp_len;
+                                        let mut resp_packet = Vec::with_capacity(total_len);
+                                        // IPv4 header: v4.20, no flags, no frag, TTL 64, proto 17(UDP).
+                                        resp_packet.extend_from_slice(&[0x45, 0x00]);
+                                        resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+                                        resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
+                                        resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
+                                        resp_packet.extend_from_slice(dst_ip); // src = original dst
+                                        resp_packet.extend_from_slice(src_ip); // dst = original src
+                                        let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
+                                        resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+                                        // UDP header: swapped ports, len, checksum computed last.
+                                        resp_packet.extend_from_slice(&dst_port.to_be_bytes());
+                                        resp_packet.extend_from_slice(&src_port.to_be_bytes());
+                                        resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+                                        resp_packet.extend_from_slice(&[0x00, 0x00]);
+                                        resp_packet.extend_from_slice(&payload);
+
+                                        let udp_start = 20;
+                                        let mut sum = ones_complement_sum(&resp_packet[12..20], 0);
+                                        sum += 17u32;
+                                        sum += udp_len as u32;
+                                        sum = ones_complement_sum(&resp_packet[udp_start..], sum);
+                                        let mut udp_csum = fold_checksum(sum);
+                                        if udp_csum == 0 { udp_csum = 0xffff; }
+                                        resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
+
+                                        let _ = write_packet(&tun, &resp_packet).await;
+                                        continue; // Skip sending original query to tunnel
                                     }
                                 }
                             }

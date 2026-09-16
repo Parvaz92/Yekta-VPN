@@ -71,6 +71,8 @@ pub struct StartOptions {
     pub http_proxy: Option<SocketAddr>,
     /// AI Mode: run the Smart DNS Split engine inside the TUN bridge.
     pub smart_dns: bool,
+    /// User resolver list for the Smart DNS Split engine (see ffi.rs).
+    pub smart_dns_servers: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +172,7 @@ impl StartOptions {
             upstream_proxy: None,
             http_proxy: None,
             smart_dns: false,
+            smart_dns_servers: None,
         }
     }
 
@@ -431,9 +434,43 @@ pub fn initialize() {
             })
             .unwrap_or_else(|| "info".to_string());
         let filter = format!("info,aether={level}");
-        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter))
-            .format_timestamp_millis()
-            .try_init();
+
+        // Bridge the `log` crate into the UI-visible record_log() channel.
+        // 80 call sites use log::info!, but only record_log() reaches the app's
+        // ConnectionLog — so every [+] / [*] / [-] line the core printed was
+        // invisible on-device. This adapter forwards them both to stdout (for
+        // logcat via the JNI stdout redirect) and to the UI log, which makes
+        // features like Smart DNS debuggable in the field at all.
+        struct UiLog;
+        impl log::Log for UiLog {
+            fn enabled(&self, metadata: &log::Metadata) -> bool {
+                metadata.level() <= log::Level::Info
+            }
+            fn log(&self, record: &log::Record) {
+                if !self.enabled(record.metadata()) {
+                    return;
+                }
+                let line = format!("[{}] {}", record.level(), record.args());
+                println!("{line}");
+                // record_log is safe to call from any thread: it only formats,
+                // pushes into a mutex-guarded deque, and emits an event.
+                crate::ffi::record_log(line);
+            }
+            fn flush(&self) {}
+        }
+        let bridge = Box::new(UiLog);
+        // log::set_logger is global, so the bridge must win. env_logger is only
+        // the fallback for crates off the main path (smoltcp, quiche) whose
+        // noise we do not want in the UI; if it grabbed the global logger first,
+        // every log::info would go to stdout and never reach the app log.
+        let _ = log::set_logger(Box::leak(bridge));
+        log::set_max_level(match level.as_str() {
+            "error" => log::LevelFilter::Error,
+            "warn" => log::LevelFilter::Warn,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            _ => log::LevelFilter::Info,
+        });
         install_netstack_panic_guard();
     });
 }
@@ -1856,6 +1893,25 @@ async fn run_masque_tunnel(
         if options.smart_dns {
             if let Err(e) = crate::smart_dns::init_smart_dns().await {
                 log::warn!("[tun] Smart DNS init failed: {}", e);
+            } else if let Some(list) = options.smart_dns_servers.as_deref() {
+                // Push the user's DoT/DoH entries into the engine. Plain-UDP
+                // entries are ignored here — Android already has them via
+                // applyDns() — and anything DnsEndpoint::parse rejects is logged
+                // rather than silently dropped.
+                let parsed: Vec<_> = list
+                    .split([',', ';', ' ', '\n', '\r'])
+                    .filter_map(crate::smart_dns::DnsEndpoint::parse)
+                    .collect();
+                let encrypted: Vec<_> = parsed
+                    .iter()
+                    .filter(|e| e.transport != crate::smart_dns::DnsTransport::Plain)
+                    .cloned()
+                    .collect();
+                if let Some(engine) = crate::smart_dns::smart_dns() {
+                    engine.set_encrypted_resolvers(encrypted);
+                }
+                log::info!("[smart-dns] user resolvers: {} parsed, {} encrypted", parsed.len(),
+                    crate::smart_dns::smart_dns().map_or(0, |e| if e.has_encrypted() { 1 } else { 0 }));
             }
         }
         

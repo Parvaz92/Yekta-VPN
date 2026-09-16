@@ -131,6 +131,10 @@ struct NativeStartOptions {
     /// AI Mode: enable the Smart DNS Split engine inside the TUN bridge.
     /// Default false; honoured on MASQUE/WireGuard/WoW only.
     smart_dns: bool,
+    /// User-supplied resolver list for the Smart DNS Split engine. Plain UDP
+    /// entries are handled by Android; anything with a tls:// / https:// / doh:
+    /// prefix is spoken by the core over DoT/DoH. Comma/space/newline separated.
+    smart_dns_servers: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -168,6 +172,7 @@ impl Default for NativeStartOptions {
             upstream_proxy: None,
             http_proxy: None,
             smart_dns: false,
+            smart_dns_servers: None,
         }
     }
 }
@@ -231,6 +236,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         // (Psiphon, Tor, SHARD) ignore it, which is exactly the "symbolic only"
         // behaviour the UI promises for those protocols.
         options.smart_dns = value.smart_dns;
+        options.smart_dns_servers = value.smart_dns_servers.clone();
         Ok(options)
     }
 }
