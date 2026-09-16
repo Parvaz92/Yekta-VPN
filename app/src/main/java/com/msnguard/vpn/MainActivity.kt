@@ -6713,9 +6713,12 @@ class MainActivity : Activity() {
     }
 
     private fun setAiMode(on: Boolean) {
-        // v1.9.8: never let a stored "on" survive onto a protocol where AI Mode
-        // is hidden — that was the first half of the Auto-Scan connect failure.
-        if (on && !aiModeVisible()) return
+        // v1.9.8: the pref is a single global switch that AI Mode reads at
+        // connect time. It must be written even when the current protocol hides
+        // the chip — otherwise turning it on while Auto Scan is on WireGuard,
+        // then landing on WoW, would leave it off forever and the split engine
+        // would never stand up (that is exactly what the v1.9.7 field log
+        // showed: zero smart-dns lines).
         preferences().edit().putBoolean("ai_mode_enabled", on).apply()
         renderAiChip()
         // If we're connected and AI Mode changed, we'd need to reconnect for it to take effect.

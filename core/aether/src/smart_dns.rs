@@ -69,22 +69,26 @@ impl SmartDnsSplit {
         // Pre-connect anti-sanction DNS sockets
         for server in ANTI_SANCTION_DNS {
             let addr: SocketAddr = format!("{}:{}", server, DNS_PORT).parse()
-                .map_err(|e| AetherError::Other(format!("Invalid anti-sanction DNS {}: {}", server, e)))?;
+                .map_err(|e| AetherError::Other(format!("Invalid anti-sanction DNS {}: {}]", server, e)))?;
             let sock = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
                 .map_err(AetherError::Io)?;
             sock.connect(addr).await.map_err(AetherError::Io)?;
-            crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
+            // IMPORTANT: these queries must leave through the TUNNEL, not the
+            // carrier. protect_socket() routes them outside the VPN, where every
+            // one of these resolvers is either blocked (Iran) or simply
+            // unreachable. The previous build protected them, which is why AI
+            // Mode never resolved anything even when the flag was on.
+            // No protect_socket() here.
             anti_sanction_sockets.push(Arc::new(sock));
         }
 
         // Pre-connect default DNS sockets
         for server in DEFAULT_DNS {
             let addr: SocketAddr = format!("{}:{}", server, DNS_PORT).parse()
-                .map_err(|e| AetherError::Other(format!("Invalid default DNS {}: {}", server, e)))?;
+                .map_err(|e| AetherError::Other(format!("Invalid default DNS {}: {}]", server, e)))?;
             let sock = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
                 .map_err(AetherError::Io)?;
             sock.connect(addr).await.map_err(AetherError::Io)?;
-            crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
             default_sockets.push(Arc::new(sock));
         }
 
@@ -341,8 +345,10 @@ static SMART_DNS: once_cell::sync::OnceCell<SmartDnsSplit> = once_cell::sync::On
 
 /// Initialize the global Smart DNS engine
 pub async fn init_smart_dns() -> Result<()> {
+    log::info!("[smart-dns] AI Mode ON — standing up Smart DNS Split engine (Gemini-only, {} anti-sanction resolvers)", ANTI_SANCTION_DNS.len());
     let engine = SmartDnsSplit::new().await?;
     SMART_DNS.set(engine).map_err(|_| AetherError::Other("Smart DNS already initialized".into()))?;
+    log::info!("[smart-dns] engine ready: pre-connected sockets up, cache live");
     Ok(())
 }
 
