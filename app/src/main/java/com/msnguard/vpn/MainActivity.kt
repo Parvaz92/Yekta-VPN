@@ -4310,90 +4310,122 @@ class MainActivity : Activity() {
      * is English on a locale we do not translate), so the prompt never
      * recurs and the user is never left without a working language.
      */
+    /**
+     * The one-time language prompt, shown exactly once per install.
+     *
+     * Fresh installs and updates alike land here the first time the activity
+     * opens without a recorded choice, because [AppLanguage.PREF_CHOSEN] is
+     * only written by a picker. The user picks once; from then on the row in
+     * Settings owns the choice.
+     *
+     * The sheet is built with the same geometry as [showChoiceSheet] rather
+     * than a hand-rolled dialog: the same SURFACE fill and corner radius, the
+     * same bottom-anchored MATCH_PARENT window, the same row height and
+     * padding, and the same SELECTED marker. Three full-width rows stack
+     * vertically, so "فارسی", "English" and "中文" each get a whole line and
+     * none of them can be squeezed into a sliver again.
+     */
+    /**
+     * The typeface for a *specific* language's label, unlike [Typefaces.regular]
+     * / [Typefaces.medium], which pick by the language currently in effect.
+     *
+     * Used by the first-run picker, whose three rows are each a different
+     * language before any of them has been chosen.
+     */
+    private fun faceFor(code: String): Typeface = when (code) {
+        "fa" -> runCatching { ResourcesCompat.getFont(this, R.font.vazirmatn_bold) }
+            .getOrNull() ?: Typeface.SANS_SERIF
+        "zh" -> runCatching { ResourcesCompat.getFont(this, R.font.noto_sc_medium) }
+            .getOrNull() ?: Typeface.SANS_SERIF
+        else -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    }
+
     private fun showLanguagePickerOnce() {
         if (AppLanguage.hasChosen(this)) return
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         dialog.setCancelable(false)
         dialog.setCanceledOnTouchOutside(false)
+
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(24), dp(28), dp(24), dp(24))
-            background = roundedBackground(SURFACE, 24, SURFACE)
-            // Explicit width: a Dialog wraps its content, and three weight-1
-            // buttons with no intrinsic width of their own collapse the whole
-            // sheet to a sliver otherwise.
-            layoutParams = ViewGroup.LayoutParams(
-                (resources.displayMetrics.widthPixels * 0.86).toInt(),
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
         }
-        sheet.addView(label(Strings.t("Language"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { gravity = Gravity.CENTER_HORIZONTAL })
-        sheet.addView(label(Strings.t("Choose the app's language. You can change it later in Settings."), 14f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(8); bottomMargin = dp(24) })
-        // Three side-by-side buttons, each in its own language so the choice is
-        // legible to someone who cannot read the default English UI yet.
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            // MATCH_PARENT so the three buttons share the full width instead of
-            // squeezing each other to the row's own content width.
-            layoutParams = LinearLayout.LayoutParams(
+        sheet.addView(label(Strings.t("Language"), 22f, INK, TypefaceStyle.MEDIUM))
+        sheet.addView(
+            label(Strings.t("Choose the app's language. You can change it later in Settings."), 14f, MUTED),
+            LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-        }
-        AppLanguage.SUPPORTED.forEach { code ->
-            // Each button renders its own language's name in that language's
-            // font, so "فارسی" is crisp joined-script and "中文" has full glyph
-            // coverage even on a device whose system font lacks them.
-            val face = when (code) {
-                "fa" -> runCatching { ResourcesCompat.getFont(this, R.font.vazirmatn_bold) }
-                    .getOrNull() ?: Typeface.SANS_SERIF
-                "zh" -> runCatching { ResourcesCompat.getFont(this, R.font.noto_sc_medium) }
-                    .getOrNull() ?: Typeface.SANS_SERIF
-                else -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            ).apply { topMargin = dp(4); bottomMargin = dp(20) },
+        )
+
+        val rows = mutableMapOf<String, SelectionOption>()
+        AppLanguage.SUPPORTED.forEachIndexed { index, code ->
+            val optionTitle = label(AppLanguage.label(code), 16f, INK, TypefaceStyle.MEDIUM).apply {
+                // The row label renders in this language's own font, so "فارسی"
+                // is crisp joined-script and "中文" has full glyph coverage even
+                // on a device whose system font lacks them.
+                typeface = faceFor(code)
             }
-            // The label colour must work on both palettes. primaryContainer is
-            // near-black, which reads on the dark theme's bright mint fill but
-            // disappears on the light theme's dark green one (1.7:1). Pick by
-            // measured luminance instead — the same rule primaryContainer's own
-            // docstring states, computed per palette rather than hardcoded.
-            val onPrimary = if (AppAppearance.isDark(primary)) Color.WHITE else Color.BLACK
-            val btn = label(AppLanguage.label(code), 15f, onPrimary, TypefaceStyle.MEDIUM).apply {
-                typeface = face
-                gravity = Gravity.CENTER
-                setPadding(dp(4), dp(16), dp(4), dp(16))
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM)
+                .apply { letterSpacing = spacing(0.08f) }
+            val row = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(18), 0, dp(18), 0)
                 isClickable = true
                 isFocusable = true
-                background = roundedBackground(primary, 20, primary)
+                addView(optionTitle, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ))
+                addView(indicator, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { leftMargin = dp(12) })
                 setOnClickListener {
                     AppLanguage.set(this@MainActivity, code)
                     ConnectionLog.record("First-run language chosen: ${AppLanguage.label(code)}")
+                    rows.forEach { (value, option) ->
+                        setSelectionState(option, value == code, animate = true)
+                        option.title.typeface = faceFor(value)
+                    }
                     dialog.dismiss()
                     recreate()
                 }
             }
-            buttons.addView(btn, LinearLayout.LayoutParams(0, dp(52), 1f).apply {
-                // No trailing margin on the last button, or the row is visibly
-                // off-centre.
-                marginEnd = if (code == AppLanguage.SUPPORTED.last()) 0 else dp(10)
-            })
+            val option = SelectionOption(row, optionTitle, indicator, 18)
+            rows[code] = option
+            setSelectionState(option, code == AppLanguage.current(this), animate = false)
+            // setSelectionState retypes the title through Typefaces, which pick
+            // by *the active language*. In this sheet that is the wrong language
+            // by construction — the labels are the three languages the user has
+            // not chosen between yet, and the row's own font is the one that
+            // makes its glyphs render at all. Restore it after styling.
+            option.title.typeface = faceFor(code)
+            sheet.addView(row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(72),
+            ).apply { topMargin = if (index == 0) 0 else dp(8) })
         }
-        sheet.addView(buttons, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
+
         // A user who dismisses the sheet any other way (back is disabled, but a
         // launcher crash or a theme recreate can land here) still gets a recorded
         // default rather than a recurring prompt on every launch.
         dialog.setOnDismissListener {
             if (!AppLanguage.hasChosen(this)) AppLanguage.set(this, AppLanguage.current(this))
         }
-        dialog.setContentView(sheet)
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
         dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
     }
 
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
