@@ -4318,8 +4318,15 @@ class MainActivity : Activity() {
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), dp(32), dp(28), dp(24))
-            background = roundedBackground(SURFACE, 28, SURFACE)
+            setPadding(dp(24), dp(28), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 24, SURFACE)
+            // Explicit width: a Dialog wraps its content, and three weight-1
+            // buttons with no intrinsic width of their own collapse the whole
+            // sheet to a sliver otherwise.
+            layoutParams = ViewGroup.LayoutParams(
+                (resources.displayMetrics.widthPixels * 0.86).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
         }
         sheet.addView(label(Strings.t("Language"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4332,8 +4339,8 @@ class MainActivity : Activity() {
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            // MATCH_PARENT so the three buttons actually share the full width
-            // instead of squeezing each other to fit the row's own content.
+            // MATCH_PARENT so the three buttons share the full width instead of
+            // squeezing each other to the row's own content width.
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4342,8 +4349,7 @@ class MainActivity : Activity() {
         AppLanguage.SUPPORTED.forEach { code ->
             // Each button renders its own language's name in that language's
             // font, so "فارسی" is crisp joined-script and "中文" has full glyph
-            // coverage even on a device whose system font lacks them. The font is
-            // the one the UI itself will use once this language is chosen.
+            // coverage even on a device whose system font lacks them.
             val face = when (code) {
                 "fa" -> runCatching { ResourcesCompat.getFont(this, R.font.vazirmatn_bold) }
                     .getOrNull() ?: Typeface.SANS_SERIF
@@ -4351,13 +4357,19 @@ class MainActivity : Activity() {
                     .getOrNull() ?: Typeface.SANS_SERIF
                 else -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
             }
-            val btn = label(AppLanguage.label(code), 15f, primaryContainer, TypefaceStyle.MEDIUM).apply {
+            // The label colour must work on both palettes. primaryContainer is
+            // near-black, which reads on the dark theme's bright mint fill but
+            // disappears on the light theme's dark green one (1.7:1). Pick by
+            // measured luminance instead — the same rule primaryContainer's own
+            // docstring states, computed per palette rather than hardcoded.
+            val onPrimary = if (AppAppearance.isDark(primary)) Color.WHITE else Color.BLACK
+            val btn = label(AppLanguage.label(code), 15f, onPrimary, TypefaceStyle.MEDIUM).apply {
                 typeface = face
                 gravity = Gravity.CENTER
-                setPadding(dp(4), dp(14), dp(4), dp(14))
+                setPadding(dp(4), dp(16), dp(4), dp(16))
                 isClickable = true
                 isFocusable = true
-                background = roundedBackground(primary, 18, primary)
+                background = roundedBackground(primary, 20, primary)
                 setOnClickListener {
                     AppLanguage.set(this@MainActivity, code)
                     ConnectionLog.record("First-run language chosen: ${AppLanguage.label(code)}")
@@ -4365,10 +4377,10 @@ class MainActivity : Activity() {
                     recreate()
                 }
             }
-            buttons.addView(btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            buttons.addView(btn, LinearLayout.LayoutParams(0, dp(52), 1f).apply {
                 // No trailing margin on the last button, or the row is visibly
                 // off-centre.
-                marginEnd = if (code == AppLanguage.SUPPORTED.last()) 0 else dp(8)
+                marginEnd = if (code == AppLanguage.SUPPORTED.last()) 0 else dp(10)
             })
         }
         sheet.addView(buttons, LinearLayout.LayoutParams(
