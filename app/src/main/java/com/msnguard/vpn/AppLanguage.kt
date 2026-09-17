@@ -15,8 +15,11 @@ import android.content.Context
  */
 object AppLanguage {
 
-    /** Preference key. Values: "system", "en", "fa", "zh". */
+    /** Preference key. Values: "en", "fa", "zh". */
     const val PREF = "app_language"
+
+    /** Preference key recording that the user has already picked a language once. */
+    const val PREF_CHOSEN = "language_chosen"
 
     /** The language codes the UI itself is translated into. */
     val SUPPORTED = listOf("en", "fa", "zh")
@@ -28,12 +31,28 @@ object AppLanguage {
      * the preference takes effect without any invalidation wiring; the
      * cost is one SharedPreferences read, which Android already keeps in
      * memory after the first load.
+     *
+     * Two cases:
+     * - The user has picked once ([PREF_CHOSEN], or an explicit value in
+     *   [PREF] from an earlier version's Settings row). That value is law.
+     * - Nobody has picked anything yet: an existing install updating to the
+     *   version that introduced the picker. It keeps following the device
+     *   locale, exactly as before, until the picker is answered — once, on
+     *   the first launch — and from then on the stored choice owns it.
+     *
+     * "system" never round-trips: [set] always writes a concrete code, and
+     * the Settings row offers only the three.
      */
     fun current(context: Context? = null): String {
         val ctx = context ?: appContext ?: return "en"
-        val stored = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getString(PREF, null) ?: return fromSystem(ctx)
-        return if (stored in SUPPORTED) stored else fromSystem(ctx)
+        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val stored = prefs.getString(PREF, null)
+        // An explicit stored code, or a recorded pick, means the choice is made.
+        if (stored in SUPPORTED && prefs.getBoolean(PREF_CHOSEN, false)) return stored
+        return when {
+            stored in SUPPORTED -> stored          // pre-picker Settings choice
+            else -> fromSystem(ctx)                // not picked yet: keep the locale
+        }
     }
 
     /** Map the device locale to a supported language, English as fallback. */
@@ -42,9 +61,14 @@ object AppLanguage {
         return if (tag in SUPPORTED) tag else "en"
     }
 
+    /** True once the user has picked a language with the one-time picker. */
+    fun hasChosen(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean(PREF_CHOSEN, false)
+
     fun set(context: Context, code: String) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .edit().putString(PREF, code).apply()
+            .edit().putString(PREF, code).putBoolean(PREF_CHOSEN, true).apply()
     }
 
     /** Holds the application context so t() works from the service too. */
@@ -53,7 +77,6 @@ object AppLanguage {
 
     /** Picker label for a code, e.g. "فارسی" for fa. */
     fun label(code: String): String = when (code) {
-        "system" -> Strings.t("Follow system")
         "fa" -> "فارسی"
         "zh" -> "中文"
         else -> "English"

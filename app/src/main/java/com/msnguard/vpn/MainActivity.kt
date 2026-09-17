@@ -725,6 +725,10 @@ class MainActivity : Activity() {
         setContentView(pageHost)
         configureSystemBars()
         showOpeningOverlay()
+        // The one-time language prompt. Sits over a fully built first frame, so
+        // the user picks a language while the real UI is already behind it — not
+        // a blank splash. Records a choice on any exit path, so it shows once.
+        showLanguagePickerOnce()
         // Reattach to a tunnel that is already up. Without this the dial opens in
         // the disconnected state while the VPN is running, and the session timer
         // would only start on the next status broadcast. [adoptRunningTunnel]
@@ -917,6 +921,16 @@ class MainActivity : Activity() {
                     // this round as "cannot tell".
                     val counterRestarted = trafficRx < rxAtLastProbe
                     rxAtLastProbe = trafficRx
+                    // Whether the probe actually rode the tunnel. The app is
+                    // excluded from its own TUN (addDisallowedApplication on the
+                    // native path), so in native mode the probe leaves over the
+                    // carrier link. That makes it a latency sample, not a health
+                    // verdict: a carrier-side block or a Psiphon mid-rotation
+                    // looks identical to a dead tunnel from out here. Only a
+                    // probe that went through the tunnel may be allowed to tear
+                    // one down.
+                    val probeRodeTunnel = TunnelStatus.isActive() &&
+                        (Tun2SocksManager.isRunning || TunnelStatus.isProxyMode || !TunnelStatus.isNativeTunMode)
                     if (reachable != null) {
                         pingFailureStreak = 0
                         if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
@@ -947,6 +961,24 @@ class MainActivity : Activity() {
                         // probes lost their race would be the mirror image of the
                         // dead-green bug this screen exists to prevent.
                         if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
+                    } else if (!probeRodeTunnel) {
+                        // The probe never went through the tunnel at all — the app
+                        // is split-tunnel-excluded, so this failure happened on the
+                        // carrier link while the tunnel itself was untouched. This
+                        // is the case in the field log: a mid-rotation Psiphon made
+                        // the carrier path briefly unreachable, the probe saw three
+                        // consecutive misses, and a tunnel that stayed up for an hour
+                        // afterwards was torn down at 18:32:14.
+                        //
+                        // Tearing down here is not a verdict, it is a guess — and a
+                        // wrong guess costs the session. Skip the streak, keep the
+                        // dial honest with amber, and let the next round's bytes or
+                        // the core's own counters be the judge.
+                        pingFailureStreak = 0
+                        ConnectionLog.record(
+                            "Health probe failed but it left over the carrier link, not the tunnel — not counting against the session"
+                        )
+                        showDegraded()
                     } else {
                         // A session that stops passing traffic is a dead tunnel,
                         // not a cosmetic "degraded" badge. Show degraded for the
@@ -1812,6 +1844,10 @@ class MainActivity : Activity() {
             // that ConnectionLog mirrors to keeps everything up to its 256KB cap.
             addView(createLogActionButton(Strings.t("COPY")) { copyFullLog() })
             addView(createLogActionButton(Strings.t("SHARE")) { shareFullLog() })
+            // The export is encrypted, and the key is the only way to read it.
+            // Sitting the button next to SHARE is what makes that clear: the two
+            // files are a pair, and a log the user cannot read is worse than none.
+            addView(createLogActionButton(Strings.t("Log Key")) { shareKeyFile() })
         }
         content.addView(header)
         content.addView(label(Strings.t("Tunnel and VPN events"), 14f, MUTED), LinearLayout.LayoutParams(
@@ -2237,6 +2273,17 @@ class MainActivity : Activity() {
     }
 
     /**
+     * The plain log, encrypted with [LogCipher].
+     *
+     * [fullLogText] is kept plain for the app's own screen, which is already
+     * behind a permission gate; this is the one that leaves the device, so this
+     * is the one that is encrypted. The whole batch is one ciphertext: a reader
+     * with the key gets the log exactly as it was written, including the header
+     * line carrying the version and protocol.
+     */
+    private fun encryptedExport(): String = LogCipher.encrypt(fullLogText())
+
+    /**
      * Copies the full log to the clipboard on a background thread.
      *
      * The read is off the main thread because the file can be a quarter of a
@@ -2246,7 +2293,7 @@ class MainActivity : Activity() {
      */
     private fun copyFullLog() {
         Thread({
-            val text = runCatching { fullLogText() }.getOrElse { Strings.tf("Could not read the log: %s", it.message.toString()) }
+            val text = runCatching { encryptedExport() }.getOrElse { Strings.tf("Could not read the log: %s", it.message.toString()) }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val clipboard = getSystemService(ClipboardManager::class.java)
@@ -2257,7 +2304,7 @@ class MainActivity : Activity() {
                 // button, and being told twice is better than not being told.
                 Toast.makeText(
                     this,
-                    "Log copied (${text.length / 1024} KB)",
+                    "Log copied (${text.length / 1024} KB, encrypted)",
                     Toast.LENGTH_SHORT,
                 ).show()
             }
@@ -2276,7 +2323,7 @@ class MainActivity : Activity() {
             val result = runCatching {
                 val dir = File(cacheDir, "logs").apply { mkdirs() }
                 val target = File(dir, "msn-guard-log.txt")
-                target.writeText(fullLogText())
+                target.writeText(encryptedExport())
                 target
             }
             runOnUiThread {
@@ -2289,7 +2336,7 @@ class MainActivity : Activity() {
                         Intent.createChooser(
                             Intent(Intent.ACTION_SEND)
                                 .setType("text/plain")
-                                .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD log")
+                                .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD log (encrypted)")
                                 .putExtra(Intent.EXTRA_STREAM, uri)
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                             Strings.t("Share log"),
@@ -2298,6 +2345,44 @@ class MainActivity : Activity() {
                 }
             }
         }, "log-share").start()
+    }
+
+    /**
+     * Shares the Log Key file — the one thing that decrypts an exported log.
+     *
+     * The export is encrypted on purpose (see [LogCipher]), and a log without
+     * its key is unreadable noise. This is the bridge: it writes a plain-text
+     * key file into cacheDir and hands it to the same share sheet, so the user
+     * can keep the key where they keep their logs, or forward it to whoever is
+     * reading one.
+     */
+    private fun shareKeyFile() {
+        Thread({
+            val result = runCatching {
+                val dir = File(cacheDir, "logs").apply { mkdirs() }
+                val target = File(dir, "Log Key.txt")
+                LogCipher.writeKeyFile(target)
+                target
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onFailure {
+                    Toast.makeText(this, "Could not write the key file: ${it.message}", Toast.LENGTH_LONG).show()
+                }.onSuccess { file ->
+                    val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                    startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD Log Key")
+                                .putExtra(Intent.EXTRA_STREAM, uri)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                            Strings.t("Log Key"),
+                        )
+                    )
+                }
+            }
+        }, "log-key").start()
     }
 
     /**
@@ -4168,47 +4253,120 @@ class MainActivity : Activity() {
         }
     }
 
-    /** The raw preference, including "system" — what the Language row displays. */
-    private fun currentLanguagePref(): String =
-        preferences().getString(AppLanguage.PREF, "system") ?: "system"
+    /**
+     * What the Language row displays.
+     *
+     * Reads through [AppLanguage.current] rather than the raw stored string: an
+     * install that has not answered the picker yet still follows the device
+     * locale, so the row must say the language actually on screen, not "en".
+     * Once a pick is recorded the stored code and the resolved one agree.
+     */
+    private fun currentLanguagePref(): String = AppLanguage.current(this)
 
     /**
-     * Pick the UI language: system, English, Persian, Chinese.
+     * Pick the UI language: English, Persian, Chinese.
      *
      * Exactly the theme's shape: write the preference, recreate(), and the
      * whole tree is rebuilt reading [Strings.t] at every label. The tunnel is
      * untouched — it lives in the service, not the activity. The service's
      * own status strings pick the new language on their next sendStatus
      * because AppLanguage reads the preference per call.
+     *
+     * "Follow system" was removed: the one-time picker on first launch asks
+     * once and records a concrete choice, and this row offers the same three.
+     * A device on a locale we do not translate shows English, which is what
+     * "system" resolved to anyway.
      */
     private fun chooseLanguage() {
-        val options = listOf("system") + AppLanguage.SUPPORTED
         showChoiceSheet(
             title = Strings.t("Language"),
             subtitle = Strings.t("Applies straight away. A running tunnel is not interrupted."),
-            options = options,
+            options = AppLanguage.SUPPORTED,
             selected = currentLanguagePref(),
             label = { code -> AppLanguage.label(code) },
-            // Only "system" explains itself; the named languages do not repeat
-            // their own name under the label — that read as a doubled title.
-            description = { code ->
-                when (code) {
-                    "system" -> if (AppLanguage.current() == "fa") {
-                        "انگلیسی، تا مگر دستگاه روی فارسی یا چینی باشد"
-                    } else if (AppLanguage.current() == "zh") {
-                        "英语，除非设备系统语言为波斯语或中文"
-                    } else {
-                        "English unless the device is set to فارسی or 中文"
-                    }
-                    else -> ""
-                }
-            },
+            // The named languages do not repeat their own name under the label —
+            // that reads as a doubled title.
+            description = { "" },
         ) { chosen ->
             if (chosen == currentLanguagePref()) return@showChoiceSheet
             AppLanguage.set(this, chosen)
             ConnectionLog.record("UI language set to ${AppLanguage.label(chosen)}")
             recreate()
         }
+    }
+
+    /**
+     * The one-time language prompt, shown exactly once per install.
+     *
+     * Fresh installs and updates alike land here the first time the activity
+     * opens without a recorded choice, because [AppLanguage.PREF_CHOSEN] is
+     * only written by a picker. The user picks once; from then on the row in
+     * Settings owns the choice.
+     *
+     * Shown after onCreate's view setup so the first frame is already on
+     * screen — the sheet is a dialog over a live UI, not a splash. Cancelling
+     * it without a choice still records a choice (the current language, which
+     * is English on a locale we do not translate), so the prompt never
+     * recurs and the user is never left without a working language.
+     */
+    private fun showLanguagePickerOnce() {
+        if (AppLanguage.hasChosen(this)) return
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        dialog.setCancelable(false)
+        dialog.setCanceledOnTouchOutside(false)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(28), dp(32), dp(28), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(label(Strings.t("Language"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        sheet.addView(label(Strings.t("Choose the app's language. You can change it later in Settings."), 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(8); bottomMargin = dp(24) })
+        // Three side-by-side buttons, each in its own language so the choice is
+        // legible to someone who cannot read the default English UI yet.
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        AppLanguage.SUPPORTED.forEach { code ->
+            val face = when (code) {
+                "fa" -> Typeface.SANS_SERIF
+                "zh" -> Typeface.SANS_SERIF
+                else -> Typeface.DEFAULT
+            }
+            val btn = label(AppLanguage.label(code), 15f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
+                typeface = face
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(14), dp(4), dp(14))
+                isClickable = true
+                isFocusable = true
+                background = roundedBackground(PRIMARY, 18, PRIMARY)
+                setOnClickListener {
+                    AppLanguage.set(this@MainActivity, code)
+                    ConnectionLog.record("First-run language chosen: ${AppLanguage.label(code)}")
+                    dialog.dismiss()
+                    recreate()
+                }
+            }
+            buttons.addView(btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            })
+        }
+        sheet.addView(buttons, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        // A user who dismisses the sheet any other way (back is disabled, but a
+        // launcher crash or a theme recreate can land here) still gets a recorded
+        // default rather than a recurring prompt on every launch.
+        dialog.setOnDismissListener {
+            if (!AppLanguage.hasChosen(this)) AppLanguage.set(this, AppLanguage.current(this))
+        }
+        dialog.setContentView(sheet)
+        dialog.show()
     }
 
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
