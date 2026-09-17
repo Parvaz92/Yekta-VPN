@@ -3594,6 +3594,15 @@ class MainActivity : Activity() {
                 fragRow.setValue(if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off"))
             }
         }
+        // Mixed-case SNI (L×Box spec 028): randomise the casing of the SNI on
+        // every ClientHello. A single toggle, because there is nothing to tune
+        // — it is either changing the bytes on the wire or it is not.
+        lateinit var sniRow: OrbitSettingsRow
+        sniRow = addControl(Strings.t("Mixed-case SNI"), if (mixedCaseSni()) Strings.t("On") else Strings.t("Off")) {
+            chooseMixedCaseSni {
+                sniRow.setValue(if (mixedCaseSni()) Strings.t("On") else Strings.t("Off"))
+            }
+        }
         scroll.addView(content)
         page.addView(scroll)
         page.setOnApplyWindowInsetsListener { _, insets ->
@@ -5164,6 +5173,28 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(46),
         ).apply { topMargin = dp(10) })
 
+        // A second button that checks the thing the DNS probe cannot: whether a
+        // page can actually be fetched through the tunnel. "Ping works but the
+        // site does not open" looks identical to a passing DNS probe, and this
+        // is the only way to tell them apart from the DNS screen.
+        card.addView(createSettingsButton(
+            Strings.t("Real fetch test"),
+            backgroundOverride = SURFACE_VARIANT,
+        ) {
+            status.text = Strings.t("Fetching…")
+            Thread {
+                val report = StringBuilder()
+                for (target in CONTENT_TEST_TARGETS) {
+                    val outcome = probeContent(target.url, target.expect)
+                    report.append(Strings.tf("%s → %s", target.label, outcome)).append(" · ")
+                }
+                val summary = report.toString().trimEnd(' ', '·')
+                runOnUiThread { status.text = summary }
+            }.start()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(46),
+        ).apply { topMargin = dp(8) })
+
         content.addView(card, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { bottomMargin = dp(14) })
@@ -5244,6 +5275,49 @@ class MainActivity : Activity() {
         } finally {
             conn.disconnect()
         }
+    }
+
+    /**
+     * A real end-to-end check: fetch a URL and look at the content.
+     *
+     * The DNS probes above prove a server answers; this proves a connection
+     * through the tunnel can actually retrieve a page. A DNS answer plus a
+     * blocked HTTP path is exactly the "ping works but the site does not open"
+     * failure this reports separately.
+     *
+     * Runs on the calling thread; callers must be off the UI thread.
+     */
+    private fun probeContent(url: String, expect: String): String = try {
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        try {
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 6000
+            conn.readTimeout = 6000
+            conn.setRequestProperty("accept-encoding", "identity")
+            conn.setRequestProperty("cache-control", "no-cache")
+            val code = conn.responseCode
+            if (code !in 200..299) return@try Strings.tf("HTTP %s", code)
+            // read() returning -1 means a body was promised and the stream was
+            // cut — a half-open connection is not a working one.
+            val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+            if (body.isEmpty()) {
+                Strings.t("Empty response")
+            } else if (expect.isNotEmpty() && !body.contains(expect, ignoreCase = true)) {
+                Strings.t("Content mismatch")
+            } else {
+                Strings.tf("%s bytes OK", String.format("%,d", body.length))
+            }
+        } finally {
+            conn.disconnect()
+        }
+    } catch (e: java.net.SocketTimeoutException) {
+        Strings.t("Timeout")
+    } catch (e: java.net.UnknownHostException) {
+        Strings.t("DNS failed")
+    } catch (e: javax.net.ssl.SSLException) {
+        Strings.t("TLS failed")
+    } catch (e: java.io.IOException) {
+        Strings.tf("Unreachable (%s)", e.javaClass.simpleName)
     }
 
     private fun probeUdp(entry: String): Boolean {
@@ -6921,6 +6995,25 @@ class MainActivity : Activity() {
         ?.let { name -> H2Fragmentation.entries.firstOrNull { it.coreName == name } }
         ?: H2Fragmentation.OFF
 
+    /** Whether the SNI hostname is re-cased on every ClientHello (spec 028). */
+    private fun mixedCaseSni(): Boolean = preferences().getBoolean(MIXED_CASE_SNI, false)
+
+    /**
+     * One binary choice, because the transform has no parameters: the SNI is
+     * either re-cased on each connection or sent exactly as configured.
+     */
+    private fun chooseMixedCaseSni(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = Strings.t("Mixed-case SNI"),
+        subtitle = Strings.t("Randomise the casing of the server name to defeat exact-match DPI"),
+        options = listOf(false, true),
+        selected = mixedCaseSni(),
+        label = { if (it) Strings.t("On") else Strings.t("Off") },
+        description = { if (it) Strings.t("Re-cased per connection") else Strings.t("Sent exactly as configured") },
+    ) { chosen ->
+        preferences().edit().putBoolean(MIXED_CASE_SNI, chosen).apply()
+        after?.invoke()
+    }
+
     /**
      * Psiphon's local SOCKS port, fixed.
      *
@@ -7202,6 +7295,21 @@ class MainActivity : Activity() {
         const val NOTIFICATION_PERMISSION_REQUEST = 101
         const val BACKUP_EXPORT_REQUEST = 102
         const val BACKUP_IMPORT_REQUEST = 103
+
+        /**
+         * One page to fetch for the "does it actually work" test on the DNS
+         * screen. [expect] is a string a genuine response must contain; a body
+         * without it means something answered that was not the site.
+         *
+         * These are chosen to be cheap, stable and outside the censored set: a
+         * plain 204 proves reachability, and the generated page proves the
+         * response body is really read, not just opened.
+         */
+        val CONTENT_TEST_TARGETS = listOf(
+            ContentTestTarget("Cloudflare 204", "https://cloudflare.com/cdn-cgi/trace", ""),
+            ContentTestTarget("Google 204", "https://connectivitycheck.gstatic.com/generate_204", ""),
+            ContentTestTarget("Example", "https://example.com", "Example Domain"),
+        )
         const val LOG_REFRESH_MS = 750L
         const val STATUS_POLL_MS = 2_000L
         const val PAGE_ANIMATION_MS = 220L
@@ -7444,6 +7552,7 @@ class MainActivity : Activity() {
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
+        const val MIXED_CASE_SNI = "mixed_case_sni"
         // The FALLBACK_* colours that used to live here are gone: they were the
         // last copy of the retired green-grey palette, unreferenced since the
         // Orbit palette landed, and with a second palette in play a stray hex
@@ -7470,3 +7579,9 @@ private class ChevronView(context: Context, private val color: Int) : View(conte
         canvas.drawLine(middleX, middleY + arm / 2, middleX + arm, middleY - arm / 2, paint)
     }
 }
+
+/**
+ * One target for the DNS screen's real-fetch test: a URL plus the string a
+ * truthful response must contain.
+ */
+private data class ContentTestTarget(val label: String, val url: String, val expect: String)

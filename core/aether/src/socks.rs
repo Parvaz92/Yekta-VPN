@@ -70,10 +70,68 @@ fn route_action(host: Host<'_>, port: u16) -> Action {
     ROUTES.read().unwrap().decide(host, port)
 }
 
+/// Decide a route when a name may have been learned from the ClientHello.
+///
+/// A connection addressed by IP carries no name, but the ClientHello can
+/// still hold one. This prefers that name — a domain rule is what the user
+/// wrote, and it can only match against the name — while falling back to the
+/// IP when nothing was announced. The IP decision is the pre-existing one, so
+/// a connection that sends no ClientHello, or a fragmented one we cannot
+/// read, lands exactly where it always did.
+fn route_named(target: &Target, named: Option<&str>, port: u16) -> Action {
+    match named {
+        Some(name) => ROUTES.read().unwrap().decide(Host::Domain(name), port),
+        None => route_action(host_of(target), port),
+    }
+}
+
 fn host_of(target: &Target) -> Host<'_> {
     match target {
         Target::Domain(name) => Host::Domain(name.as_str()),
         Target::Ip(ip) => Host::Ip(*ip),
+    }
+}
+
+/// The number of milliseconds a client may keep us waiting for the bytes that
+/// carry its name.
+///
+/// A ClientHello normally lands in the very first segment. This is only the
+/// ceiling for the rare flow that stalls between the connect reply and its
+/// first byte, and it is what bounds the cost of the sniff: a connection that
+/// sends nothing is released after this, not held forever.
+fn sniff_window() -> std::time::Duration {
+    let ms = std::env::var("AETHER_SNIFF_WINDOW_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(400);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Read the first bytes of `sock` into a buffer the caller will forward
+/// afterwards, returning how many were read.
+///
+/// TCP is a stream, so the bytes inspected to learn the hostname are the same
+/// bytes the tunnel has to deliver. Nothing is consumed and discarded: the
+/// buffer is handed back to [handle_direct] and [handle_proxy], which prepend
+/// it before the rest of the flow.
+///
+/// [None] means the connection sent nothing inside the window. The caller
+/// keeps its existing IP-based routing decision; it is a miss, not a misroute.
+async fn read_sniff_head(sock: &mut TcpStream) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut head = vec![0u8; crate::sniff::PEEK_BUDGET];
+    match tokio::time::timeout(sniff_window(), sock.read(&mut head)).await {
+        Ok(Ok(0)) => None,
+        Ok(Ok(read)) => {
+            head.truncate(read);
+            Some(head)
+        }
+        Ok(Err(_)) => None,
+        // A client that stalls past the window is not penalised: it is still
+        // routed by the IP it connected to, which is what happened before this
+        // feature existed. An empty buffer keeps the caller's code one-armed.
+        Err(_) => Some(Vec::new()),
     }
 }
 
@@ -482,15 +540,53 @@ async fn handle_connect(
     target: Target,
     port: u16,
 ) -> Result<()> {
-    match route_action(host_of(&target), port) {
+    // DOMAIN SNIFF: an IP-targeted connection may still announce its name in
+    // the ClientHello, which is the only place a domain routing rule can match
+    // it. Peek before replying, then re-decide with the name if we learned one.
+    //
+    // The gate is what keeps this cheap: address and port rules do not need
+    // the name, so the peek only happens for someone who actually wrote a
+    // domain rule. `replied` tracks whether the SOCKS success already went
+    // out, because after a peek the caller cannot send it twice.
+    let mut head = Vec::new();
+    let mut replied = false;
+    let mut named: Option<String> = None;
+
+    if matches!(target, Target::Ip(_)) && ROUTES.read().unwrap().has_domain_rules() {
+        // Reply first so the client starts sending, then read what it announces.
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+        replied = true;
+
+        head = match read_sniff_head(&mut sock).await {
+            Some(bytes) => bytes,
+            None => return Ok(()),
+        };
+
+        if head.is_empty() {
+            log::trace!("[route] {target}:{port} sent nothing to read a name from");
+        } else {
+            named = crate::sniff::hostname(&head);
+            if let Some(name) = &named {
+                log::debug!("[route] {target}:{port} announced itself as {name}");
+            }
+        }
+    }
+
+    match route_named(&target, named.as_deref(), port) {
         Action::Block => {
             log::debug!("[route] block tcp {target}:{port}");
-            let _ = reply(&mut sock, REP_NOT_ALLOWED).await;
+            if !replied {
+                let _ = reply(&mut sock, REP_NOT_ALLOWED).await;
+            }
             return Ok(());
         }
+        // The name can only widen what the IP already said: a Direct decision
+        // on the IP is Direct with or without a name, so the fast path is kept
+        // and the head is carried into handle_direct instead of being read a
+        // second time.
         Action::Direct => {
             log::debug!("[route] direct tcp {target}:{port}");
-            return handle_direct(sock, target, port).await;
+            return handle_direct(sock, target, port, head, replied).await;
         }
         Action::Proxy => {}
     }
@@ -616,7 +712,18 @@ fn udp_source_allowed(expected_ip: IpAddr, latched: Option<SocketAddr>, from: So
     }
 }
 
-async fn handle_direct(mut sock: TcpStream, target: Target, port: u16) -> Result<()> {
+/// The `head` is what the domain sniff already read off this socket, if it
+/// ran: the bytes that announced the hostname are part of the byte stream and
+/// must still reach the destination, so they are written before the copy.
+/// `replied` is whether the SOCKS success was already sent by the sniff path,
+/// because it cannot be sent twice.
+async fn handle_direct(
+    mut sock: TcpStream,
+    target: Target,
+    port: u16,
+    head: Vec<u8>,
+    replied: bool,
+) -> Result<()> {
     let address = match &target {
         Target::Domain(name) => format!("{name}:{port}"),
         Target::Ip(ip) => SocketAddr::new(*ip, port).to_string(),
@@ -627,21 +734,35 @@ async fn handle_direct(mut sock: TcpStream, target: Target, port: u16) -> Result
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
                 log::debug!("[route] direct connect to {address} failed: {error}");
-                let _ = reply(&mut sock, REP_GENERAL).await;
+                if !replied {
+                    let _ = reply(&mut sock, REP_GENERAL).await;
+                }
                 return Ok(());
             }
             Err(_) => {
                 log::debug!("[route] direct connect to {address} timed out");
-                let _ = reply(&mut sock, REP_GENERAL).await;
+                if !replied {
+                    let _ = reply(&mut sock, REP_GENERAL).await;
+                }
                 return Ok(());
             }
         };
 
     let _ = upstream.set_nodelay(true);
-    reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+    if !replied {
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+    }
 
     let (mut client_rd, mut client_wr) = sock.into_split();
     let (mut remote_rd, mut remote_wr) = upstream.into_split();
+
+    // The bytes the sniff inspected are the first bytes of the stream. Forward
+    // them before the copy takes over, or the connection would open with its
+    // ClientHello missing.
+    if !head.is_empty() {
+        use tokio::io::AsyncWriteExt;
+        let _ = remote_wr.write_all(&head).await;
+    }
 
     let up = tokio::spawn(async move { tokio::io::copy(&mut client_rd, &mut remote_wr).await });
     let _ = tokio::io::copy(&mut remote_rd, &mut client_wr).await;

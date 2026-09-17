@@ -223,6 +223,25 @@ impl RuleSet {
         self.block.is_empty() && self.direct.is_empty()
     }
 
+    /// Whether any rule in this set names a *domain* rather than an address or
+    /// a port.
+    ///
+    /// This is what decides whether a TUN front end has to peek at the
+    /// ClientHello at all. Address and port rules work on the IP the SYN
+    /// already carries; only domain rules need the name read off the wire. So
+    /// when this is false, the sniff path costs nothing and is never taken.
+    pub fn has_domain_rules(&self) -> bool {
+        self.block.iter().chain(self.direct.iter()).any(|rule| {
+            matches!(
+                rule,
+                Matcher::DomainSuffix(_)
+                    | Matcher::DomainFull(_)
+                    | Matcher::DomainKeyword(_)
+                    | Matcher::DomainRegex(_)
+            )
+        })
+    }
+
     pub fn decide(&self, host: Host<'_>, port: u16) -> Action {
         if self.block.iter().any(|rule| rule.matches(host, port)) {
             return Action::Block;

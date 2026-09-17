@@ -2,6 +2,48 @@ use std::collections::VecDeque;
 use std::ffi::{c_char, CStr, CString};
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Once;
+
+/// Installs a panic hook that keeps the *message*, which `catch_unwind`
+/// otherwise throws away. The JNI layer turns a panic into a bare
+/// "panic in Aether native core" and the tunnel just dies, so without this the
+/// log line that a user pastes back carries no clue to the cause.
+///
+/// The hook re-stores the payload through [set_last_error] and writes it into
+/// the persisted log, where both the next read of `lastError` and the exported
+/// log file can reach it.
+fn install_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let next = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let where_ = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".into());
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            let line = format!("PANIC {where_}: {payload}");
+            set_last_error(line);
+            next(info);
+        }));
+    });
+}
+
+#[cfg(test)]
+fn last_error_for_test() -> String {
+    LAST_ERROR
+        .lock()
+        .unwrap()
+        .to_str()
+        .unwrap_or("")
+        .to_string()
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
@@ -110,6 +152,7 @@ struct NativeStartOptions {
     log_level: Option<String>,
     perf_profile: Option<String>,
     h2_fragmentation: Option<bool>,
+    mixed_case_sni: Option<bool>,
     dns_servers: Option<String>,
     route_block: Option<String>,
     route_direct: Option<String>,
@@ -164,6 +207,7 @@ impl Default for NativeStartOptions {
             log_level: None,
             perf_profile: None,
             h2_fragmentation: None,
+            mixed_case_sni: None,
             dns_servers: None,
             route_block: None,
             route_direct: None,
@@ -219,6 +263,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
             .perf_profile
             .filter(|profile| !profile.trim().is_empty());
         options.h2_fragmentation = value.h2_fragmentation;
+        options.mixed_case_sni = value.mixed_case_sni;
         options.dns_servers = value.dns_servers.filter(|value| !value.trim().is_empty());
         options.route_block = value.route_block.filter(|value| !value.trim().is_empty());
         options.route_direct = value.route_direct.filter(|value| !value.trim().is_empty());
@@ -376,6 +421,7 @@ pub unsafe extern "C" fn aether_start_json_with_tun(json: *const c_char, tun_fd:
 }
 
 unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i32 {
+    install_panic_hook();
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut options = match unsafe { options_from_json(json) } {
             Ok(options) => options,
@@ -645,6 +691,27 @@ pub(crate) fn mark_ready() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_panic_hook_keeps_the_message_instead_of_losing_it() {
+        // A panic in the native core is the difference between a crash report
+        // a user can paste and "the tunnel died". The hook has to survive the
+        // round trip through catch_unwind with its payload intact.
+        install_panic_hook();
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("the field log should show this exact string");
+        }));
+        assert!(payload.is_err());
+        let stored = last_error_for_test();
+        assert!(
+            stored.contains("the field log should show this exact string"),
+            "the hook must keep the panic message, got: {stored}"
+        );
+        assert!(
+            stored.contains("PANIC"),
+            "must be tagged for grep, got: {stored}"
+        );
+    }
 
     #[test]
     fn parses_android_start_options() {

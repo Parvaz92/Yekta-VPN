@@ -29,6 +29,13 @@ mod wg_prober;
 mod wireguard;
 mod zerotrust;
 
+/// TLS SNI and HTTP Host extraction, used so domain routing rules work inside
+/// a TUN front end where only an IP is visible. See [sniff].
+mod sniff;
+
+/// mixed-case SNI, an optional anti-DPI measure. See [sni_case].
+mod sni_case;
+
 #[path = "main.rs"]
 mod app;
 

@@ -551,7 +551,7 @@ async fn verify_one(
     if crate::masque_h2::enabled() {
         let cfg = crate::masque_h2::H2TunnelConfig {
             peer: SocketAddr::new(ip, port),
-            sni: crate::consts::L4_CONNECT_SNI.to_string(),
+            sni: crate::consts::l4_connect_sni(),
             authority: probe.authority.clone(),
             path: probe.path.clone(),
             cert_pem: probe.cert_pem.to_vec(),
@@ -952,8 +952,8 @@ mod tests {
         rand::rng().fill(&mut scid[..]);
         let scid = quiche::ConnectionId::from_ref(&scid);
 
-        let sni = crate::consts::CONNECT_SNI;
-        let mut conn = quiche::connect(Some(sni), &scid, local, peer, &mut config).ok()?;
+        let sni = crate::consts::connect_sni();
+        let mut conn = quiche::connect(Some(&sni), &scid, local, peer, &mut config).ok()?;
 
         let mut out = [0u8; 1350];
         let (written, _) = conn.send(&mut out).ok()?;

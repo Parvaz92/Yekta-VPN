@@ -76,6 +76,10 @@ pub struct StartOptions {
     pub log_level: Option<String>,
     pub perf_profile: Option<String>,
     pub h2_fragmentation: Option<bool>,
+    /// Randomise the casing of the SNI hostname on every ClientHello, after
+    /// L×Box spec 028. Off by default: it changes bytes on the wire, so a
+    /// network that does not need it must not see it.
+    pub mixed_case_sni: Option<bool>,
     pub dns_servers: Option<String>,
     pub route_block: Option<String>,
     pub route_direct: Option<String>,
@@ -189,6 +193,7 @@ impl StartOptions {
             log_level: None,
             perf_profile: None,
             h2_fragmentation: None,
+            mixed_case_sni: None,
             dns_servers: None,
             route_block: None,
             route_direct: None,
@@ -264,6 +269,7 @@ pub async fn run_cli() -> Result<()> {
     options.log_level = std::env::var("AETHER_LOG_LEVEL").ok();
     options.perf_profile = std::env::var("AETHER_PERF_PROFILE").ok();
     options.h2_fragmentation = Some(std::env::var("AETHER_MASQUE_H2_FRAGMENT").is_ok());
+    options.mixed_case_sni = Some(std::env::var("AETHER_MIXED_CASE_SNI").is_ok());
     options.dns_servers = std::env::var("AETHER_DNS").ok();
     options.route_block = std::env::var("AETHER_ROUTE_BLOCK").ok();
     options.route_direct = std::env::var("AETHER_ROUTE_DIRECT").ok();
@@ -381,6 +387,11 @@ fn apply_runtime_options(options: &StartOptions) {
         std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
     } else {
         std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
+    }
+    if options.mixed_case_sni == Some(true) {
+        std::env::set_var("AETHER_MIXED_CASE_SNI", "1");
+    } else {
+        std::env::remove_var("AETHER_MIXED_CASE_SNI");
     }
     crate::ffi::set_log_path(Some(core_log_path(&options.config_path)));
 
@@ -893,7 +904,7 @@ async fn select_peer(
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             crate::ffi::record_log("Finding a verified MASQUE gateway");
             let probe = prober::MasqueProbe {
-                sni: consts::CONNECT_SNI.to_string(),
+                sni: consts::connect_sni(),
                 authority: quic::default_authority().to_string(),
                 path: quic::default_path().to_string(),
                 cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1262,7 +1273,7 @@ async fn quick_verify_masque_peer(
 ) -> Result<()> {
     let vp = quic::VerifyParams {
         peer,
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: consts::connect_sni(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -1277,7 +1288,7 @@ async fn quick_verify_masque_peer(
     if masque_h2::enabled() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: consts::L4_CONNECT_SNI.to_string(),
+            sni: consts::l4_connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -1574,7 +1585,7 @@ async fn hunt_masque_peer(
         mode.label()
     ));
     let probe = prober::MasqueProbe {
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: consts::connect_sni(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1892,7 +1903,7 @@ async fn run_masque_tunnel(
 
     let cfg = quic::TunnelConfig {
         peer,
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: consts::connect_sni(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -1997,7 +2008,7 @@ async fn run_masque_tunnel(
     let tunnel_task = if masque_h2::enabled() {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: consts::L4_CONNECT_SNI.to_string(),
+            sni: consts::l4_connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -3294,7 +3305,7 @@ async fn establish_masque(
     let tunnel_task = if h2 {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: consts::connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -3319,7 +3330,7 @@ async fn establish_masque(
     } else {
         let cfg = quic::TunnelConfig {
             peer,
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: consts::connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -4416,7 +4427,7 @@ mod tests {
     fn h2_connect_request_is_an_extended_connect() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: "162.159.198.2:443".parse().unwrap(),
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: consts::connect_sni(),
             authority: "cloudflareaccess.com".to_string(),
             path: "/".to_string(),
             cert_pem: b"cert".to_vec(),
@@ -4516,7 +4527,7 @@ mod tests {
     fn h2_connect_request_over_l4_sni_is_an_extended_connect() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: "162.159.196.1:443".parse().unwrap(),
-            sni: consts::L4_CONNECT_SNI.to_string(),
+            sni: consts::l4_connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: Vec::new(),

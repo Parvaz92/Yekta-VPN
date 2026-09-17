@@ -174,6 +174,10 @@ object CoreConfig {
             put("log_level", text("log_level", "info"))
             put("perf_profile", text("perf_profile", "auto"))
             put("h2_fragmentation", text("h2_fragmentation", "on") == "on")
+            // Mixed-case SNI (L×Box spec 028): randomise the casing of the SNI
+            // hostname on every ClientHello. Off by default — it changes bytes
+            // on the wire, so it must be opt-in per network.
+            put("mixed_case_sni", prefs.getBoolean("mixed_case_sni", false))
             putOpt("dns_servers", text("dns_servers").ifBlank { null })
             putOpt("route_block", text("route_block").ifBlank { null })
             putOpt("route_direct", text("route_direct").ifBlank { null })

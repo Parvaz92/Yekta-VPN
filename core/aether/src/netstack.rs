@@ -746,7 +746,10 @@ fn service_tcp(s: &mut NetStack) -> bool {
         let state = s.sockets.get_mut::<tcp::Socket>(handle).state();
         let data_in_tx = s.data_in_tx.clone();
 
-        if !s.tcp_conns[&id].established && state == tcp::State::Established {
+        // `get` rather than index: an entry can be removed by the dead-socket
+        // branch below on a previous iteration, and indexing a HashMap entry that
+        // is gone panics the poll loop, which ends the tunnel.
+        if s.tcp_conns.get(&id).is_none_or(|st| !st.established) && state == tcp::State::Established {
             if let Some(st) = s.tcp_conns.get_mut(&id) {
                 st.established = true;
                 if let (Some(resp), Some(rx)) = (st.connect_resp.take(), st.from_stack_rx.take()) {
@@ -787,7 +790,7 @@ fn service_tcp(s: &mut NetStack) -> bool {
             }
         }
 
-        if !s.tcp_conns[&id].established
+        if s.tcp_conns.get(&id).is_none_or(|st| !st.established)
             && matches!(state, tcp::State::Closed | tcp::State::TimeWait)
         {
             if let Some(st) = s.tcp_conns.get_mut(&id) {
@@ -801,9 +804,14 @@ fn service_tcp(s: &mut NetStack) -> bool {
         }
 
         {
+            // The entry can be gone by this point — a TimeWait/Closed socket whose
+            // connection was established is removed at the end of the previous
+            // iteration, and the same id is not revisited. Guard instead of
+            // unwrapping: this unwrap is what kills the tunnel when the edge
+            // re-announces an address mid-session.
             let socket = s.sockets.get_mut::<tcp::Socket>(handle);
             if socket.can_send() {
-                let st = s.tcp_conns.get_mut(&id).unwrap();
+                let Some(st) = s.tcp_conns.get_mut(&id) else { continue };
                 if !st.pending.is_empty() {
                     let sent = socket.send_slice(&st.pending).unwrap_or(0);
                     if sent > 0 {
@@ -814,14 +822,15 @@ fn service_tcp(s: &mut NetStack) -> bool {
         }
 
         {
-            let pending_empty = s.tcp_conns[&id].pending.is_empty();
-            let half = s.tcp_conns[&id].half_closed;
+            let Some(st) = s.tcp_conns.get(&id) else { continue };
+            let pending_empty = st.pending.is_empty();
+            let half = st.half_closed;
             if half && pending_empty {
                 s.sockets.get_mut::<tcp::Socket>(handle).close();
             }
         }
 
-        let to_app = s.tcp_conns[&id].to_app.clone();
+        let Some(to_app) = s.tcp_conns.get(&id).map(|st| st.to_app.clone()) else { continue };
         let mut app_gone = false;
         let mut delivered = 0;
 
@@ -861,7 +870,9 @@ fn service_tcp(s: &mut NetStack) -> bool {
         if matches!(st_state, tcp::State::CloseWait) {
             s.sockets.get_mut::<tcp::Socket>(handle).close();
         }
-        if matches!(st_state, tcp::State::Closed) && s.tcp_conns[&id].established {
+        if matches!(st_state, tcp::State::Closed)
+            && s.tcp_conns.get(&id).is_some_and(|st| st.established)
+        {
             s.sockets.remove(handle);
             s.tcp_conns.remove(&id);
         }
@@ -912,7 +923,10 @@ fn service_udp(s: &mut NetStack) -> bool {
             None => continue,
         };
 
-        let to_app = s.udp_conns[&id].to_app.clone();
+        // `get` rather than index: UdpClose removes an entry while the
+        // snapshot the loop walks still holds its id, and indexing a HashMap
+        // entry that is gone panics the poll loop, which ends the tunnel.
+        let Some(to_app) = s.udp_conns.get(&id).map(|st| st.to_app.clone()) else { continue };
         let mut delivered = 0;
 
         while delivered < MAX_RECV_CHUNKS {
@@ -959,7 +973,25 @@ fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) -> (u64, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smoltcp::socket::tcp;
     use std::time::Duration as StdDuration;
+
+    fn bare_stack() -> NetStack {
+        let mut device = StackDevice::new(1400);
+        let config = Config::new(HardwareAddress::Ip);
+        NetStack {
+            iface: Interface::new(config, &mut device, Instant::now()),
+            device,
+            sockets: SocketSet::new(Vec::new()),
+            tcp_conns: HashMap::new(),
+            udp_conns: HashMap::new(),
+            next_id: 0,
+            next_port: 40000,
+            data_in_tx: mpsc::channel(1).0,
+            accept_tx: None,
+        }
+    }
+
 
     fn udp_ip_packet(payload_len: usize) -> Vec<u8> {
         let total = 20 + 8 + payload_len;
@@ -1155,6 +1187,83 @@ mod tests {
             saw_teardown,
             "the netstack never closed the socket after the app went away, so it leaks"
         );
+    }
+
+    /// A stack with one connected TCP entry whose socket is gone, the exact state
+    /// the dead-socket branch of [service_tcp] leaves behind on the iteration
+    /// after it removes the entry: [service_tcp] iterates a snapshot of ids, so
+    /// the id is still in the list while `tcp_conns` no longer holds it.
+    fn stack_with_evicted_entry() -> (NetStack, usize) {
+        let mut stack = bare_stack();
+        let mut tcp = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        );
+        tcp.listen(IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 9)), 80))
+            .unwrap();
+        let handle = stack.sockets.add(tcp);
+        let (to_app_tx, _to_app_rx) = mpsc::channel(8);
+        stack.tcp_conns.insert(
+            7,
+            TcpState {
+                handle,
+                to_app: to_app_tx,
+                from_stack_rx: None,
+                connect_resp: None,
+                pending: vec![1, 2, 3],
+                established: true,
+                half_closed: false,
+            },
+        );
+        // The entry the snapshot still references, but the map has already
+        // dropped: this is the state that used to index and unwrap.
+        stack.tcp_conns.remove(&7);
+        (stack, 7)
+    }
+
+    #[test]
+    fn service_tcp_survives_a_connection_the_map_evicted_mid_iteration() {
+        let (mut stack, evicted) = stack_with_evicted_entry();
+        // The snapshot is what makes this a fair reproduction: the id is still
+        // in the list the loop walks, but the map dropped it.
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = service_tcp(&mut stack);
+        }))
+        .is_ok(), "service_tcp must not panic on an evicted entry: it killed tunnels in the field");
+        assert!(stack.tcp_conns.is_empty());
+        let _ = evicted;
+    }
+
+    #[test]
+    fn an_address_change_does_not_kill_established_connections_in_service_tcp() {
+        // A re-announced edge address clears the interface addresses; the
+        // connections that survive it must still be serviceable.
+        let mut stack = bare_stack();
+        let mut tcp = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        );
+        tcp.listen(IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 9)), 81))
+            .unwrap();
+        let handle = stack.sockets.add(tcp);
+        let (to_app_tx, _to_app_rx) = mpsc::channel(8);
+        stack.tcp_conns.insert(
+            9,
+            TcpState {
+                handle,
+                to_app: to_app_tx,
+                from_stack_rx: None,
+                connect_resp: None,
+                pending: vec![4, 5],
+                established: true,
+                half_closed: false,
+            },
+        );
+        // The real trigger: addresses cleared and re-set, as set_addrs does.
+        apply_addrs(&mut stack.iface, Some((Ipv4Addr::new(10, 0, 0, 9), 24)), None);
+        let _ = service_tcp(&mut stack);
+        // The connection must still be tracked and not have panicked the loop.
+        assert!(stack.tcp_conns.contains_key(&9));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
