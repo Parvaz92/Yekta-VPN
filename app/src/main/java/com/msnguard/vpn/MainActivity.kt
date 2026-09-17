@@ -5287,8 +5287,12 @@ class MainActivity : Activity() {
      *
      * Runs on the calling thread; callers must be off the UI thread.
      */
-    private fun probeContent(url: String, expect: String): String = try {
-        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+    private fun probeContent(url: String, expect: String): String {
+        val conn = try {
+            (java.net.URL(url).openConnection() as java.net.HttpURLConnection)
+        } catch (e: java.io.IOException) {
+            return Strings.tf("Unreachable (%s)", e.javaClass.simpleName)
+        }
         try {
             conn.requestMethod = "GET"
             conn.connectTimeout = 6000
@@ -5296,7 +5300,7 @@ class MainActivity : Activity() {
             conn.setRequestProperty("accept-encoding", "identity")
             conn.setRequestProperty("cache-control", "no-cache")
             val code = conn.responseCode
-            if (code !in 200..299) return@try Strings.tf("HTTP %s", code)
+            if (code !in 200..299) return Strings.tf("HTTP %s", code)
             // read() returning -1 means a body was promised and the stream was
             // cut — a half-open connection is not a working one.
             val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
@@ -5307,17 +5311,17 @@ class MainActivity : Activity() {
             } else {
                 Strings.tf("%s bytes OK", String.format("%,d", body.length))
             }
+        } catch (e: java.net.SocketTimeoutException) {
+            Strings.t("Timeout")
+        } catch (e: java.net.UnknownHostException) {
+            Strings.t("DNS failed")
+        } catch (e: javax.net.ssl.SSLException) {
+            Strings.t("TLS failed")
+        } catch (e: java.io.IOException) {
+            Strings.tf("Unreachable (%s)", e.javaClass.simpleName)
         } finally {
             conn.disconnect()
         }
-    } catch (e: java.net.SocketTimeoutException) {
-        Strings.t("Timeout")
-    } catch (e: java.net.UnknownHostException) {
-        Strings.t("DNS failed")
-    } catch (e: javax.net.ssl.SSLException) {
-        Strings.t("TLS failed")
-    } catch (e: java.io.IOException) {
-        Strings.tf("Unreachable (%s)", e.javaClass.simpleName)
     }
 
     private fun probeUdp(entry: String): Boolean {
