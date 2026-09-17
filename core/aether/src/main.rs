@@ -19,6 +19,33 @@ const INNER_MTU: usize = 1200;
 const DEFAULT_CONFIG: &str = "aether.toml";
 static INITIALIZED: std::sync::Once = std::sync::Once::new();
 
+/// v2.0.0: push the user's DoT/DoH resolver lists into the Smart DNS engine.
+///
+/// Called once per TUN start, unconditionally — these lists come from the DNS
+/// screen and are independent of AI Mode. Anything [DnsEndpoint::parse]
+/// rejects is logged rather than silently dropped, so a typo in the field is
+/// visible instead of turning into "my DoH server never answers".
+fn push_encrypted_resolvers(options: &StartOptions) {
+    let raw: Vec<String> = [options.dns_servers_dot.as_deref(), options.dns_servers_doh.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s.split([',', ';', ' ', '\n', '\r']))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if raw.is_empty() {
+        return;
+    }
+    let parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
+    if parsed.is_empty() {
+        log::warn!("[dns] none of the user's DoT/DoH entries parsed");
+        return;
+    }
+    crate::smart_dns::set_resolvers(parsed.clone());
+    log::info!("[dns] {} DoT/DoH resolver(s) pushed to the engine", parsed.len());
+}
+
 fn parse_local_v4(s: &str) -> Ipv4Addr {
     s.split('/')
         .next()
@@ -73,6 +100,9 @@ pub struct StartOptions {
     pub smart_dns: bool,
     /// User resolver list for the Smart DNS Split engine (see ffi.rs).
     pub smart_dns_servers: Option<String>,
+    /// v2.0.0: per-transport lists from the DNS screen.
+    pub dns_servers_dot: Option<String>,
+    pub dns_servers_doh: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +203,8 @@ impl StartOptions {
             http_proxy: None,
             smart_dns: false,
             smart_dns_servers: None,
+            dns_servers_dot: None,
+            dns_servers_doh: None,
         }
     }
 
@@ -1892,6 +1924,12 @@ async fn run_masque_tunnel(
         tokio::spawn(async move { while addr_rx.recv().await.is_some() {} });
         log::info!("[+] Android TUN bridge active");
         
+        // v2.0.0: the user's DoT/DoH lists are pushed unconditionally. The
+        // engine speaks them itself; Android's own resolver list cannot, so if
+        // these were only wired under AI Mode the DNS screen's encrypted fields
+        // would be silently dead for every transport.
+        push_encrypted_resolvers(&options);
+
         // Smart DNS Split: stands up only when AI Mode was requested. The engine
         // is inert for every non-Gemini query (see process_query), so a tunnel
         // with it off never touches this.
@@ -2854,6 +2892,8 @@ async fn run_warp_in_warp(
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
+    // The user's DoT/DoH lists ride every transport, not just AI Mode.
+    push_encrypted_resolvers(&options);
     // WoW is the one transport AI Mode is actually enabled for, so the Smart
     // DNS Split engine has to be standing up *here* — run_masque_tunnel's init
     // site is never reached on this path, and without it tun::bridge sees

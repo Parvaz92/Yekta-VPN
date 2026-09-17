@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Canvas
@@ -62,8 +63,6 @@ class MainActivity : Activity() {
     private lateinit var connectionDetail: TextView
     private lateinit var chipLatency: TextView
     private lateinit var chipProtocol: TextView
-    private lateinit var chipAiMode: TextView
-    private var chipAiSeparator: TextView? = null
     private lateinit var tileDown: MetricTile
     private lateinit var tileUp: MetricTile
     private lateinit var tileSpeed: MetricTile
@@ -277,6 +276,7 @@ class MainActivity : Activity() {
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var trafficMonitorPage: View? = null
+    private var dnsPage: View? = null
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
     private var trafficMonthValue: TextView? = null
@@ -610,40 +610,8 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             letterSpacing = spacing(0.08f)
         }
-        // AI MODE (v1.9.7): a one-tap switch, WoW only. ON = the next WoW
-        // connect is forced through a proven AI-country endpoint (GB first,
-        // then US/IT from the remote policy) and the geo verdict keeps
-        // rotating through the seed list until the exit lands in one of
-        // them; OFF = auto, whichever edge answers first. The chip is GONE
-        // on every other transport — the field reports measured the manual
-        // endpoint carrying traffic on WoW and nothing else.
-        // It lives in the chip line so the home screen gains no height: the row
-        // is centered and wrap_content, and the pill is WRAP_CONTENT itself.
-        chipAiMode = label(Strings.t("AI MODE"), 12f, MUTED, TypefaceStyle.MEDIUM).apply {
-            gravity = Gravity.CENTER
-            letterSpacing = spacing(0.08f)
-            // Toggle like a card, not a chip: haptic, guard against focus-taps
-            // while locked (same rule as the chain card), and never flip when
-            // the transport does not apply — visibility hides it then anyway,
-            // but a focus-based tap can still arrive on TV/keyboard devices.
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                // Same lock contract as the transport rail: while connected the
-                // chip is dimmed and isEnabled=false swallows the tap silently —
-                // the pref only takes effect next connect anyway.
-                // Functional only on toggleable protocols (MASQUE/WireGuard/WoW).
-                // Symbolic protocols (Psiphon/Tor/SHARD) are always-on, non-clickable.
-                if (!isEnabled || !aiModeFunctional()) return@setOnClickListener
-                performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                setAiMode(!aiModeOn())
-            }
-        }
         selectedProtocol = savedProtocol()
         chipProtocol.text = selectedProtocol.label.uppercase()
-        // Painted now that the SAVED protocol is known: chip visibility depends
-        // on the real selection, and the field default (WireGuard) may differ.
-        renderAiChip()
         // One accent per tile, as in the approved mock: download mint, upload
         // violet, speed amber. They were all `primary` before, which is why every
         // sparkline looked identical.
@@ -1448,18 +1416,8 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             chipLatency.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
             chipProtocol.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
-            // AI MODE sits BETWEEN the latency chip and the transport chip —
-            // the middle of the line, not the end — so the eye reaches it
-            // between the two facts it relates to: the measured latency and
-            // the transport that produced it.
             addView(chipLatency)
             addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)))
-            addView(chipAiMode)
-            // The separator between AI MODE and the transport chip, tracked so
-            // it can follow the chip if it is ever hidden again.
-            addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)).apply {
-                chipAiSeparator = this
-            })
             addView(chipProtocol)
         }
         addView(chipLine, LinearLayout.LayoutParams(
@@ -3595,21 +3553,12 @@ class MainActivity : Activity() {
         // refreshed until the screen was rebuilt.
         manualEndpointRow = addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
         gatewayCacheRow = addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
-        // v1.9.8: AI Mode now applies to all protocols — symbolic on Psiphon/Tor/SHARD,
-        // functional on MASQUE/WireGuard/WoW via Smart DNS Split.
-        lateinit var aiModeRow: OrbitSettingsRow
-        aiModeRow = addControl(Strings.t("AI Mode"), if (aiModeOn()) Strings.t("On") else Strings.t("Off")) {
-            setAiMode(!aiModeOn())
-            aiModeRow.setValue(if (aiModeOn()) Strings.t("On") else Strings.t("Off"))
-        }
-        // v1.9.7: the Exit-country row is GONE. The engine behind it never
-        // worked from the Settings side (the field reports: rotations landed
-        // IR/DE on every pick), and AI Mode on the WoW chip now owns this
-        // preference end-to-end — one writer, one switch, nothing stale to
-        // repaint. exitCountryLabel/chooseExitCountry were removed with it.
+        // v2.0.0: the AI Mode row is gone. The Smart DNS Split engine it
+        // toggled never produced a working Gemini lookup in the field, and the
+        // DNS screen now owns resolver configuration outright.
         lateinit var dnsRow: OrbitSettingsRow
         dnsRow = addControl(Strings.t("Custom DNS"), customDnsLabel()) {
-            editCustomDns { dnsRow.setValue(customDnsLabel()) }
+            openDnsScreen()
         }
         content.addView(sectionLabel(Strings.t("TROUBLESHOOTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4529,8 +4478,18 @@ class MainActivity : Activity() {
 
     /** Row value for the custom-DNS box: the servers, or Automatic. */
     private fun customDnsLabel(): String {
-        val stored = preferences().getString(CUSTOM_DNS, "")?.trim().orEmpty()
-        return stored.ifEmpty { Strings.t("Automatic") }
+        // v2.0.0: the row summarises all three transport lists, not just the
+        // legacy UDP one, so a user who entered only DoH is not shown
+        // "Automatic" for a setting they did configure.
+        val udp = readDnsField(CUSTOM_DNS_UDP)
+        val dot = readDnsField(CUSTOM_DNS_DOT)
+        val doh = readDnsField(CUSTOM_DNS_DOH)
+        if (udp.isEmpty() && dot.isEmpty() && doh.isEmpty()) return Strings.t("Automatic")
+        return listOf(
+            udp.takeIf { it.isNotEmpty() }?.let { "UDP ${it.size}" },
+            dot.takeIf { it.isNotEmpty() }?.let { "DoT ${it.size}" },
+            doh.takeIf { it.isNotEmpty() }?.let { "DoH ${it.size}" },
+        ).filterNotNull().joinToString(" · ")
     }
 
     /**
@@ -4546,87 +4505,6 @@ class MainActivity : Activity() {
      * UDP. Encrypted entries are handled by the Rust core, because Android
      * itself cannot speak DoT/DoH to a VpnService resolver list.
      */
-    private fun editCustomDns(after: (() -> Unit)? = null) {
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val field = EditText(this).apply {
-            setText(preferences().getString(CUSTOM_DNS, "").orEmpty())
-            hint = Strings.t("1.1.1.1, tls://dns.google, https://cloudflare-dns.com/dns-query")
-            setTextColor(INK)
-            setHintTextColor(MUTED)
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            setPadding(dp(18), 0, dp(18), 0)
-            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
-        }
-        val sheet = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = roundedBackground(SURFACE, 28, SURFACE)
-        }
-        sheet.addView(LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label(Strings.t("Custom DNS"), 22f, INK, TypefaceStyle.MEDIUM))
-        })
-        sheet.addView(label(
-            Strings.t("Resolvers the tunnel answers DNS from, comma-separated. Bare host = plain UDP; tls:// = DoT; https:// (or doh:) = DoH. Encrypted entries are resolved by the core, not Android. Leave blank for automatic."),
-            14f, MUTED,
-        ), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
-        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
-        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        buttons.addView(createSettingsButton(Strings.t("Clear")) {
-            preferences().edit().remove(CUSTOM_DNS).apply()
-            field.setText("")
-            after?.invoke()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f))
-        buttons.addView(createSettingsButton(Strings.t("Save")) {
-            val raw = field.text.toString().trim()
-            // Each entry must be an IP, or an IP:port — the same shape the core
-            // parses in resolver_addresses(). Reject anything else rather
-            // than silently dropping it at connect time.
-            val entryOk = Regex("^(?:\\d{1,3}(?:\\.\\d{1,3}){3})(?::([1-9]\\d{0,4}))?$")
-            val entries = raw.split(',', ';', ' ', '\n')
-                .map(String::trim).filter(String::isNotEmpty).distinct()
-            var bad: String? = null
-            for (entry in entries) {
-                val match = entryOk.matchEntire(entry) ?: run { bad = entry; break }
-                // Group 1 is the optional port; the IP is the whole match minus it.
-                val port = match.groupValues[1].ifBlank { entry.substringAfter(':', "") }.toIntOrNull()
-                val ip = if (entry.contains(':')) entry.substringBefore(':') else entry
-                if (ip.split('.').map { it.toIntOrNull() ?: 999 }.any { it !in 0..255 }) bad = entry
-                if (port != null && port !in 1..65535) bad = entry
-                if (bad != null) break
-            }
-            if (bad != null) {
-                field.error = Strings.tf("Not an IP address: %s", bad)
-                return@createSettingsButton
-            }
-            preferences().edit().apply {
-                if (entries.isEmpty()) remove(CUSTOM_DNS) else putString(CUSTOM_DNS, entries.joinToString(", "))
-            }.apply()
-            ConnectionLog.record(
-                if (entries.isEmpty()) Strings.t("Custom DNS cleared — the default resolvers answer")
-                else "Custom DNS set: ${entries.joinToString(", ")}"
-            )
-            after?.invoke()
-            dialog.dismiss()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
-        sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
-        dialog.setContentView(FrameLayout(this).apply {
-            setPadding(dp(16), 0, dp(16), dp(16))
-            addView(sheet)
-        })
-        dialog.show()
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0.62f)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-        }
-    }
-
     private fun editManualEndpoint() {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val field = EditText(this).apply {
@@ -5151,6 +5029,303 @@ class MainActivity : Activity() {
         trafficSpeedValue = null
         trafficSessionValue = null
         trafficMonthValue = null
+    }
+
+    /**
+     * The DNS screen (v2.0.0).
+     *
+     * Replaces the single-line Custom DNS dialog with a full page: one field per
+     * transport (plain UDP, DoT, DoH), each with its own description and its own
+     * Test button that pings the resolver over that transport and reports
+     * reachable / unreachable.
+     *
+     * Testing is done from inside the app's own process, NOT through the tunnel:
+     * a DNS server that answers from the carrier is useless when reached through
+     * a foreign exit, and one that answers through the exit is useless if the
+     * carrier blocks it. The probe speaks the transport itself — a raw UDP
+     * datagram for UDP, a TLS handshake on :853 for DoT, an HTTPS POST for DoH —
+     * so "Test passed" means "this resolver answered on this transport from the
+     * network this device is on right now."
+     */
+    private fun openDnsScreen() {
+        dnsPage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply {
+            setBackgroundColor(CANVAS)
+            isClickable = true
+        }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { closeDnsScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("DNS"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
+        })
+        content.addView(label(
+            Strings.t("Resolvers the tunnel answers DNS from. Each transport has its own list, comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either."),
+            14f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(4); bottomMargin = dp(20) })
+
+        addDnsField(content, Strings.t("Plain UDP"), CUSTOM_DNS_UDP,
+            Strings.t("Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups."),
+            Strings.t("1.1.1.1, 10.202.10.202:53"))
+        addDnsField(content, Strings.t("DNS over TLS (DoT)"), CUSTOM_DNS_DOT,
+            Strings.t("Hostnames or IPs with a tls:// prefix, on port 853. The lookup is encrypted; the carrier sees only that you talked to this server."),
+            Strings.t("tls://dns.google, tls://1.1.1.1"))
+        addDnsField(content, Strings.t("DNS over HTTPS (DoH)"), CUSTOM_DNS_DOH,
+            Strings.t("Full https:// URLs, or a host with a doh: prefix. The lookup rides an ordinary HTTPS request, so it is the hardest to block."),
+            Strings.t("https://cloudflare-dns.com/dns-query, doh:dns.quad9.net"))
+
+        content.addView(createSettingsButton(Strings.t("Save")) {
+            saveDnsLists()
+            closeDnsScreen()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
+        ).apply { topMargin = dp(8) })
+
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
+        }
+        dnsPage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        animatePageOpen(page)
+    }
+
+    private fun closeDnsScreen() {
+        dnsPage?.let { animatePageClose(it) { dnsPage = null } }
+    }
+
+    /**
+     * One labelled field + Test button for one DNS transport.
+     *
+     * The Test button probes the entries that are currently in the field, NOT the
+     * saved preference — the point is to let the user try a server before
+     * committing to it.
+     */
+    private fun addDnsField(
+        content: LinearLayout,
+        title: String,
+        prefKey: String,
+        description: String,
+        hint: String,
+    ) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(15), dp(18), dp(15))
+            background = Sculpt.sculptedBackground(
+                resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+        }
+        card.addView(OrbitSectionHeader(this, palette, title))
+        card.addView(label(description, 13f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(6); bottomMargin = dp(10) })
+
+        val status = label("", 12.5f, MUTED)
+        val field = EditText(this).apply {
+            setText(preferences().getString(prefKey, "").orEmpty())
+            this.hint = hint
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = roundedBackground(SURFACE_VARIANT, 14, DIVIDER)
+        }
+        card.addView(field, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        card.addView(status, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+
+        card.addView(createSettingsButton(Strings.t("Test")) {
+            val raw = field.text.toString().trim()
+            val entries = raw.split(',', ';', ' ', '\n')
+                .map(String::trim).filter(String::isNotEmpty).distinct()
+            if (entries.isEmpty()) {
+                field.error = Strings.t("Enter at least one address first")
+                return@createSettingsButton
+            }
+            status.text = Strings.t("Testing…")
+            testDnsServers(prefKey, entries) { result ->
+                runOnUiThread { status.text = result }
+            }
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(46),
+        ).apply { topMargin = dp(10) })
+
+        content.addView(card, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(14) })
+    }
+
+    /**
+     * Probes [entries] and reports, in words, whether they answered.
+     *
+     * Runs on a background thread: each probe is a network call, and doing it on
+     * the UI thread would freeze the screen for the full timeout on every miss.
+     */
+    private fun testDnsServers(prefKey: String, entries: List<String>, report: (String) -> Unit) {
+        val transport = when (prefKey) {
+            CUSTOM_DNS_DOT -> "dot"
+            CUSTOM_DNS_DOH -> "doh"
+            else -> "udp"
+        }
+        Thread {
+            val results = ArrayList<String>()
+            for (entry in entries) {
+                val ok = probeDns(transport, entry)
+                results.add(if (ok) Strings.tf("%s: OK", entry) else Strings.tf("%s: unreachable", entry))
+            }
+            val okCount = results.count { it.contains("OK") }
+            report(Strings.tf("%d of %d answered", okCount, results.size) + " · " + results.joinToString(" · "))
+        }.start()
+    }
+
+    /**
+     * One probe, one transport. Returns true on any answer.
+     *
+     * The UDP probe sends a real A query for example.com and accepts any DNS
+     * response (even NXDOMAIN proves the server is answering DNS). The DoT probe
+     * is a TCP connect to :853 plus a TLS handshake — the certificate is not
+     * verified, because the question being asked is "is this reachable", not
+     * "is this trustworthy". The DoH probe POSTs a wire-format query and accepts
+     * a 2xx with a non-empty body.
+     */
+    private fun probeDns(transport: String, entry: String): Boolean = try {
+        when (transport) {
+            "dot" -> {
+                val (host, port) = splitHostPort(entry, 853)
+                val socket = javax.net.ssl.SSLSocketFactory.getDefault().createSocket(host, port) as javax.net.ssl.SSLSocket
+                socket.use {
+                    it.soTimeout = 4000
+                    it.startHandshake()
+                    true
+                }
+            }
+            "doh" -> {
+                val url = if (entry.startsWith("http", ignoreCase = true)) entry
+                else if (entry.startsWith("doh:", ignoreCase = true)) "https://" + entry.substring(4)
+                else "https://$entry/dns-query"
+                val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("content-type", "application/dns-message")
+                    doOutput = true
+                }
+                conn.use { c ->
+                    c.outputStream.use { it.write(dnsProbeQuery()) }
+                    c.responseCode in 200..299 && (c.inputStream?.read()?.let { it >= 0 } ?: false)
+                }
+            }
+            else -> {
+                val (host, port) = splitHostPort(entry, 53)
+                val socket = java.net.DatagramSocket()
+                socket.use { s ->
+                    s.soTimeout = 4000
+                    s.connect(java.net.InetAddress.getByName(host), port)
+                    s.send(java.net.DatagramPacket(dnsProbeQuery(), dnsProbeQuery().size))
+                    val buf = ByteArray(512)
+                    val resp = java.net.DatagramPacket(buf, buf.size)
+                    s.receive(resp)
+                    resp.length >= 12
+                }
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** A minimal standard-query A lookup for example.com, on the wire. */
+    private fun dnsProbeQuery(): ByteArray {
+        // Header is 12 bytes: id, flags, 1 question, 0 answers, 0 authority,
+        // 0 additional. Question is: 7 "example" 3 "com" 0, type A, class IN.
+        val q = ByteArray(29)
+        q[0] = 0x12; q[1] = 0x34          // id
+        q[2] = 0x01; q[3] = 0x00          // standard query, recursion desired
+        q[4] = 0x00; q[5] = 0x01          // QDCOUNT = 1
+        q[12] = 7
+        "example".toByteArray().copyInto(q, 13)
+        q[20] = 3
+        "com".toByteArray().copyInto(q, 21)
+        q[24] = 0                         // root label
+        q[25] = 0x00; q[26] = 0x01        // QTYPE = A
+        q[27] = 0x00; q[28] = 0x01        // QCLASS = IN
+        return q
+    }
+
+    /** Splits "host", "host:port", "[v6]:port" into the host and a port. */
+    private fun splitHostPort(entry: String, defaultPort: Int): Pair<String, Int> {
+        val v6 = entry.startsWith('[')
+        val host: String
+        val port: Int
+        if (v6) {
+            val close = entry.indexOf(']')
+            host = entry.substring(1, close)
+            port = entry.drop(close + 1).removePrefix(":").toIntOrNull() ?: defaultPort
+        } else {
+            val colon = entry.lastIndexOf(':')
+            if (colon > 0 && entry.substring(colon + 1).toIntOrNull() != null) {
+                host = entry.substring(0, colon)
+                port = entry.substring(colon + 1).toInt()
+            } else {
+                host = entry
+                port = defaultPort
+            }
+        }
+        return host to port
+    }
+
+    /**
+     * Writes the three transport lists to their own preferences and rebuilds the
+     * legacy single list that the tunnel still consumes.
+     *
+     * [CUSTOM_DNS] remains the union of the plain-UDP entries — that is what
+     * Android's resolver list can speak — and the encrypted lists are picked up
+     * by the core at connect time. Splitting them keeps Android from being handed
+     * a tls:// URL it cannot parse.
+     */
+    private fun saveDnsLists() {
+        val udp = readDnsField(CUSTOM_DNS_UDP)
+        val dot = readDnsField(CUSTOM_DNS_DOT)
+        val doh = readDnsField(CUSTOM_DNS_DOH)
+        preferences().edit().apply {
+            putOrRemove(CUSTOM_DNS_UDP, udp)
+            putOrRemove(CUSTOM_DNS_DOT, dot)
+            putOrRemove(CUSTOM_DNS_DOH, doh)
+            // The legacy list the tunnel reads: plain UDP only. Encrypted
+            // entries are parsed by the core, never handed to Android.
+            putOrRemove(CUSTOM_DNS, udp)
+        }.apply()
+        val parts = listOfNotNull(
+            udp.takeIf { it.isNotEmpty() }?.let { "UDP ${it.size}" },
+            dot.takeIf { it.isNotEmpty() }?.let { "DoT ${it.size}" },
+            doh.takeIf { it.isNotEmpty() }?.let { "DoH ${it.size}" },
+        )
+        ConnectionLog.record(
+            if (parts.isEmpty()) Strings.t("Custom DNS cleared — the default resolvers answer")
+            else Strings.t("Custom DNS saved: ") + parts.joinToString(", ")
+        )
+    }
+
+    private fun readDnsField(prefKey: String): List<String> =
+        preferences().getString(prefKey, "").orEmpty()
+            .split(',', ';', ' ', '\n').map(String::trim)
+            .filter(String::isNotEmpty).distinct()
+
+    private fun SharedPreferences.Editor.putOrRemove(key: String, values: List<String>) {
+        if (values.isEmpty()) remove(key) else putString(key, values.joinToString(", "))
     }
 
     private fun renderTrafficMonitor() {
@@ -6332,7 +6507,6 @@ class MainActivity : Activity() {
         // The AI MODE chip rides the chip line, but the same repaint decides
         // transport applicability and the connected lock, so it is painted here
         // too — one place, the same rules as the cards.
-        renderAiChip()
         // The settings page carries the same switch, so keep it in step whenever the
         // card is repainted — arming from the home screen must not leave a stale
         // "off" behind in settings.
@@ -6638,94 +6812,6 @@ class MainActivity : Activity() {
      * hidden (not pinned-lit): a control that cannot obey is worse than no
      * control, and the user asked for exactly that.
      */
-    /** Returns true for protocols where AI Mode is either toggleable or symbolic. */
-    private fun aiModeVisible(): Boolean {
-        return selectedProtocol.aiModeBehavior != AiModeBehavior.HIDDEN
-    }
-
-    /** Returns true for protocols where AI Mode is functional (toggleable). */
-    private fun aiModeFunctional(): Boolean {
-        return selectedProtocol.aiModeBehavior == AiModeBehavior.TOGGLEABLE
-    }
-
-    /** Returns true for protocols where AI Mode is symbolic only (always on). */
-    private fun aiModeSymbolic(): Boolean {
-        return selectedProtocol.aiModeBehavior == AiModeBehavior.ALWAYS_ON_SYMBOLIC
-    }
-
-    /** The AI Mode chip applies to toggleable protocols for settings. */
-    private fun aiChipApplies(): Boolean = aiModeFunctional()
-
-    /**
-     * The AI Mode accent: neon blue, not the violet the upload tile uses.
-     *
-     * A palette member would be the cleaner shape, but the chip is the only
-     * consumer, and adding a `neonBlue` to Palette would give both themes a
-     * second blue next to their connected-green — the palettes were measured
-     * per-surface, and a new field skips that work. Local it is; the light
-     * theme needs the darker sibling for letters (see AppAppearance for the
-     * 4.5:1 rule).
-     */
-    private fun aiNeonBlue(): Int = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
-        0xFF0E86C7.toInt() else 0xFF00C8FF.toInt()
-
-    private fun aiNeonBlueText(): Int = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
-        0xFF075E92.toInt() else 0xFF7FDFFF.toInt()
-
-    /** Repaints the AI MODE chip: visible on all protocols that support AI Mode,
-     * functional (toggleable) on MASQUE/WireGuard/WoW, symbolic (always-on) on Psiphon/Tor/SHARD. */
-    private fun renderAiChip() {
-        if (!::chipAiMode.isInitialized) return
-        val visible = aiModeVisible()
-        val functional = aiModeFunctional()
-        val symbolic = aiModeSymbolic()
-        val on = if (symbolic) true else aiModeOn()  // Symbolic protocols always appear ON
-        val modeEnabled = modeControlsEnabled
-
-        chipAiMode.visibility = if (visible) View.VISIBLE else View.GONE
-        chipAiSeparator?.visibility = if (visible) View.VISIBLE else View.GONE
-
-        val lit = (functional && on && modeEnabled) || (symbolic && modeEnabled)
-        val fill = if (lit) Sculpt.blend(palette.surface, aiNeonBlue(), 0.20f)
-        else Sculpt.blend(palette.surface, palette.ink, 0.02f)
-
-        chipAiMode.background = Sculpt.sculptedBackground(
-            resources.displayMetrics.density,
-            fill, 999,
-            Sculpt.withAlpha(if (lit) aiNeonBlue() else palette.ink, if (lit) 0.5f else 0.10f),
-        )
-        chipAiMode.setPadding(dp(10), dp(2), dp(10), dp(2))
-        chipAiMode.setTextColor(if (lit) aiNeonBlueText() else palette.faint)
-        chipAiMode.isEnabled = functional && modeEnabled
-        chipAiMode.alpha = if (visible && !modeEnabled) 0.45f else 1f
-        chipAiMode.contentDescription = when {
-            !visible -> "AI Mode در این پروتکل پشتیبانی نمی‌شود"
-            symbolic -> "AI Mode نمادین: برای Psiphon/Tor/SHARD همیشه روشن (بدون عملکرد)"
-            !modeEnabled -> "AI Mode قفل است تا اتصال قطع شود"
-            on -> "AI Mode روشن: Split DNS برای Gemini فعال است"
-            else -> "AI Mode خاموش: DNS معمولی استفاده می‌شود"
-        }
-    }
-
-    /** The AI Mode preference: ON = Smart DNS Split for Gemini (on toggleable protocols),
-     * OFF = normal DNS. Stored as a separate boolean pref (not tied to exit country). */
-    private fun aiModeOn(): Boolean {
-        return preferences().getBoolean("ai_mode_enabled", false)
-    }
-
-    private fun setAiMode(on: Boolean) {
-        // v1.9.8: the pref is a single global switch that AI Mode reads at
-        // connect time. It must be written even when the current protocol hides
-        // the chip — otherwise turning it on while Auto Scan is on WireGuard,
-        // then landing on WoW, would leave it off forever and the split engine
-        // would never stand up (that is exactly what the v1.9.7 field log
-        // showed: zero smart-dns lines).
-        preferences().edit().putBoolean("ai_mode_enabled", on).apply()
-        renderAiChip()
-        // If we're connected and AI Mode changed, we'd need to reconnect for it to take effect.
-        // The pref is read at VPN start in MsnGuardVpnService.
-    }
-
     private fun obfuscationProfile(): ObfuscationProfile = preferences()
         .getString(OBFUSCATION_PROFILE, ObfuscationProfile.BALANCED.coreName)
         ?.let { name -> ObfuscationProfile.entries.firstOrNull { it.coreName == name } }
@@ -6919,22 +7005,11 @@ class MainActivity : Activity() {
         }
     }
 
-    /** AI Mode behavior for each protocol. */
-    private enum class AiModeBehavior {
-        /** Always visible, permanently ON (symbolic only — no actual function). */
-        ALWAYS_ON_SYMBOLIC,
-        /** Visible and toggleable — functional via Smart DNS Split. */
-        TOGGLEABLE,
-        /** Hidden — protocol doesn't support AI Mode. */
-        HIDDEN
-    }
-
     private enum class Protocol(
         val enLabel: String,
         val coreName: String,
         val enDescription: String,
         val androidAvailable: Boolean = true,
-        val aiModeBehavior: AiModeBehavior = AiModeBehavior.HIDDEN,
     ) {
         /** Localized at call time so a language switch refreshes every rail/page. */
         // ORDER IS THE UI. Both the home-screen rail and the Connection mode page
@@ -6946,14 +7021,11 @@ class MainActivity : Activity() {
         // move for a user who does not know what any of these words mean. MASQUE
         // follows because it survives the carriers WireGuard is blocked on, and the
         // one-time Auto Scan ([AUTO_SCAN_LADDER]) walks them in exactly this order.
-        // v1.9.8: AI Mode is WOW-only per spec. Masque/WireGuard carry no
-        // split-DNS function, so the row is hidden and the flag forced off —
-        // a stale stored "on" value can no longer break those protocols.
-        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true, AiModeBehavior.HIDDEN),
-        MASQUE("MASQUE", "masque", "HTTP/3 tunnel", true, AiModeBehavior.HIDDEN),
-        WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true, AiModeBehavior.TOGGLEABLE),
-        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC),
-        TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC),
+        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
+        MASQUE("MASQUE", "masque", "HTTP/3 tunnel", true),
+        WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
+        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
+        TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),
 
         /**
          * Public proxy nodes, picked automatically.
@@ -6962,7 +7034,7 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true, AiModeBehavior.ALWAYS_ON_SYMBOLIC);
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true);
 
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
@@ -7287,6 +7359,11 @@ class MainActivity : Activity() {
         const val OBFUSCATION_I2 = "obfuscation_i2"
         const val MANUAL_ENDPOINT = "manual_endpoint"
         const val CUSTOM_DNS = "dns_servers"
+        /** v2.0.0: per-transport DNS lists. [CUSTOM_DNS] stays the plain-UDP
+         * union, because that is all Android's own resolver list can speak. */
+        const val CUSTOM_DNS_UDP = "dns_servers_udp"
+        const val CUSTOM_DNS_DOT = "dns_servers_dot"
+        const val CUSTOM_DNS_DOH = "dns_servers_doh"
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"

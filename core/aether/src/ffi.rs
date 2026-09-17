@@ -135,6 +135,11 @@ struct NativeStartOptions {
     /// entries are handled by Android; anything with a tls:// / https:// / doh:
     /// prefix is spoken by the core over DoT/DoH. Comma/space/newline separated.
     smart_dns_servers: Option<String>,
+    /// v2.0.0: per-transport resolver lists from the DNS screen. `dot` and `doh`
+    /// are already transport-prefixed (tls://… / https://…) and are pushed to the
+    /// engine's encrypted resolver list at startup, independent of smart_dns.
+    dns_servers_dot: Option<String>,
+    dns_servers_doh: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -173,6 +178,8 @@ impl Default for NativeStartOptions {
             http_proxy: None,
             smart_dns: false,
             smart_dns_servers: None,
+            dns_servers_dot: None,
+            dns_servers_doh: None,
         }
     }
 }
@@ -237,6 +244,8 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         // behaviour the UI promises for those protocols.
         options.smart_dns = value.smart_dns;
         options.smart_dns_servers = value.smart_dns_servers.clone();
+        options.dns_servers_dot = value.dns_servers_dot.clone();
+        options.dns_servers_doh = value.dns_servers_doh.clone();
         Ok(options)
     }
 }

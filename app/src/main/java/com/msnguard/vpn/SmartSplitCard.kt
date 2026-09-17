@@ -170,12 +170,11 @@ class SmartSplitCard(
         } else {
             Sculpt.blend(palette.surface, palette.ink, 0.02f)
         }
+        // v2.0.0: the frame is a fixed neon-violet accent whether lit or not —
+        // the same constant border as the chain card it shares the slot with.
         background = Sculpt.sculptedRipple(
-            density, fill, 18, palette.mint,
-            accent = Sculpt.withAlpha(
-                if (lit) palette.mint else palette.ink,
-                if (lit) 0.45f else 0.085f,
-            ),
+            density, fill, 18, palette.violet,
+            accent = Sculpt.withAlpha(palette.neonViolet, 0.55f),
         )
         titleView.setTextColor(if (lit) palette.ink else palette.muted)
         // States the effect, not the mechanism. "Iranian sites direct, blocked

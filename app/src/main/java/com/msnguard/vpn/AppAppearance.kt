@@ -117,6 +117,16 @@ object AppAppearance {
         val dangerText: Int = danger,
         /** Failure text on the connection headline. */
         val error: Int = danger,
+        /**
+         * Fixed neon frame accents. These are *shape* colours only — the borders
+         * of the home-screen cards — and are painted regardless of connection
+         * state, so they must look right on the canvas in both themes. They are
+         * deliberately NOT part of the connected/mint family: the user asked for
+         * the frames to stay lit after connect, and reusing `connected` would
+         * have made them go dark the moment the tunnel came up.
+         */
+        val neonBlue: Int,
+        val neonViolet: Int,
         /** How sculpted surfaces are lit on this palette. */
         val lighting: Sculpt.Lighting = Sculpt.DARK_LIGHTING,
     )
@@ -142,6 +152,10 @@ object AppAppearance {
         // so no separate text ramp — except the failure headline, which the app
         // has always drawn in a softer red than the dial's danger ring.
         error = 0xFFFFB4AB.toInt(),
+        // Neon frame accents: bright enough to read as a lit outline on the
+        // near-black canvas, dimmer than a text colour would need to be.
+        neonBlue = 0xFF00C8FF.toInt(),
+        neonViolet = 0xFFB388FF.toInt(),
         lighting = Sculpt.DARK_LIGHTING,
     )
 
@@ -203,6 +217,10 @@ object AppAppearance {
         amberText = 0xFF7D4B00.toInt(),
         dangerText = 0xFFB3261E.toInt(),
         error = 0xFFB3261E.toInt(),
+        // Neon frame accents on a light page: saturated enough to still read as
+        // a deliberate accent rather than a hairline, dark enough not to glare.
+        neonBlue = 0xFF0E86C7.toInt(),
+        neonViolet = 0xFF7C4DFF.toInt(),
         lighting = Sculpt.LIGHT_LIGHTING,
     )
 

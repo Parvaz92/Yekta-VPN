@@ -41,7 +41,10 @@ class OrbitSectionHeader(
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
 
-        addView(TickView(context, palette.primary), LayoutParams(dp(3), dp(13)).apply {
+        // v2.0.0: the tick matches the neon-blue frame accent of the home
+        // cards, so the settings page and the home page read as one design
+        // language instead of two unrelated accents (mint tick vs blue frames).
+        addView(TickView(context, palette.neonBlue), LayoutParams(dp(3), dp(13)).apply {
             rightMargin = dp(9)
         })
         addView(TextView(context).apply {
@@ -52,7 +55,7 @@ class OrbitSectionHeader(
                 if (english) {
                     palette.muted
                 } else if (AppAppearance.isDark(palette.muted)) {
-                    Sculpt.blend(palette.muted, palette.mint, 0.45f)
+                    Sculpt.blend(palette.muted, palette.neonBlue, 0.55f)
                 } else {
                     palette.muted
                 }

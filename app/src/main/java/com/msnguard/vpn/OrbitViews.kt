@@ -211,11 +211,25 @@ class TransportRail(
     private var selectedIndex = 0
     private var thumbAnimator: ValueAnimator? = null
 
-    /** Hairline separators between cells. See [onDraw]. */
+    /**
+     * Hairlines between the cells.
+     *
+     * Drawn before children (so the lit thumb and the labels sit on top of them)
+     * and inset from the control's own edges, which is what makes six labels in one
+     * recessed box read as a grid rather than a word soup. Inner edges only —
+     * a line flush against the rounded border would clip against it.
+     *
+     * v2.0.0: the colour is a fixed dim white, not `palette.faint`. `faint` is a
+     * low-saturation teal-grey that all but vanished against the neon frame, and
+     * it was the same value the borders used, so grid and frame merged into one
+     * muddy outline. A constant near-white keeps the grid legible in both themes
+     * and at every connection state.
+     */
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = context.resources.displayMetrics.density * 0.75f
-        color = Sculpt.withAlpha(palette.faint, 0.22f)
+        color = if (palette.lighting == Sculpt.LIGHT_LIGHTING)
+            Sculpt.withAlpha(Color.BLACK, 0.16f) else Sculpt.withAlpha(Color.WHITE, 0.22f)
     }
 
     /** How many rows the labels need at [perRow] columns. */
@@ -250,7 +264,14 @@ class TransportRail(
         // reads as a lozenge with dead corners. Kept at 999 when there is only one
         // row, so nothing about the single-row look changes.
         val radius = if (rowCount > 1) 24 else 999
-        background = Sculpt.recessedBackground(resources.displayMetrics.density, fill, radius)
+        // v2.0.0: the frame is a fixed neon-blue accent. It was painted from
+        // `palette.primary`/state before, which made the whole rail go flat the
+        // instant a session started. The accent is now unconditional — lit
+        // before, during and after connect.
+        background = Sculpt.recessedBackground(
+            resources.displayMetrics.density, fill, radius,
+            accent = Sculpt.withAlpha(palette.neonBlue, 0.55f),
+        )
         setPadding(context.px(5), context.px(5), context.px(5), context.px(5))
         // ViewGroups skip onDraw by default; the separators are drawn there.
         setWillNotDraw(false)

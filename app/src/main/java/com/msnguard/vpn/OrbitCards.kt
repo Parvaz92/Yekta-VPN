@@ -66,10 +66,15 @@ class ExitNodeCard(
     init {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+        // v2.0.0: the frame is a fixed neon-blue accent that does not follow
+        // connection state. The previous accent was `palette.ink` at 9% — a
+        // near-invisible hairline that made the card read as borderless. The
+        // fill stays the neutral surface so the IP/flag text inside is unchanged.
         val fill = Sculpt.blend(palette.surface, palette.ink, 0.03f)
         background = Sculpt.sculptedRipple(
-            resources.displayMetrics.density, fill, 22, palette.primary,
-            accent = Sculpt.withAlpha(palette.ink, 0.09f),
+            resources.displayMetrics.density, fill, 22,
+            rippleColor = palette.neonBlue,
+            accent = Sculpt.withAlpha(palette.neonBlue, 0.55f),
         )
         setPadding(px(13), px(11), px(15), px(11))
         isClickable = true
@@ -459,6 +464,10 @@ class ChainModeCard(
         // did not apply while it was carrying every packet.
         val lit = value && applicable
         val density = resources.displayMetrics.density
+        // v2.0.0: the frame is a fixed neon-violet accent whether lit or not.
+        // The previous unlit state painted a 8.5% `ink` border — effectively
+        // invisible, so the whole bottom row read as unbounded. The fill still
+        // reacts to state; only the border is constant.
         val fill = if (lit) {
             Sculpt.blend(palette.surface, palette.violet, 0.16f)
         } else {
@@ -466,10 +475,7 @@ class ChainModeCard(
         }
         background = Sculpt.sculptedRipple(
             density, fill, 18, palette.violet,
-            accent = Sculpt.withAlpha(
-                if (lit) palette.violet else palette.ink,
-                if (lit) 0.45f else 0.085f,
-            ),
+            accent = Sculpt.withAlpha(palette.neonViolet, 0.55f),
         )
         titleView.setTextColor(if (lit) palette.ink else palette.muted)
         // What it changes, not a speed claim. Chaining measured slower than either
