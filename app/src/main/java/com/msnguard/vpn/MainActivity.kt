@@ -5293,7 +5293,10 @@ class MainActivity : Activity() {
         } catch (e: java.io.IOException) {
             return Strings.tf("Unreachable (%s)", e.javaClass.simpleName)
         }
-        try {
+        // try as an expression, so each catch arm supplies the value and the
+        // finally only closes the connection — a finally on a statement try
+        // throws the result away and the function has nothing to return.
+        val verdict = try {
             conn.requestMethod = "GET"
             conn.connectTimeout = 6000
             conn.readTimeout = 6000
@@ -5322,8 +5325,8 @@ class MainActivity : Activity() {
         } finally {
             conn.disconnect()
         }
+        return verdict
     }
-
     private fun probeUdp(entry: String): Boolean {
         val (host, port) = splitHostPort(entry, 53)
         val query = dnsProbeQuery()
