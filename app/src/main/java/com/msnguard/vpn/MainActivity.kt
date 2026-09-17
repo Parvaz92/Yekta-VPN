@@ -46,6 +46,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import android.graphics.Typeface
+import androidx.core.content.res.ResourcesCompat
 import android.widget.LinearLayout.LayoutParams
 import androidx.core.content.FileProvider
 import java.io.File
@@ -4331,14 +4332,26 @@ class MainActivity : Activity() {
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            // MATCH_PARENT so the three buttons actually share the full width
+            // instead of squeezing each other to fit the row's own content.
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
         }
         AppLanguage.SUPPORTED.forEach { code ->
+            // Each button renders its own language's name in that language's
+            // font, so "فارسی" is crisp joined-script and "中文" has full glyph
+            // coverage even on a device whose system font lacks them. The font is
+            // the one the UI itself will use once this language is chosen.
             val face = when (code) {
-                "fa" -> Typeface.SANS_SERIF
-                "zh" -> Typeface.SANS_SERIF
-                else -> Typeface.DEFAULT
+                "fa" -> runCatching { ResourcesCompat.getFont(this, R.font.vazirmatn_bold) }
+                    .getOrNull() ?: Typeface.SANS_SERIF
+                "zh" -> runCatching { ResourcesCompat.getFont(this, R.font.noto_sc_medium) }
+                    .getOrNull() ?: Typeface.SANS_SERIF
+                else -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
             }
-            val btn = label(AppLanguage.label(code), 15f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
+            val btn = label(AppLanguage.label(code), 15f, primaryContainer, TypefaceStyle.MEDIUM).apply {
                 typeface = face
                 gravity = Gravity.CENTER
                 setPadding(dp(4), dp(14), dp(4), dp(14))
@@ -4353,7 +4366,9 @@ class MainActivity : Activity() {
                 }
             }
             buttons.addView(btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(8)
+                // No trailing margin on the last button, or the row is visibly
+                // off-centre.
+                marginEnd = if (code == AppLanguage.SUPPORTED.last()) 0 else dp(8)
             })
         }
         sheet.addView(buttons, LinearLayout.LayoutParams(
