@@ -249,6 +249,8 @@ object Strings {
         "MSN-GUARD \\\${appVersion()}" to Triple("MSN-GUARD \\\${appVersion()}", "MSN-GUARD \\\${appVersion()}", "MSN-GUARD \\\${appVersion()}"),
         "MSN-GUARD is running" to Triple("MSN-GUARD is running", "MSN-GUARD در حال اجراست", "MSN-GUARD 正在运行"),
         "MSN-GUARD log" to Triple("MSN-GUARD log", "گزارش MSN-GUARD", "MSN-GUARD 日志"),
+        "Log copied (%s KB, encrypted)" to Triple("Log copied (%s KB, encrypted)", "گزارش کپی شد (%s کیلوبایت، رمزنگاری شده)", "日志已复制（%s KB，已加密）"),
+        "Could not write the key file: %s" to Triple("Could not write the key file: %s", "نوشتن فایل کلید ممکن نشد: %s", "无法写入密钥文件: %s"),
         "Malaysia" to Triple("Malaysia", "مالزی", "马来西亚"),
         "Manual bridge" to Triple("Manual bridge", "پل دستی (Bridge)", "手动网桥"),
         "Manual endpoint" to Triple("Manual endpoint", "نقطه پایانی دستی", "手动 Endpoint"),

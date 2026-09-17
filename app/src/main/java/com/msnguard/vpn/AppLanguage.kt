@@ -3,15 +3,12 @@ package com.msnguard.vpn
 import android.content.Context
 
 /**
- * The app's UI language: English (default), Persian, Chinese.
+ * The app's UI language: English, Persian, Chinese.
  *
- * A single preference, read once per [current] call — cheap enough for a
- * t() lookup on every label, since the whole table is already in memory as
- * object literals.
- *
- * "system" means: follow the OS locale when it is fa or zh, English
- * otherwise. That is the default, so a fresh install never switches
- * languages on the user unasked.
+ * Chosen once, on first launch, by a one-time picker; after that the row in
+ * Settings owns it. An install that has not answered yet keeps following the
+ * OS locale (fa/zh) so nobody's UI flips languages on the update that
+ * introduced the picker.
  */
 object AppLanguage {
 
@@ -47,11 +44,11 @@ object AppLanguage {
         val ctx = context ?: appContext ?: return "en"
         val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val stored = prefs.getString(PREF, null)
-        // An explicit stored code, or a recorded pick, means the choice is made.
-        if (stored in SUPPORTED && prefs.getBoolean(PREF_CHOSEN, false)) return stored
+        // An explicit stored code together with a recorded pick means the choice is made.
+        if (stored in SUPPORTED && prefs.getBoolean(PREF_CHOSEN, false)) return stored!!
         return when {
-            stored in SUPPORTED -> stored          // pre-picker Settings choice
-            else -> fromSystem(ctx)                // not picked yet: keep the locale
+            stored in SUPPORTED -> stored!!         // pre-picker Settings choice
+            else -> fromSystem(ctx)                 // not picked yet: keep the locale
         }
     }
 

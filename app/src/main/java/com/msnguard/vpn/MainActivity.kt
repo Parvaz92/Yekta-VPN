@@ -2304,7 +2304,7 @@ class MainActivity : Activity() {
                 // button, and being told twice is better than not being told.
                 Toast.makeText(
                     this,
-                    "Log copied (${text.length / 1024} KB, encrypted)",
+                    Strings.tf("Log copied (%s KB, encrypted)", text.length / 1024),
                     Toast.LENGTH_SHORT,
                 ).show()
             }
@@ -2367,7 +2367,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 result.onFailure {
-                    Toast.makeText(this, "Could not write the key file: ${it.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, Strings.tf("Could not write the key file: %s", it.message.toString()), Toast.LENGTH_LONG).show()
                 }.onSuccess { file ->
                     val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
                     startActivity(
@@ -4344,7 +4344,7 @@ class MainActivity : Activity() {
                 setPadding(dp(4), dp(14), dp(4), dp(14))
                 isClickable = true
                 isFocusable = true
-                background = roundedBackground(PRIMARY, 18, PRIMARY)
+                background = roundedBackground(primary, 18, primary)
                 setOnClickListener {
                     AppLanguage.set(this@MainActivity, code)
                     ConnectionLog.record("First-run language chosen: ${AppLanguage.label(code)}")
