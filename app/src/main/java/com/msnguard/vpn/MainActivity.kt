@@ -5204,47 +5204,60 @@ class MainActivity : Activity() {
      */
     private fun probeDns(transport: String, entry: String): Boolean = try {
         when (transport) {
-            "dot" -> {
-                val (host, port) = splitHostPort(entry, 853)
-                val socket = javax.net.ssl.SSLSocketFactory.getDefault().createSocket(host, port) as javax.net.ssl.SSLSocket
-                socket.use {
-                    it.soTimeout = 4000
-                    it.startHandshake()
-                    true
-                }
-            }
-            "doh" -> {
-                val url = if (entry.startsWith("http", ignoreCase = true)) entry
-                else if (entry.startsWith("doh:", ignoreCase = true)) "https://" + entry.substring(4)
-                else "https://$entry/dns-query"
-                val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 4000
-                    readTimeout = 4000
-                    setRequestProperty("content-type", "application/dns-message")
-                    doOutput = true
-                }
-                conn.use { c ->
-                    c.outputStream.use { it.write(dnsProbeQuery()) }
-                    c.responseCode in 200..299 && (c.inputStream?.read()?.let { it >= 0 } ?: false)
-                }
-            }
-            else -> {
-                val (host, port) = splitHostPort(entry, 53)
-                val socket = java.net.DatagramSocket()
-                socket.use { s ->
-                    s.soTimeout = 4000
-                    s.connect(java.net.InetAddress.getByName(host), port)
-                    s.send(java.net.DatagramPacket(dnsProbeQuery(), dnsProbeQuery().size))
-                    val buf = ByteArray(512)
-                    val resp = java.net.DatagramPacket(buf, buf.size)
-                    s.receive(resp)
-                    resp.length >= 12
-                }
-            }
+            "dot" -> probeDot(entry)
+            "doh" -> probeDoh(entry)
+            else -> probeUdp(entry)
         }
     } catch (e: Exception) {
         false
+    }
+
+    private fun probeDot(entry: String): Boolean {
+        val (host, port) = splitHostPort(entry, 853)
+        val socket = javax.net.ssl.SSLSocketFactory.getDefault().createSocket(host, port)
+            as javax.net.ssl.SSLSocket
+        return socket.use {
+            it.soTimeout = 4000
+            it.startHandshake()
+            true
+        }
+    }
+
+    private fun probeDoh(entry: String): Boolean {
+        val url = if (entry.startsWith("http", ignoreCase = true)) entry
+        else if (entry.startsWith("doh:", ignoreCase = true)) "https://" + entry.substring(4)
+        else "https://$entry/dns-query"
+        // HttpURLConnection only became Closeable on API 33; this app's floor is
+        // 26, so `.use{}` does not compile against the older SDK. Disconnect is
+        // the documented release and is idempotent, so it is safe to call after
+        // any of the early returns below.
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 4000
+            conn.readTimeout = 4000
+            conn.setRequestProperty("content-type", "application/dns-message")
+            conn.doOutput = true
+            conn.outputStream.use { it.write(dnsProbeQuery()) }
+            if (conn.responseCode !in 200..299) return false
+            return conn.inputStream?.use { it.read() >= 0 } ?: false
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun probeUdp(entry: String): Boolean {
+        val (host, port) = splitHostPort(entry, 53)
+        val query = dnsProbeQuery()
+        return java.net.DatagramSocket().use { s ->
+            s.soTimeout = 4000
+            s.connect(java.net.InetAddress.getByName(host), port)
+            s.send(java.net.DatagramPacket(query, query.size))
+            val buf = ByteArray(512)
+            val resp = java.net.DatagramPacket(buf, buf.size)
+            s.receive(resp)
+            resp.length >= 12
+        }
     }
 
     /** A minimal standard-query A lookup for example.com, on the wire. */

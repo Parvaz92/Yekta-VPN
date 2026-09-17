@@ -3,6 +3,7 @@ package com.msnguard.vpn
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.text.TextUtils
