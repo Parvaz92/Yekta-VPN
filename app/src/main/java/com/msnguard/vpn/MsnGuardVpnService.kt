@@ -4813,9 +4813,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // counters; installs the same env the VPN branch already did.
                     var _proxyWarpUpstream: String? = null
                     val _proxyProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
-                    if ((_proxyProto == "masque" || _proxyProto == "mim") && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService)) {
-                        val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService)
-                        ConnectionLog.record("Warp Setting: custom exit (proxy mode), starting sidecar")
+                    val _proxyWarpTransport = CoreConfig.warpTransportOf(_proxyProto)
+                    val _proxyWarpCustom = _proxyWarpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _proxyWarpTransport)
+                    if (_proxyWarpTransport != null && _proxyWarpCustom) {
+                        val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _proxyWarpTransport)
+                        ConnectionLog.record("Warp Setting: custom exit (proxy mode) for ${_proxyWarpTransport.name}, starting sidecar")
                         val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
                         if (ok) _proxyWarpUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}" else ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError}")
                     }
@@ -4915,27 +4917,26 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // Aether 2.3.0 reads its whole config from AETHER_*; install it before the
                 // engine starts. The engine owns no TUN — it publishes the SOCKS listener
                 // AETHER_SOCKS names and the TunEngine below bridges the VPN interface to it.
-                // Warp Setting (Masque/MIM only): bring up WarpExit xray sidecar for custom exit so
-                // the Masque scan is chained through the user's VLESS (e.g. Lithuania gRPC).
+                // Warp Setting — per-transport (Masque / WireGuard / WoW): bring up the
+                // shared WarpExit sidecar (xray on 1826) for whichever WARP transport
+                // this connect is actually using. WireGuard's xray stack is the same
+                // SOCKS → VLESS chain Masque uses (see CoreOutboundBuilder parity).
                 var warpExitUpstream: String? = null
                 val _warpProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
-                val _exitCustom = CoreConfig.warpExitIsCustom(this@MsnGuardVpnService)
-                // Diagnostic: the guard below has two independent halves and a
-                // silent skip left no trace in the log, which made the 3.0.23
-                // "Exit Node ignored" report impossible to place. Log the verdict
-                // of each half so the next log says which one was false.
-                if (_warpProto != "masque" && _warpProto != "mim") {
-                    ConnectionLog.record("Warp Setting: not for this transport (proto=${_warpProto.ifBlank { "none" }}) — sidecar skipped")
+                val _warpTransport = CoreConfig.warpTransportOf(_warpProto)
+                val _exitCustom = _warpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _warpTransport)
+                if (_warpTransport == null) {
+                    ConnectionLog.record("Warp Setting: not a WARP transport (proto=${_warpProto.ifBlank { "none" }}) — sidecar skipped")
                 } else if (!_exitCustom) {
-                    ConnectionLog.record("Warp Setting: exit mode is Freedom (direct) — sidecar skipped")
+                    ConnectionLog.record("Warp Setting: ${_warpTransport.name} is Direct (Freedom) — sidecar skipped")
                 }
-                if ((_warpProto == "masque" || _warpProto == "mim") && _exitCustom) {
-                    val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService)
-                    ConnectionLog.record("Warp Setting: custom exit requested, starting sidecar for Masque")
+                if (_warpTransport != null && _exitCustom) {
+                    val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _warpTransport)
+                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting sidecar")
                     val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
                     if (ok) {
                         warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
-                        ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream")
+                        ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}")
                     } else {
                         ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
                     }
@@ -5584,8 +5585,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // envFromEffectiveConfig does NOT carry Warp Setting state, so without
                 // this the 2nd MTU rung drops AETHER_UPSTREAM even on an Exit-Node
                 // connect — the Exit Node scan shows IR until the app is Force Stopped.
-                if (CoreConfig.warpExitIsCustom(this) && WarpExitManager.isRunning) {
-                    patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                // Now per-transport: only re-attach for the transport this connect is on.
+                run {
+                    val ladderProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
+                    val ladderTransport = CoreConfig.warpTransportOf(ladderProto)
+                    if (ladderTransport != null && CoreConfig.warpExitIsCustom(this, ladderTransport) && WarpExitManager.isRunning) {
+                        patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                    }
                 }
                 CoreConfig.applyEnv(patched)
             }
