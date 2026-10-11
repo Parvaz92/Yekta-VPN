@@ -97,6 +97,18 @@ object NativeCore {
      */
     fun setLogSink() = nativeSetLogSink()
 
+    /**
+     * Installs the socket protector. The engine's own outgoing sockets must be
+     * exempt from the Android VPN interface the service establishes, or every
+     * dial re-enters the tunnel it is serving and loops back (`Connection
+     * refused` for the API, `no clean endpoint found` for every scan
+     * candidate). PattNG never dials direct — it chains aether through a
+     * loopback socks5 proxy, and loopback is exempt by being loopback; MSN
+     * runs the engine in-process, so the exemption must come from protect().
+     * No-op when no TUN is up: protectSocket() returns true then anyway.
+     */
+    fun setSocketProtector() = nativeSetSocketProtector()
+
     interface CoreCallback {
         fun onEvent(json: String)
     }
@@ -126,4 +138,5 @@ object NativeCore {
     @JvmStatic private external fun nativeAttach(service: MsnGuardVpnService)
     @JvmStatic private external fun nativeDetach()
     @JvmStatic private external fun nativeSetLogSink()
+    @JvmStatic private external fun nativeSetSocketProtector()
 }

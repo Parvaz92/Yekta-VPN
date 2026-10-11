@@ -40,6 +40,18 @@ pub extern "C" fn aether_set_log_sink(callback: Option<extern "C" fn(*const c_ch
     }
 }
 
+/// Installs the host's socket protector (Android VpnService.protect). The
+/// engine's outgoing sockets must be exempt from the Android VPN interface
+/// the host establishes, or every dial loops back into the tunnel
+/// (`Connection refused` for the API and for every scan candidate). PattNG
+/// never dials direct: it chains aether through a loopback socks5 proxy that
+/// is exempt by being loopback; MSN runs the engine in-process, so the
+/// exemption has to come from protect() instead. Call before start.
+#[no_mangle]
+pub extern "C" fn aether_set_socket_protector(protector: Option<platform::SocketProtector>) {
+    platform::set_socket_protector(protector);
+}
+
 /// Called by the logger below; kept separate so a sink that is never installed
 /// costs one atomic-ish check and nothing else.
 fn forward_log_line(line: &str) {

@@ -2557,6 +2557,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     fun protectSocket(fd: Int): Boolean = !vpnModeActive.get() || protect(fd)
 
     /**
+     * The JNI socket protector the engine calls on every socket it opens: 1 when
+     * the socket is exempt from the VPN interface, 0 when it is not. It is 1 by
+     * definition when no TUN is up ([protectSocket]), which covers the engine's
+     * proxy-mode dials too.
+     */
+    @JvmName("protectSocketInt")
+    fun protectSocketInt(fd: Int): Int = if (protectSocket(fd)) 1 else 0
+
+    /**
      * The engine's own log, relayed line by line. PattNG reads the core's
      * stdout; an in-process library has none, so [NativeCore.setLogSink]
      * installs a callback the engine calls for every record. This is what
@@ -4773,6 +4782,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // fails inside identity provisioning or the scan shows the
                 // user nothing but 90s of silence.
                 NativeCore.setLogSink()
+                // The engine dials the Cloudflare edge itself; those sockets
+                // must be exempt from the VPN interface this service is about
+                // to establish, or they loop back into the tunnel and every
+                // dial fails with Connection refused (the 3.0.22 log on
+                // Freedom: the API refused, and all 2011 scan candidates were
+                // rejected in 2s with "no clean endpoint found"). Custom exit
+                // never saw it because it dials 127.0.0.1, which is exempt by
+                // being loopback. Registered once here, honoured for the life
+                // of the process.
+                NativeCore.setSocketProtector()
 
                 // SOCKS TUNNEL TYPE on a WARP transport: no TUN, no consent, no
                 // tun2socks. The core runs its userspace netstack and publishes the

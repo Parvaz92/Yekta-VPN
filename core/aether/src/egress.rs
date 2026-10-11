@@ -84,6 +84,7 @@ pub async fn tcp_connect(address: SocketAddr) -> io::Result<TcpStream> {
         TcpSocket::new_v6()?
     };
     apply(SockRef::from(&socket))?;
+    crate::platform::protect_socket(&socket)?;
     socket.connect(address).await
 }
 
@@ -172,6 +173,7 @@ pub fn udp_bind(address: SocketAddr) -> io::Result<UdpSocket> {
         Some(Protocol::UDP),
     )?;
     apply(SockRef::from(&socket))?;
+    crate::platform::protect_socket(&socket)?;
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
     UdpSocket::from_std(socket.into())
