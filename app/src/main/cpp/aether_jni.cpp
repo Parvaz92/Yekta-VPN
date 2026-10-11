@@ -395,6 +395,14 @@ Java_com_msnguard_vpn_NativeCore_nativeSetEnv(JNIEnv* env, jobject, jstring key,
     env->ReleaseStringUTFChars(key, k);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_msnguard_vpn_NativeCore_nativeUnsetEnv(JNIEnv* env, jobject, jstring key) {
+    const char* k = env->GetStringUTFChars(key, nullptr);
+    if (k == nullptr) return;
+    unsetenv(k);
+    env->ReleaseStringUTFChars(key, k);
+}
+
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_msnguard_vpn_NativeCore_nativeStatsSnapshot(JNIEnv* env, jobject) {
     const char* raw = aether_stats_snapshot();

@@ -542,13 +542,30 @@ object CoreConfig {
      * Installs [env] on this process so the Aether engine reads it.
      *
      * The engine is dlopen'd in-process and reads `std::env`. Java has no
-     * `setenv`, so the write goes through NativeCore.nativeSetEnv, which calls
-     * libc `setenv` — the JNI bridge then inherits it on
+     * `setenv`, so the write goes through NativeCore.nativeSetEnv/nativeUnsetEnv,
+     * which call libc `setenv`/`unsetenv` — the JNI bridge then inherits it on
      * `aether_core_start`. Call immediately before NativeCore.start(); a later
      * start rewrites it wholesale, so nothing is ever left stale.
+     *
+     * Variables that were set on a previous connect but are absent from the new
+     * [map] must be UNSET, not left behind. The critical one is
+     * AETHER_UPSTREAM: an Exit Node run writes
+     * `AETHER_UPSTREAM=socks5://127.0.0.1:1826`, and a Freedom run builds its
+     * [map] with `socksProxyForCore=""` so the `AETHER_UPSTREAM` else-branch
+     * never fires. Without an unset the Freedom run still dials through the
+     * dead sidecar and every probe fails with `no clean endpoint found` — only a
+     * Force Stop (fresh process) clears the env. Same for AETHER_API_ECH /
+     * AETHER_ECH which are Freedom-only.
      */
     fun applyEnv(map: Map<String, String>) {
         for ((key, value) in map) NativeCore.setEnv(key, value)
+        // Env vars that can appear in one exit mode and not the other.
+        // Anything in the map wins; anything absent is actively cleared.
+        val clearIfAbsent = listOf(
+            "AETHER_UPSTREAM",
+            "AETHER_ECH", "AETHER_API_ECH", "AETHER_ECH_DNS", "AETHER_ECH_DOMAIN",
+        )
+        for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
 
     /**
