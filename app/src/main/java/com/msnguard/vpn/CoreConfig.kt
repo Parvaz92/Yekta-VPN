@@ -106,23 +106,73 @@ object CoreConfig {
     /** The core's protocol name for masque-over-masque. */
     const val MIM_PROTOCOL = "mim"
 
-    // ── Warp Setting ──
+    // ── Warp Setting — per-transport (Masque / WireGuard / WoW) ──
+    // The single-transport keys below stay as the Masque alias so a user who
+    // already saved a Masque Lithuania exit before 3.0.28 does not lose it.
     const val WARP_EXIT_MODE_PREF = "warp_exit_mode"
     const val WARP_EXIT_MODE_FREEDOM = "freedom"
     const val WARP_EXIT_MODE_CUSTOM = "custom"
     const val WARP_EXIT_MODE_DEFAULT = WARP_EXIT_MODE_FREEDOM
     const val WARP_EXIT_CUSTOM_PREF = "warp_exit_custom"
+    const val WARP_EXIT_MODE_PREF_MASQUE = "warp_exit_mode_masque"
+    const val WARP_EXIT_CUSTOM_PREF_MASQUE = "warp_exit_custom_masque"
+    const val WARP_EXIT_MODE_PREF_WIREGUARD = "warp_exit_mode_wireguard"
+    const val WARP_EXIT_CUSTOM_PREF_WIREGUARD = "warp_exit_custom_wireguard"
+    const val WARP_EXIT_MODE_PREF_WOW = "warp_exit_mode_wow"
+    const val WARP_EXIT_CUSTOM_PREF_WOW = "warp_exit_custom_wow"
 
-    fun warpExitMode(context: android.content.Context): String =
-        context.profiled().getString(WARP_EXIT_MODE_PREF, WARP_EXIT_MODE_DEFAULT)?.trim()?.lowercase().orEmpty().let {
-            if (it == WARP_EXIT_MODE_CUSTOM) WARP_EXIT_MODE_CUSTOM else WARP_EXIT_MODE_FREEDOM
+    enum class WarpTransport { MASQUE, WIREGUARD, WOW }
+
+    fun warpKeys(t: WarpTransport): Pair<String, String> = when (t) {
+        WarpTransport.MASQUE -> WARP_EXIT_MODE_PREF_MASQUE to WARP_EXIT_CUSTOM_PREF_MASQUE
+        WarpTransport.WIREGUARD -> WARP_EXIT_MODE_PREF_WIREGUARD to WARP_EXIT_CUSTOM_PREF_WIREGUARD
+        WarpTransport.WOW -> WARP_EXIT_MODE_PREF_WOW to WARP_EXIT_CUSTOM_PREF_WOW
+    }
+
+    fun warpTransportOf(protocol: String): WarpTransport? = when (protocol.trim().lowercase()) {
+        "masque", "mim" -> WarpTransport.MASQUE
+        "wireguard", "wg" -> WarpTransport.WIREGUARD
+        "gool", "wow", "warp-in-warp", "warp_in_warp" -> WarpTransport.WOW
+        else -> null
+    }
+
+    private fun warpExitModeRaw(context: android.content.Context, t: WarpTransport): String {
+        val (modeKey, _) = warpKeys(t)
+        val v = context.profiled().getString(modeKey, null)?.trim()?.lowercase().orEmpty()
+        if (v == WARP_EXIT_MODE_CUSTOM || v == WARP_EXIT_MODE_FREEDOM) return v
+        // One-time migration for Masque: if the namespaced key was never written
+        // but the legacy single key was, treat the legacy value as the Masque one.
+        if (t == WarpTransport.MASQUE) {
+            val legacy = context.profiled().getString(WARP_EXIT_MODE_PREF, null)?.trim()?.lowercase().orEmpty()
+            if (legacy == WARP_EXIT_MODE_CUSTOM || legacy == WARP_EXIT_MODE_FREEDOM) return legacy
         }
+        return WARP_EXIT_MODE_DEFAULT
+    }
 
-    fun warpExitCustom(context: android.content.Context): String =
-        context.profiled().getString(WARP_EXIT_CUSTOM_PREF, "")?.trim().orEmpty()
+    private fun warpExitCustomRaw(context: android.content.Context, t: WarpTransport): String {
+        val (_, customKey) = warpKeys(t)
+        val v = context.profiled().getString(customKey, null)?.trim().orEmpty()
+        if (v.isNotBlank()) return v
+        if (t == WarpTransport.MASQUE) {
+            val legacy = context.profiled().getString(WARP_EXIT_CUSTOM_PREF, null)?.trim().orEmpty()
+            if (legacy.isNotBlank()) return legacy
+        }
+        return ""
+    }
 
-    fun warpExitIsCustom(context: android.content.Context): Boolean =
-        warpExitMode(context) == WARP_EXIT_MODE_CUSTOM && warpExitCustom(context).isNotBlank()
+    fun warpExitMode(context: android.content.Context, t: WarpTransport): String =
+        warpExitModeRaw(context, t).let { if (it == WARP_EXIT_MODE_CUSTOM) WARP_EXIT_MODE_CUSTOM else WARP_EXIT_MODE_FREEDOM }
+
+    fun warpExitCustom(context: android.content.Context, t: WarpTransport): String = warpExitCustomRaw(context, t)
+
+    fun warpExitIsCustom(context: android.content.Context, t: WarpTransport): Boolean =
+        warpExitMode(context, t) == WARP_EXIT_MODE_CUSTOM && warpExitCustom(context, t).isNotBlank()
+
+    // Legacy single-transport surface — Masque alias. Kept so existing callers
+    // compile and existing installs keep their Masque exit.
+    fun warpExitMode(context: android.content.Context): String = warpExitMode(context, WarpTransport.MASQUE)
+    fun warpExitCustom(context: android.content.Context): String = warpExitCustom(context, WarpTransport.MASQUE)
+    fun warpExitIsCustom(context: android.content.Context): Boolean = warpExitIsCustom(context, WarpTransport.MASQUE)
 
     /** Whether the user armed masque-over-masque. */
     fun mimArmed(context: Context): Boolean =
