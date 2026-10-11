@@ -6266,7 +6266,7 @@ class MainActivity : Activity() {
         content.addView(LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(createHeaderBackButton { closeWarpSettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(label(Strings.t("Warp Setting"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }) })
         content.addView(label(Strings.t("Exit for Masque only. Freedom — dial direct. Custom — paste a VLESS (e.g. Lithuania) and Masque will scan through it. WireGuard, WoW, SHARD, Tor are unaffected."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(16) })
         val freedomSel = CoreConfig.warpExitMode(this) == CoreConfig.WARP_EXIT_MODE_FREEDOM
-        val freedomRow = navRow(title = Strings.t("Freedom — Direct"), value = if (freedomSel) Strings.t("Selected") else null) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).apply(); toastShort(Strings.t("Warp exit: Freedom")); ConnectionLog.record("Warp Setting: Freedom (direct)"); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }
+        val freedomRow = navRow(title = Strings.t("Freedom — Direct"), value = if (freedomSel) Strings.t("Selected") else null) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit(); requestFreshScanAfterExitSwitch("Freedom"); toastShort(Strings.t("Warp exit: Freedom")); ConnectionLog.record("Warp Setting: Freedom (direct)"); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }
         content.addView(freedomRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         val customSel = CoreConfig.warpExitIsCustom(this)
         val customRow = navRow(title = Strings.t("Custom exit"), value = if (customSel) Strings.t("Selected") else Strings.t("Tap to paste")) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; editWarpCustom() }
@@ -6280,6 +6280,39 @@ class MainActivity : Activity() {
 
     private fun closeWarpSettingScreen() { warpSettingPage?.let { animatePageClose(it) { warpSettingPage = null } }; openSettingsScreen() }
 
+    /**
+     * Arm a one-shot fresh scan when the user switches the Masque exit between
+     * Freedom and a custom Exit Node.
+     *
+     * The two exits reach the Cloudflare edge through different egress paths, so
+     * the gateway cache and lastconn a previous session wrote are measured
+     * against a path that is no longer in use: the latency ranking is stale and
+     * the cached gateway may be unreachable through the new path. Reusing it
+     * shows up as "cached gateway ... still works; skipping scan" on a connect
+     * that then lands on the wrong exit. Forcing a fresh scan here makes the
+     * next connect re-measure, and [EndpointDiscovery.FRESH] is consumed once
+     * (startTunnel flips it back to cache), so this never turns into a
+     * permanent full scan.
+     *
+     * Also deletes the cache files directly: FRESH is only honoured on the next
+     * startTunnel, and clearing the lastconn here means a connect that does not
+     * go through that path still cannot reuse the stale gateway.
+     */
+    private fun requestFreshScanAfterExitSwitch(to: String) {
+        preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).commit()
+        runCatching {
+            val dir = filesDir
+            listOf(
+                "aether-lastconn.toml",
+                "aether-masque-lastconn.toml",
+                "aether-gool-lastconn.toml",
+                "aether-mim-lastconn.toml",
+                "masque-gateway-cache.json",
+            ).forEach { name -> java.io.File(dir, name).delete() }
+        }
+        ConnectionLog.record("Warp Setting: switched to $to — fresh scan armed for next connect")
+    }
+
     private fun editWarpCustom() {
         if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return }
         val cur = CoreConfig.warpExitCustom(this)
@@ -6290,8 +6323,8 @@ class MainActivity : Activity() {
         sheet.addView(label(Strings.t("Paste a VLESS URL or outbound JSON. Masque scan will be chained through it; other transports ignore it."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(14) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val actions = LinearLayout(this).apply { gravity = Gravity.END; orientation = LinearLayout.HORIZONTAL }
-        actions.addView(createSettingsButton(Strings.t("Clear")) { preferences().edit().remove(CoreConfig.WARP_EXIT_CUSTOM_PREF).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).apply(); ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(8) })
-        actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; preferences().edit().putString(CoreConfig.WARP_EXIT_CUSTOM_PREF, raw).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
+        actions.addView(createSettingsButton(Strings.t("Clear")) { preferences().edit().remove(CoreConfig.WARP_EXIT_CUSTOM_PREF).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit(); requestFreshScanAfterExitSwitch("Freedom"); ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(8) })
+        actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; preferences().edit().putString(CoreConfig.WARP_EXIT_CUSTOM_PREF, raw).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); requestFreshScanAfterExitSwitch("Custom"); ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
         dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
         dialog.show(); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
