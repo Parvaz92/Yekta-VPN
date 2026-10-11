@@ -4919,7 +4919,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // the Masque scan is chained through the user's VLESS (e.g. Lithuania gRPC).
                 var warpExitUpstream: String? = null
                 val _warpProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
-                if ((_warpProto == "masque" || _warpProto == "mim") && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService)) {
+                val _exitCustom = CoreConfig.warpExitIsCustom(this@MsnGuardVpnService)
+                // Diagnostic: the guard below has two independent halves and a
+                // silent skip left no trace in the log, which made the 3.0.23
+                // "Exit Node ignored" report impossible to place. Log the verdict
+                // of each half so the next log says which one was false.
+                if (_warpProto != "masque" && _warpProto != "mim") {
+                    ConnectionLog.record("Warp Setting: not for this transport (proto=${_warpProto.ifBlank { "none" }}) — sidecar skipped")
+                } else if (!_exitCustom) {
+                    ConnectionLog.record("Warp Setting: exit mode is Freedom (direct) — sidecar skipped")
+                }
+                if ((_warpProto == "masque" || _warpProto == "mim") && _exitCustom) {
                     val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService)
                     ConnectionLog.record("Warp Setting: custom exit requested, starting sidecar for Masque")
                     val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
@@ -6156,8 +6166,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * is an rtt-sorted pool, not a record of what carried this session.
      */
     private fun currentSessionEndpoint(): String {
+        // The core derives the lastconn filename from the identity it loaded:
+        // aether.toml (WireGuard) -> aether-lastconn.toml, aether-masque.toml
+        // (MASQUE, and the outer leg of WoW) -> aether-masque-lastconn.toml.
+        // coreLastconnFile("wireguard") was used for MASQUE too, so the endpoint
+        // reported for a MASQUE session was whatever a *WireGuard* session last
+        // wrote — usually empty, which is why the value looked right by luck and
+        // hid the mismatch.
         val direct = when (currentProtocol) {
-            "MASQUE", "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
+            "MASQUE" -> readLastconnPeer(File(filesDir, "aether-masque-lastconn.toml"))
+            "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
             "GOOL" -> readLastconnPeer(coreLastconnFile("gool"))
             "MIM" -> readLastconnPeer(coreLastconnFile("mim"))
             else -> ""
@@ -6235,10 +6253,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * in [resetIdentities], gated behind a confirmation the user has to read.
      */
     private fun clearEndpointCaches() {
+        // The core derives every lastconn path from the identity file it loaded:
+        //   aether.toml        -> aether-lastconn.toml      (WireGuard)
+        //   aether-masque.toml -> aether-masque-lastconn.toml (MASQUE + WoW outer)
+        //   aether-gool.toml   -> aether-gool-lastconn.toml
+        //   aether-mim.toml    -> aether-mim-lastconn.toml
+        // coreLastconnFile() below produces exactly the first three of these, but
+        // through `when (protocol) { "gool" -> ...; "mim" -> ...; else -> "lastconn" }`
+        // — MASQUE falls into `else`, so it mapped to the *WireGuard* file
+        // (aether-lastconn.toml) and the real aether-masque-lastconn.toml was
+        // never touched. A "Fresh scan" therefore deleted the wrong file and the
+        // core went on reusing the cached gateway it was asked to forget — the
+        // 3.0.23 log shows "Fresh scan: cleared cached gateways" immediately
+        // followed by "cached gateway ... still works; skipping scan". Named
+        // explicitly here so the mapping cannot drift again.
         val targets = listOf(
-            coreLastconnFile("wireguard"),
-            coreLastconnFile("gool"),
-            coreLastconnFile("mim"),
+            File(filesDir, "aether-lastconn.toml"),
+            File(filesDir, "aether-masque-lastconn.toml"),
+            File(filesDir, "aether-gool-lastconn.toml"),
+            File(filesDir, "aether-mim-lastconn.toml"),
             File(filesDir, "masque-gateway-cache.json"),
         )
         for (file in targets) {
