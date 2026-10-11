@@ -6331,7 +6331,8 @@ class MainActivity : Activity() {
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; orientation = LinearLayout.HORIZONTAL }
             val vfield = settingsField(value = CoreConfig.warpExitCustom(this), hintText = "vless://uuid@host:port?security=reality#name", multiline = true).apply { minLines = 2; maxLines = 4 }
             val hasValue = CoreConfig.warpExitCustom(this).isNotBlank()
-            val applyBtn = createSettingsButton(
+            lateinit var applyBtn: TextView
+            applyBtn = createSettingsButton(
                 Strings.t("Apply"),
                 backgroundOverride = if (hasValue) primary else SURFACE_VARIANT,
                 textColorOverride = if (hasValue) primaryContainer else MUTED,
