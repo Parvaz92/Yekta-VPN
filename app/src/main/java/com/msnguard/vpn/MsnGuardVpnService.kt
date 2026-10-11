@@ -5580,6 +5580,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     MtuConfig.Method.WOW -> { patched["AETHER_WG_MTU"] = mtu.toString(); patched["AETHER_MASQUE_MTU"] = mtu.toString() }
                     else -> {}
                 }
+                // Preserve WarpExit upstream across the MTU ladder: the rung rebuilds
+                // envFromEffectiveConfig does NOT carry Warp Setting state, so without
+                // this the 2nd MTU rung drops AETHER_UPSTREAM even on an Exit-Node
+                // connect — the Exit Node scan shows IR until the app is Force Stopped.
+                if (CoreConfig.warpExitIsCustom(this) && WarpExitManager.isRunning) {
+                    patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                }
                 CoreConfig.applyEnv(patched)
             }
             val addresses = NativeCore.prepare(effectiveConfig)
