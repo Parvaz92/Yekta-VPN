@@ -6264,14 +6264,108 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(16), dp(24), dp(24)) }
         content.addView(LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(createHeaderBackButton { closeWarpSettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(label(Strings.t("Warp Setting"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }) })
-        content.addView(label(Strings.t("Exit for Masque only. Freedom — dial direct. Custom — paste a VLESS (e.g. Lithuania) and Masque will scan through it. WireGuard, WoW, SHARD, Tor are unaffected."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(16) })
-        val freedomSel = CoreConfig.warpExitMode(this) == CoreConfig.WARP_EXIT_MODE_FREEDOM
-        val freedomRow = navRow(title = Strings.t("Freedom — Direct"), value = if (freedomSel) Strings.t("Selected") else null) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit(); requestFreshScanAfterExitSwitch("Freedom"); toastShort(Strings.t("Warp exit: Freedom")); ConnectionLog.record("Warp Setting: Freedom (direct)"); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }
-        content.addView(freedomRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
-        val customSel = CoreConfig.warpExitIsCustom(this)
-        val customRow = navRow(title = Strings.t("Custom exit"), value = if (customSel) Strings.t("Selected") else Strings.t("Tap to paste")) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; editWarpCustom() }
-        content.addView(customRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
-        if (customSel) content.addView(label(CoreConfig.warpExitCustom(this).take(240), 12f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(4); topMargin = dp(8) })
+        content.addView(label(Strings.t("Exit for Masque only. Freedom — dial direct. Custom — paste a VLESS (e.g. Lithuania) and Masque will scan through it. WireGuard, WoW, SHARD, Tor are unaffected."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(18) })
+
+        // ── Modern dropdown selector: Direct vs Exit-Node ──
+        val isCustom = CoreConfig.warpExitIsCustom(this)
+        val currentLabel = if (isCustom) Strings.t("Exit-Node") else Strings.t("Direct")
+        val dropdownCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            isClickable = true
+            isFocusable = true
+        }
+        val dropdownIcon = TextView(this).apply { text = if (isCustom) "\uD83C\uDF10" else "\u26A1"; textSize = 18f; setPadding(0, 0, dp(10), 0) }
+        val dropdownLabel = label(currentLabel, 16f, INK, TypefaceStyle.MEDIUM).apply { setPadding(0, 0, dp(6), 0) }
+        val dropdownHint = label(if (isCustom) Strings.t("Custom exit active") else Strings.t("Freedom — direct"), 12f, MUTED)
+        val labelCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(dropdownLabel); addView(dropdownHint) }
+        val chevron = label("\u25BE", 16f, MUTED).apply { setPadding(dp(12), 0, 0, 0) }
+        dropdownCard.addView(dropdownIcon, LinearLayout.LayoutParams(dp(28), dp(28)))
+        dropdownCard.addView(labelCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        dropdownCard.addView(chevron)
+        dropdownCard.setOnClickListener {
+            if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+            showChoiceSheet(
+                title = Strings.t("Warp exit"),
+                subtitle = Strings.t("Where Masque exits to the internet"),
+                options = listOf(CoreConfig.WARP_EXIT_MODE_FREEDOM, CoreConfig.WARP_EXIT_MODE_CUSTOM),
+                selected = CoreConfig.warpExitMode(this),
+                label = { if (it == CoreConfig.WARP_EXIT_MODE_CUSTOM) Strings.t("Exit-Node") else Strings.t("Direct") },
+                description = { if (it == CoreConfig.WARP_EXIT_MODE_CUSTOM) Strings.t("Through your V2Ray config") else Strings.t("Freedom — dial direct") },
+                onSelected = { chosen ->
+                    if (chosen == CoreConfig.WARP_EXIT_MODE_FREEDOM) {
+                        preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit()
+                        requestFreshScanAfterExitSwitch("Freedom")
+                        toastShort(Strings.t("Warp exit: Direct"))
+                        ConnectionLog.record("Warp Setting: Freedom (direct)")
+                    } else {
+                        // Switch to custom: if no config yet, open the editor
+                        val cur = CoreConfig.warpExitCustom(this)
+                        if (cur.isBlank()) {
+                            preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit()
+                                editWarpCustom()
+                            return@showChoiceSheet
+                        } else {
+                            preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit()
+                            requestFreshScanAfterExitSwitch("Exit-Node")
+                            ConnectionLog.record("Warp Setting: Exit-Node (" + cur.take(48) + ")")
+                        }
+                    }
+                    warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }
+                    openWarpSettingScreen()
+                }
+            )
+        }
+        content.addView(dropdownCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(16) })
+
+        // ── V2Ray config field: only when Exit-Node is active, inline with a minimal Apply ──
+        if (isCustom) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(14), dp(16), dp(14))
+                background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            }
+            card.addView(label(Strings.t("V2Ray config"), 11f, MUTED).apply { letterSpacing = spacing(0.08f) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; orientation = LinearLayout.HORIZONTAL }
+            val vfield = settingsField(value = CoreConfig.warpExitCustom(this), hintText = "vless://uuid@host:port?security=reality#name", multiline = true).apply { minLines = 2; maxLines = 4 }
+            val hasValue = CoreConfig.warpExitCustom(this).isNotBlank()
+            val applyBtn = createSettingsButton(
+                Strings.t("Apply"),
+                backgroundOverride = if (hasValue) primary else SURFACE_VARIANT,
+                textColorOverride = if (hasValue) primaryContainer else MUTED,
+            ) {
+                val raw = vfield.text.toString().trim()
+                if (raw.isEmpty()) { vfield.error = Strings.t("Paste a config first"); return@createSettingsButton }
+                preferences().edit().putString(CoreConfig.WARP_EXIT_CUSTOM_PREF, raw).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit()
+                requestFreshScanAfterExitSwitch("Exit-Node")
+                ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")")
+                toastShort(Strings.t("Warp exit saved"))
+                // re-tint the button to the saved state
+                applyBtn.background = roundedBackground(primary, 16, primary)
+                applyBtn.setTextColor(primaryContainer)
+            }
+            row.addView(vfield, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(10) })
+            row.addView(applyBtn, LinearLayout.LayoutParams(dp(92), dp(46)))
+            card.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            // quick clear link
+            val clearLink = label(Strings.t("Clear and go Direct"), 12f, MUTED).apply {
+                setPadding(dp(4), dp(10), dp(4), 0)
+                isClickable = true
+                setOnClickListener {
+                    if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                    preferences().edit().remove(CoreConfig.WARP_EXIT_CUSTOM_PREF).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit()
+                    requestFreshScanAfterExitSwitch("Freedom")
+                    ConnectionLog.record("Warp Setting: cleared, back to Direct")
+                    warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }
+                    openWarpSettingScreen()
+                }
+            }
+            card.addView(clearLink, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            content.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         page.setOnApplyWindowInsetsListener { _, insets -> content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24)); insets }

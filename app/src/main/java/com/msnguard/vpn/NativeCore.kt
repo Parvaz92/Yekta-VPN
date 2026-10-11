@@ -118,12 +118,16 @@ object NativeCore {
      * engine reads. Used by [CoreConfig.applyEnv] before a start.
      */
     fun setEnv(key: String, value: String) = nativeSetEnv(key, value)
+    fun unsetEnv(key: String) = nativeUnsetEnv(key)
+    /** Remove [key] from the process env so a stale value cannot leak into the next connect. */
+    fun clearEnv(key: String) = try { nativeUnsetEnv(key) } catch (_: Throwable) {}
 
     /** Snapshot of aether's byte counters (AETHER_STATS). Returns [up, down]. */
     fun statsSnapshot(): LongArray? = try { nativeStatsSnapshot() } catch (_: Throwable) { null }
 
     @JvmStatic private external fun nativePrepare(config: String): Int
     @JvmStatic private external fun nativeSetEnv(key: String, value: String)
+    @JvmStatic private external fun nativeUnsetEnv(key: String)
     @JvmStatic private external fun nativeStatsSnapshot(): LongArray
     @JvmStatic private external fun nativeLastResult(): String
     @JvmStatic private external fun nativeRequestEmailCode(team: String, email: String): Int
