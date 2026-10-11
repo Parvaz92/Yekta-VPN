@@ -48,8 +48,8 @@ pub extern "C" fn aether_set_log_sink(callback: Option<extern "C" fn(*const c_ch
 /// is exempt by being loopback; MSN runs the engine in-process, so the
 /// exemption has to come from protect() instead. Call before start.
 #[no_mangle]
-pub extern "C" fn aether_set_socket_protector(protector: Option<platform::SocketProtector>) {
-    platform::set_socket_protector(protector);
+pub extern "C" fn aether_set_socket_protector(protector: Option<crate::platform::SocketProtector>) {
+    crate::platform::set_socket_protector(protector);
 }
 
 /// Called by the logger below; kept separate so a sink that is never installed
