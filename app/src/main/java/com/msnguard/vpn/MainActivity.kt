@@ -5312,6 +5312,16 @@ class MainActivity : Activity() {
                 "Cache & refresh" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName).apply()
                 "Fresh scan next time" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).apply()
                 else -> {
+                    // Mirror clearEndpointCaches(): the gateway cache JSON alone is
+                    // not enough — the core's lastconn file is what actually makes
+                    // it skip the scan ("cached gateway ... still works; skipping
+                    // scan"), and its name is derived from the identity file
+                    // (aether-masque.toml -> aether-masque-lastconn.toml). Deleting
+                    // only the JSON left the user's "clear" silently inert.
+                    File(filesDir, "aether-lastconn.toml").delete()
+                    File(filesDir, "aether-masque-lastconn.toml").delete()
+                    File(filesDir, "aether-gool-lastconn.toml").delete()
+                    File(filesDir, "aether-mim-lastconn.toml").delete()
                     File(filesDir, "masque-gateway-cache.json").delete()
                     toastShort(Strings.t("Saved gateways cleared"))
                 }
@@ -6281,7 +6291,7 @@ class MainActivity : Activity() {
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val actions = LinearLayout(this).apply { gravity = Gravity.END; orientation = LinearLayout.HORIZONTAL }
         actions.addView(createSettingsButton(Strings.t("Clear")) { preferences().edit().remove(CoreConfig.WARP_EXIT_CUSTOM_PREF).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).apply(); ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(8) })
-        actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; preferences().edit().putString(CoreConfig.WARP_EXIT_CUSTOM_PREF, raw).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).apply(); ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
+        actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; preferences().edit().putString(CoreConfig.WARP_EXIT_CUSTOM_PREF, raw).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
         dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
         dialog.show(); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
