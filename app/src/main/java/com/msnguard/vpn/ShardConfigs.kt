@@ -377,7 +377,7 @@ object ShardConfigs {
             port = port,
             network = network,
             security = security,
-            path = params["path"].orEmpty().ifEmpty { params["serviceName"].orEmpty().ifEmpty { "/" } },
+            path = params["path"].orEmpty().ifEmpty { params["serviceName"].orEmpty().ifEmpty { "/" } }.replace("MTMVPNfp=", "MTMVPN&fp="),
             host = host,
             // serverName falls back to host because that is what the CDN routes
             // on; an empty SNI to Cloudflare gets the default certificate and the
@@ -496,14 +496,14 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-// PattNG-aligned constants: ECH / ALPN / fingerprint are fixed,
-                        // not publisher-supplied. PattNG sets these for every working
-                        // config on this pool and the user confirmed they are what
-                        // makes the node answer on IranCell.
-                        put("echConfigList", "cloudflare-ech.com+udp://1.1.1.1")
-                        put("alpn", JSONArray().put("http/1.1"))
-                        put("fingerprint", "chrome")
+                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
+                        if (node.alpn.isNotEmpty()) {
+                            put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
+                        } else if (node.network == "xhttp" && node.alpn.isEmpty()) {
+                            put("alpn", JSONArray().put("h2"))
+                        }
+                        if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
                         // Keep pcs-gated allowInsecure / vcn from the node as before.
                         // When ECH is on, the live tunnel's ECH config fetch
                         // (QueryRecord -> DialSystem) must ride the node's own
