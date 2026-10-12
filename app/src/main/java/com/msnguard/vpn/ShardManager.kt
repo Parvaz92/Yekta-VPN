@@ -674,6 +674,18 @@ object ShardManager {
             val identity = "${node.protocol}|${node.credential}|${node.host}|${node.path}|${node.port}"
             groups.getOrPut(identity) { mutableListOf() }.add(node)
         }
+        // Fast variants first within each endpoint: fm (fragmented) handshakes cost
+        // ~1 s extra (110 one-byte fragments x 1 ms delay) and the probe budget is
+        // only 5 s, so putting all fm variants in the first three slices would fill
+        // the entire race with the slowest path. PattNG does not fragment before the
+        // handshake completes, which is why the same subscription succeeded there
+        // while every slice here timed out with `read timeout after 5000ms`.
+        groups.values.forEach { variants ->
+            variants.sortWith(compareBy(
+                { if (it.finalMask.isNotEmpty()) 1 else 0 },
+                { if (it.echConfigList.isEmpty()) 1 else 0 },
+            ))
+        }
         val out = ArrayList<ShardNode>(ranked.size)
         var round = 0
         while (out.size < ranked.size) {
