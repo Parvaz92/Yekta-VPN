@@ -90,13 +90,28 @@ object ShardManager {
      * Per-probe deadline in ms.
      *
      * Working nodes in the live pool measured 727–5735 ms, with the bulk under
-     * 3.6 s. 5 s admits nearly all of them while cutting off the ones that would
-     * make the connect feel broken; a node slower than that is better replaced.
+     * 3.6 s. That was measured on plain nodes, though, and the pool is now
+     * dominated by ECH nodes: their handshake pays an extra round trip the
+     * plain ones do not, because xray has to fetch the ECH config for
+     * `cloudflare-ech.com` over UDP before it can build the encrypted
+     * ClientHello (transport/internet/tls/ech.go: dnsQuery → 5 s read deadline
+     * + 5 s ctx, then the real handshake on top). 5 s is exactly that DNS
+     * deadline, so a node whose ECH lookup is slow never even started its
+     * handshake before we declared it dead.
+     *
+     * 8 s admits the ECH path plus the handshake, while still cutting off a
+     * node that would make the connect feel broken.
      */
-    private const val PROBE_TIMEOUT_MS = 5_000
+    private const val PROBE_TIMEOUT_MS = 8_000
 
-    /** Overall budget for the race, after which we take whatever we have. */
-    private const val RACE_BUDGET_MS = 12_000L
+    /**
+     * Overall budget for the race, after which we take whatever we have.
+     *
+     * Raised alongside [PROBE_TIMEOUT_MS]: the budget has to be at least the
+     * per-node deadline plus margin, or a slice whose first winner would have
+     * answered at 7.9 s is abandoned at 12 s having tried nothing else.
+     */
+    private const val RACE_BUDGET_MS = 20_000L
 
     /**
      * How many [RACE_WIDTH]-sized slices a connect will try before giving up.
@@ -463,7 +478,7 @@ object ShardManager {
             val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
             if (candidates.isNotEmpty()) ConnectionLog.record("$TAG slice $slice: racing ${candidates.size} candidates")
             if (candidates.isEmpty()) break
-            raced = race(context, candidates)
+            raced = race(context, candidates, verboseLog)
             if (raced != null) break
         }
         val winner = raced ?: return false
@@ -753,7 +768,7 @@ object ShardManager {
      *
      * @return the winner, or null if nothing answered inside the budget.
      */
-    private fun race(context: Context, candidates: List<ShardNode>): ShardNode? {
+    private fun race(context: Context, candidates: List<ShardNode>, verboseLog: Boolean = false): ShardNode? {
         if (candidates.isEmpty()) return null
         val xrayCandidates = candidates.filter { it.protocol != "anytls" }
         val anytlsCandidates = candidates.filter { it.protocol == "anytls" }
@@ -765,7 +780,7 @@ object ShardManager {
 
         val xrayLaunched = xrayCandidates.isNotEmpty() &&
             run {
-                val config = ShardConfigs.probeConfig(context, xrayCandidates, PROBE_BASE_PORT)
+                val config = ShardConfigs.probeConfig(context, xrayCandidates, PROBE_BASE_PORT, verboseLog)
                 val configFile = ShardConfigs.writeConfig(context, "probe.json", config)
                 launch(context, configFile, "$TAG/probe")
             }
