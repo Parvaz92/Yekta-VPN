@@ -386,7 +386,18 @@ object ShardConfigs {
             fingerprint = params["fp"].orEmpty(),
             cipherSuites = params["cs"].orEmpty(),
             finalMask = params["fm"].orEmpty(),
-            alpn = params["alpn"].orEmpty(),
+            alpn = run {
+                val raw = params["alpn"].orEmpty()
+                val net = params["type"]?.lowercase(java.util.Locale.US).orEmpty().ifEmpty { "tcp" }
+                val sec = params["security"]?.lowercase(java.util.Locale.US).orEmpty()
+                // PattNG's TlsSettingsCheck.fixImportedAlpn: ws/http-upgrade with alpn other than http/1.1 alone
+                // is rewritten to http/1.1 — shared links often carry h2,http/1.1 and the fork offers h2 then,
+                // which some Cloudflare hosts pick even after http/1.1. Keep verbatim otherwise.
+                if ((net == "ws" || net == "httpupgrade") && sec == "tls" && raw.isNotEmpty()) {
+                    val parts = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                    if (parts != listOf("http/1.1")) "http/1.1" else raw
+                } else raw
+            },
             echConfigList = params["ech"].orEmpty(),
             echOutbound = params["echoutbound"].orEmpty(),
             allowInsecure = allowInsecure,
@@ -503,7 +514,16 @@ object ShardConfigs {
                         } else if (node.network == "xhttp" && node.alpn.isEmpty()) {
                             put("alpn", JSONArray().put("h2"))
                         }
-                        if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
+                        // ECH DNS: udp://1.1.1.1:53 is blocked on many Iranian carriers (i/o timeout -> malformed ECHConfigList -> handshake fail).
+                        // Rewrite to DoH so the query rides TCP+TLS via DialSystem rather than raw UDP; the hello of that DoH leg
+                        // is itself a normal Chrome hello (no ECH on it), so the fragment of the node's own hello still applies.
+                        val echForConfig = if (node.echConfigList.contains("+udp://")) {
+                            node.echConfigList.replace("+udp://", "+https://").let { v ->
+                                // normalize like cloudflare-ech.com+https://1.1.1.1 -> +https://1.1.1.1/dns-query (xray expects a URL)
+                                if (v.contains("/dns-query", ignoreCase = true)) v else "$v/dns-query"
+                            }
+                        } else node.echConfigList
+                        if (echForConfig.isNotEmpty()) put("echConfigList", echForConfig)
                         // Keep pcs-gated allowInsecure / vcn from the node as before.
                         // When ECH is on, the live tunnel's ECH config fetch
                         // (QueryRecord -> DialSystem) must ride the node's own
