@@ -252,9 +252,10 @@ object ShardConfigs {
      * every other node in it.
      */
     fun parse(body: String): List<ShardNode> {
+        val effectiveBody = decodeIfBase64(body)
         val nodes = mutableListOf<ShardNode>()
         val seen = mutableSetOf<String>()
-        body.lineSequence().forEach { rawLine ->
+        effectiveBody.lineSequence().forEach { rawLine ->
             val line = rawLine.trim()
             if (line.isEmpty() || line.startsWith("#")) return@forEach
             val node = parseOne(line) ?: return@forEach
@@ -263,6 +264,34 @@ object ShardConfigs {
             if (seen.add(node.key)) nodes.add(node)
         }
         return nodes
+    }
+
+    /**
+     * Try base64 decode when the body looks like a base64 sub (no :// but decodes to ://).
+     * Mirrors PattNG's Utils.decode branch: decode first, fall back to plain if it does not produce ://.
+     * Gated so a plain vless:// body is never corrupted.
+     */
+    private fun decodeIfBase64(body: String): String {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty() || trimmed.contains("://")) return body
+        // Strip whitespace/newlines that some subs insert; try standard then URL-safe
+        val compact = trimmed.filterNot { it.isWhitespace() }
+        if (compact.isEmpty()) return body
+        for (flags in listOf(android.util.Base64.NO_WRAP, android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE)) {
+            try {
+                val decoded = android.util.Base64.decode(compact, flags).toString(Charsets.UTF_8)
+                if (decoded.contains("://")) return decoded
+            } catch (_: Exception) {}
+            // Also try with padding restored (PattNG trims = then tries both)
+            try {
+                val padded = compact.trimEnd('=')
+                if (padded != compact) {
+                    val decoded = android.util.Base64.decode(padded, flags).toString(Charsets.UTF_8)
+                    if (decoded.contains("://")) return decoded
+                }
+            } catch (_: Exception) {}
+        }
+        return body
     }
 
     private fun parseOne(line: String): ShardNode? = try {
