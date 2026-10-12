@@ -5547,8 +5547,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // We do not scan upfront — only after the first two rungs fail, per spec.
         // persist on rung success; budget per rung uses a share of SOCKS_READY_TIMEOUT_MS
         // so the whole ladder cannot exceed roughly one normal connect.
+        // per-rung budget must cover the core's own scan before it binds the SOCKS
+        // listener. The WARP scan's overall_deadline is 80s (wg_prober Balanced) and
+        // WoW's is 180s, so a 45s/50s rung fires "no s0 listener" while the core is
+        // still scanning — the tunnel is healthy, the app just gave up on it. It is
+        // fine on Direct (the cache answers fast) but with an Exit Node the scan
+        // always runs and always costs the full budget. Bumped to the core deadline
+        // + dial/validate margin; the ladder still terminates via the ladder itself.
         val perRungBudgetMsDefault = when (method) {
-            MtuConfig.Method.WIREGUARD -> 45_000L
+            MtuConfig.Method.WIREGUARD -> 110_000L
             // MASQUE: the engine binds the SOCKS listener only AFTER
             // load_or_enrol_masque + the balanced scan + establish_masque,
             // not at job start. With ECH the 109s enable_warp penalty is
@@ -5557,7 +5564,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // + margin — no 300s ladder. PattNG provisions in <60s for the
             // same reason.
             MtuConfig.Method.MASQUE -> 150_000L
-            else -> 50_000L // WOW
+            else -> 200_000L // WOW: two stacked scans (outer + inner, 80s + 180s)
         }
         val perRungBudgetMsFollow = when (method) {
             MtuConfig.Method.MASQUE -> 150_000L
