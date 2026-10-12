@@ -680,10 +680,13 @@ object ShardManager {
         // the entire race with the slowest path. PattNG does not fragment before the
         // handshake completes, which is why the same subscription succeeded there
         // while every slice here timed out with `read timeout after 5000ms`.
+        // For Iran, fm (fragment) bypasses the SNI filter locally without any DNS lookup; ECH variants need a
+        // 5 s UDP DNS query to 1.1.1.1:53 over the carrier link, which is blocked on many ISPs (i/o timeout ->
+        // malformed ECHConfigList -> handshake fail). So fm must be tried first; ech/bare are the fallback slice.
         groups.values.forEach { variants ->
             variants.sortWith(compareBy(
-                { if (it.finalMask.isNotEmpty()) 1 else 0 },
-                { if (it.echConfigList.isEmpty()) 1 else 0 },
+                { if (it.finalMask.isNotEmpty()) 0 else 1 },
+                { if (it.echConfigList.isNotEmpty()) 0 else 1 },
             ))
         }
         val out = ArrayList<ShardNode>(ranked.size)
