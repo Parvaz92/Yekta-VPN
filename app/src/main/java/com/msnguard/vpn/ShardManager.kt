@@ -438,7 +438,13 @@ object ShardManager {
             return false
         }
         ShardHealth.prune(context, pool)
-        ConnectionLog.record("$TAG pool ${pool.size} nodes, edges ${ShardEdges.edges(context).size} edges")
+        run {
+            val rawLines = ShardSubscription.rawLineCount(context)
+            val parsed = ShardSubscription.cachedCount(context)
+            val cacheAge = ShardSubscription.lastCheckMillis(context).let { if (it <= 0L) "never" else "${(System.currentTimeMillis() - it) / 1000}s ago" }
+            val seedFallback = if (parsed == 0 && rawLines == 0) " — seed fallback" else ""
+            ConnectionLog.record("$TAG pool ${pool.size} nodes · raw $rawLines lines · parsed $parsed · cache $cacheAge$seedFallback, edges ${ShardEdges.edges(context).size} edges")
+        }
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
         // the order most likely to be fast. Diversified so one endpoint's variants

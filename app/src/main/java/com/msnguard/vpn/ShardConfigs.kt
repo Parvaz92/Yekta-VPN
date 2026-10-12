@@ -496,19 +496,15 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-                        // Fingerprint verbatim from subscription (fp=unsafe for plain, fp=chrome for ECH).
-                        // v2.0.1 hardcoded chrome — wrong for fm stability. Keep what the publisher sends.
-                        // When present, this is Chrome's ClientHello via uTLS; when "unsafe", uTLS is off
-                        // so the fm offsets stay byte-exact. Never override.
-                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
+// PattNG-aligned constants: ECH / ALPN / fingerprint are fixed,
+                        // not publisher-supplied. PattNG sets these for every working
+                        // config on this pool and the user confirmed they are what
+                        // makes the node answer on IranCell.
+                        put("echConfigList", "cloudflare-ech.com+udp://1.1.1.1")
+                        put("alpn", JSONArray().put("http/1.1"))
+                        put("fingerprint", "chrome")
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
-                        // ALPN: xhttp with empty alpn -> h2 (publisher's recipe for current block), else verbatim.
-                        if (node.network == "xhttp" && node.alpn.isEmpty()) {
-                            put("alpn", JSONArray().put("h2"))
-                        } else if (node.alpn.isNotEmpty()) {
-                            put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
-                        }
-                        if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
+                        // Keep pcs-gated allowInsecure / vcn from the node as before.
                         // When ECH is on, the live tunnel's ECH config fetch
                         // (QueryRecord -> DialSystem) must ride the node's own
                         // outbound instead of DialSystem's default path, which on
@@ -521,7 +517,7 @@ object ShardConfigs {
                         // there — the live tunnel has a single "proxy" outbound and
                         // is where the request actually leaves. Proto:
                         // tls.Config.ech_socket_settings=21, SocketConfig.dialer_proxy=9.
-                        if (node.echConfigList.isNotEmpty() && tag == "proxy") {
+                        if (tag == "proxy") {
                             put(
                                 "echSocketSettings",
                                 JSONObject().put("dialerProxy", "proxy")
@@ -749,12 +745,12 @@ object ShardConfigs {
             )
         }
         return JSONObject().apply {
-            // "none" during the race. The probe opens and abandons dozens of
-            // connections by design, and at any higher level every one of those
-            // writes several lines — tens of thousands of lines of log for a
-            // measurement nobody reads, on a phone.
+            // "warning" during the race: a few dozen extra lines bought by real
+            // failure causes (TLS alert, ECH fallback, transport write). Kept low
+            // enough not to drown the ConnectionLog.
+            // "none" would hide the very lines that explain why every nd timed out.
             put("log", JSONObject().apply {
-                put("loglevel", "none")
+                put("loglevel", "warning")
                 put("access", "none")
             })
             put("inbounds", inbounds)
