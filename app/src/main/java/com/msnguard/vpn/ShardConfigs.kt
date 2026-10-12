@@ -239,28 +239,6 @@ object ShardConfigs {
     private const val DOH_OUTBOUND_TAG = "doh-resolver"
 
     /**
-     * Tag of the outbound that carries the ECH config lookup during a probe.
-     *
-     * See [outbound]: the live tunnel points its ECH lookup at its own single
-     * `proxy` outbound, but a probe process races many nodes at once and a
-     * per-node inbound rule routes each one, so pointing the lookup at any node
-     * outbound would be a cycle. This dedicated outbound breaks the cycle: it is
-     * a plain `freedom` dial to the DoH server, and [probeConfig] adds it once
-     * so every ECH node in the slice can ride it.
-     */
-    const val ECH_RESOLVER_TAG = "ech-resolver"
-
-    /**
-     * The DoH server plain-UDP ECH URLs are rewritten to.
-     *
-     * Cloudflare's own resolver, matching the `cloudflare-ech.com` records the
-     * subscription asks for. The path is the DoH endpoint; the fork's ech.go
-     * treats a `+https://` server as an HTTP POST of a DNS message, so this is
-     * the whole URL, not a bare address.
-     */
-    private const val ECH_DOH_SERVER = "https://cloudflare-dns.com/dns-query"
-
-    /**
      * Parse a subscription body into nodes, in file order.
      *
      * The file is plain text, one URL per line, with `#`-prefixed metadata lines
@@ -502,54 +480,22 @@ object ShardConfigs {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
                         }
                         if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
-                        // When ECH is on, xray has to fetch the ECH config for
-                        // the serverName's domain before it can build the
-                        // encrypted ClientHello. That fetch goes through
-                        // `echSocketSettings.dialerProxy` when set, and through
-                        // the plain system dialer otherwise — which on a
-                        // censoring carrier is exactly the path that is
-                        // poisoned, so the handshake silently falls back to a
-                        // bare SNI the DPI kills.
-                        //
-                        // The live tunnel points this at its own single "proxy"
-                        // outbound (the query rides the node it is about to
-                        // use). A probe process has many parallel outbounds and
-                        // a routing rule per one, so pointing at any of them
-                        // would be a self-proxy cycle — instead the caller adds
-                        // one dedicated `ECH_RESOLVER_TAG` outbound whose only
-                        // job is carrying that lookup, and every ECH probe
-                        // outbound points at it. See [ShardConfigs.probeConfig].
-                        if (node.echConfigList.isNotEmpty()) {
-                            // Rewrite the ECH resolver from plain UDP to DoH-over-TLS.
-                            //
-                            // The subscription ships `cloudflare-ech.com+udp://1.1.1.1`,
-                            // which xray answers with a bare UDP/53 query (ech.go's
-                            // `udp://` branch → DialSystem). On a censoring carrier
-                            // that is the exact path that is poisoned for ECH records,
-                            // so the lookup comes back empty or wrong, the handshake
-                            // silently falls back to a bare SNI, and the DPI drops it.
-                            // Every node in the pool then times out and SHARD reports
-                            // "no node answered" against configs the user can see
-                            // working in another app.
-                            //
-                            // The same record is served over DoH, which is the whole
-                            // point of `+https://`: the query becomes an HTTPS request
-                            // whose own TLS hides the record from the censor. Same
-                            // name being resolved, same answer, transport swapped.
-                            put("echConfigList", node.echConfigList.dohEchServer())
+                        // When ECH is on, the live tunnel's ECH config fetch
+                        // (QueryRecord -> DialSystem) must ride the node's own
+                        // outbound instead of DialSystem's default path, which on
+                        // this device goes through the TUN before the tunnel is up
+                        // — the query leaves over the carrier link and is dropped.
+                        // `echSocketSettings.dialerProxy` tells xray to redial the
+                        // DNS query through the outbound named here. The probe has
+                        // many parallel outbounds (out-0, out-1, …) and routing
+                        // would make a self-proxy a cycle, so the field is omitted
+                        // there — the live tunnel has a single "proxy" outbound and
+                        // is where the request actually leaves. Proto:
+                        // tls.Config.ech_socket_settings=21, SocketConfig.dialer_proxy=9.
+                        if (node.echConfigList.isNotEmpty() && tag == "proxy") {
                             put(
                                 "echSocketSettings",
-                                JSONObject().put(
-                                    "dialerProxy",
-                                    // The live tunnel has exactly one proxy outbound,
-                                    // and the ECH lookup rides the node it is about to
-                                    // use. A probe process races many nodes with a
-                                    // routing rule per one, so pointing at any of them
-                                    // is a self-proxy cycle — it gets a dedicated
-                                    // [ECH_RESOLVER_TAG] outbound instead, added once
-                                    // by [ShardConfigs.probeConfig].
-                                    if (tag == "proxy") "proxy" else ECH_RESOLVER_TAG,
-                                )
+                                JSONObject().put("dialerProxy", "proxy")
                             )
                         }
                         // Upstream parity: insecure is pcs-gated. allowInsecure true only
@@ -733,7 +679,7 @@ object ShardConfigs {
      * carrier link and being counted as a success. Free-Configs' own health check
      * does the same thing, and for the same reason.
      */
-    fun probeConfig(context: Context, nodes: List<ShardNode>, basePort: Int, verbose: Boolean = false): String {
+    fun probeConfig(context: Context, nodes: List<ShardNode>, basePort: Int): String {
         val inbounds = JSONArray()
         val outbounds = JSONArray().put(
             JSONObject().apply {
@@ -741,26 +687,6 @@ object ShardConfigs {
                 put("protocol", "blackhole")
             }
         )
-        // The ECH resolver, needed by every ECH node in the slice at once.
-        //
-        // An ECH outbound dials the DoH server for `cloudflare-ech.com`'s HTTPS
-        // record before it can build its encrypted ClientHello. Without an
-        // outbound to ride, xray sends that lookup through the plain system
-        // dialer — the carrier link — where a censoring network poisons it, the
-        // ECH config comes back empty or wrong, and the handshake falls back to
-        // a bare SNI the DPI drops. Every node in the slice then times out and
-        // the whole race reports "no node answered" against a pool the user can
-        // plainly see working elsewhere.
-        //
-        // One outbound shared by the whole slice, because the lookup is cached
-        // inside xray after the first answer. See [echResolverOutbound] for why
-        // it is a DoH-over-TLS `dns` outbound rather than plain UDP.
-        //
-        // Added AFTER blackhole and BEFORE the node outbounds, so the tag it
-        // carries is registered by the time any node's handshake asks for it.
-        if (nodes.any { it.echConfigList.isNotEmpty() }) {
-            outbounds.put(echResolverOutbound())
-        }
         val rules = JSONArray()
         nodes.forEachIndexed { index, node ->
             val tag = "out-$index"
@@ -798,16 +724,8 @@ object ShardConfigs {
             // connections by design, and at any higher level every one of those
             // writes several lines — tens of thousands of lines of log for a
             // measurement nobody reads, on a phone.
-            //
-            // EXCEPT when the user asked for a verbose log. Then the probe is the
-            // one place the failure is visible: the live tunnel logs its own
-            // errors, but a probe that times out says only "read timeout after
-            // Nms" from our side, which is indistinguishable from a dead node, a
-            // poisoned ECH lookup and a config the fork rejects. With 240-config
-            // pools that all fail identically, that silence is the whole reason a
-            // field log cannot be diagnosed.
             put("log", JSONObject().apply {
-                put("loglevel", if (verbose) "warning" else "none")
+                put("loglevel", "none")
                 put("access", "none")
             })
             put("inbounds", inbounds)
@@ -1710,73 +1628,6 @@ object ShardConfigs {
                 put("network", "udp")
                 put("outboundTag", "direct-plain")
             })
-    }
-
-    /**
-     * The outbound the probe's ECH lookups ride.
-     *
-     * Paired with [ECH_RESOLVER_TAG]. See [probeConfig] for why the probe needs a
-     * dedicated one instead of the live tunnel's self-referencing `proxy`.
-     *
-     * The ECH lookup is a DoH round trip xray performs itself
-     * (transport/internet/tls/ech.go: an `https://` server URL builds an
-     * `http2.Transport` whose `DialTLSContext` goes through [DialSystem]). What
-     * that lookup needs from us is a *dialer*, not a resolver: `dialerProxy`
-     * hands the outbound a connection to carry, so a `dns` outbound here would
-     * try to answer the query itself and never dial anything. It has to be
-     * `freedom`, which just opens the socket.
-     *
-     * The socket it opens is the DoH server over TLS, so the censor sees an
-     * ordinary TLS session to a resolver's own name and the ECH record inside it
-     * arrives intact. Plain `freedom` to `1.1.1.1:53` would put the same query
-     * on the same poisoned UDP path the fallback already suffers.
-     */
-    private fun echResolverOutbound(): JSONObject {
-        val dohServer = "cloudflare-dns.com"
-        return JSONObject().apply {
-            put("tag", ECH_RESOLVER_TAG)
-            put("protocol", "freedom")
-            put(
-                "streamSettings",
-                JSONObject().apply {
-                    put("security", "tls")
-                    put(
-                        "tlsSettings",
-                        JSONObject().apply {
-                            // The DoH server's own name, not a node's: this is the SNI
-                            // the censor sees on the resolver leg.
-                            put("serverName", dohServer)
-                            // Chrome's ClientHello shape, so the resolver leg looks like
-                            // an ordinary browser DoH session rather than a Go default.
-                            put("fingerprint", "chrome")
-                        }
-                    )
-                }
-            )
-        }
-    }
-
-    /**
-     * Swap the ECH server's transport from plain UDP to DoH, without touching the
-     * name being resolved.
-     *
-     * `name+udp://1.1.1.1` → `name+https://cloudflare-dns.com/dns-query`
-     *
-     * Anything that already names a `https://`/`h2c://` server is left alone: a
-     * publisher-side switch to DoH must not be undone here. Anything the fork
-     * cannot parse (no `+`, no scheme) is left alone too, because those are the
-     * base64-config form and rewriting them would break the ECH payload itself.
-     *
-     * Only the resolver's own address changes. The record being looked up is the
-     * same, so a publisher that points at a different ECH domain still works.
-     */
-    private fun String.dohEchServer(): String {
-        val plus = indexOf('+')
-        if (plus < 0) return this
-        val scheme = substring(plus + 1)
-        if (scheme.startsWith("https://") || scheme.startsWith("h2c://")) return this
-        if (!scheme.startsWith("udp://") && !scheme.startsWith("tcp://")) return this
-        return substring(0, plus + 1) + ECH_DOH_SERVER
     }
 
     /** Write [config] to the process's private dir and return the file. */
