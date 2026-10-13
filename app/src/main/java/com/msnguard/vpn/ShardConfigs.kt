@@ -256,15 +256,13 @@ object ShardConfigs {
      */
     fun parse(body: String): List<ShardNode> {
         val profiles = com.msnguard.vpn.shard.ShardImport.parseBatch(body)
-        val seen = LinkedHashSet<String>()
         val out = mutableListOf<ShardNode>()
         for (pr in profiles) {
             val node = pr.toShardNode()
             if (node.address.contains("[") || node.address.contains("]")) continue
             if (node.port !in 1..65535) continue
-            // Dedupe on full identity including fm — same credential with different fragment settings is a different candidate
-            val dedupeKey = node.key + "|" + node.finalMask
-            if (seen.add(dedupeKey)) out.add(node)
+            // No dedupe — exactly as the sub provides, 225 lines -> 225 candidates
+            out.add(node)
         }
         return out
     }
