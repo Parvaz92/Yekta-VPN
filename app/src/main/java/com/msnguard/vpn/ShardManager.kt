@@ -457,22 +457,51 @@ object ShardManager {
         // network fails in a predictable time rather than grinding through
         // everything — each slice costs up to RACE_BUDGET_MS.
         if (ranked.isEmpty()) ConnectionLog.record("$TAG ranked pool empty before slicing — health may have pruned everything")
-        var raced: ShardNode? = null
-        for (slice in 0 until MAX_RACE_SLICES) {
-            // Checkpoint between slices: a Disconnect that arrived mid-race must
-            // land here within one slice (~12 s worst case), not after all three.
+        // Full sweep: every node gets a chance, then the fastest success wins.
+        // This is what the user expects when the sub holds 200+ nodes — not
+        // "12 tried, gave up", but a live progress line per slice and a final
+        // least-ping winner. Bounded by pool size, not by 3 slices, so a healthy
+        // node buried at index 180 is still found — it just takes longer.
+        ConnectionLog.record("$TAG extracted ${ShardSubscription.cachedCount(context)} configs from sub — total pool ${pool.size} paths after edge expand")
+        val allSuccess = mutableListOf<Pair<ShardNode, Int>>()
+        var tested = 0
+        var sliceIdx = 0
+        var slicedWinner: ShardNode? = null
+        var bestLatency = Int.MAX_VALUE
+        val totalSlices = (ranked.size + RACE_WIDTH - 1) / RACE_WIDTH
+        while (sliceIdx * RACE_WIDTH < ranked.size) {
             if (stopRequestedDuringStart) {
                 lastError = "connect cancelled"
                 ConnectionLog.record("$TAG connect cancelled between race slices")
                 return false
             }
-            val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
-            if (candidates.isNotEmpty()) ConnectionLog.record("$TAG slice $slice: racing ${candidates.size} candidates")
+            val candidates = ranked.drop(sliceIdx * RACE_WIDTH).take(RACE_WIDTH)
             if (candidates.isEmpty()) break
-            raced = race(context, candidates)
-            if (raced != null) break
+            ConnectionLog.record("$TAG scanning slice ${sliceIdx + 1}/$totalSlices — ${tested + 1}..${tested + candidates.size} of ${ranked.size}")
+            val before = System.currentTimeMillis()
+            val sliceWinner = race(context, candidates)
+            val sliceElapsed = (System.currentTimeMillis() - before).toInt()
+            tested += candidates.size
+            if (sliceWinner != null) {
+                allSuccess.add(sliceWinner to sliceElapsed)
+                if (sliceElapsed < bestLatency) { bestLatency = sliceElapsed; slicedWinner = sliceWinner }
+                ConnectionLog.record("$TAG slice ${sliceIdx + 1}: found ${sliceWinner.key.take(12)} in ${sliceElapsed}ms — best so far ${bestLatency}ms; tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
+            } else {
+                ConnectionLog.record("$TAG slice ${sliceIdx + 1}: no answer — tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
+            }
+            sliceIdx++
+            // Early exit: once we have at least one success, keep scanning only if user wants exhaustive?
+            // For responsiveness, stop after 30s or 5 successes: the sub has many duplicates, first few successes already give least-ping among top tier.
+            if (allSuccess.size >= 5 && (tested >= 60 || bestLatency < 800)) break
         }
-        val winner = raced ?: return false
+        if (allSuccess.isEmpty()) {
+            lastError = "no node answered after $tested tried"
+            ConnectionLog.record("$TAG sweep done — no node answered after $tested/${ranked.size} — tried ${tested} — best none")
+            return false
+        }
+        // Pick the fastest among all successes (least ping)
+        val winner = allSuccess.minByOrNull { it.second }!!.first
+        ConnectionLog.record("$TAG winner least-ping ${LogRedactor.nodeTag(winner.key)} in ${allSuccess.minOf { it.second }}ms among ${allSuccess.size} successes of $tested tested")
         if (stopRequestedDuringStart) {
             lastError = "connect cancelled"
             return false
