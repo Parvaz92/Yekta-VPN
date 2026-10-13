@@ -84,7 +84,7 @@ object ShardManager {
      * pool that a bad day still finds a winner, and not opening more sockets than
      * a carrier link can handle at once.
      */
-    private const val RACE_WIDTH = 24
+    private const val RACE_WIDTH = 12
 
     /**
      * Per-probe deadline in ms.
@@ -444,7 +444,7 @@ object ShardManager {
             val parsed = ShardSubscription.cachedCount(context)
             val cacheAge = ShardSubscription.lastCheckMillis(context).let { if (it <= 0L) "never" else "${(System.currentTimeMillis() - it) / 1000}s ago" }
             val seedFallback = if (parsed == 0 && rawLines == 0) " — seed fallback" else ""
-            ConnectionLog.record("$TAG pool ${pool.size} nodes · raw $rawLines lines · parsed $parsed · cache $cacheAge$seedFallback")
+            ConnectionLog.record("$TAG pool ${pool.size} nodes · raw $rawLines lines · parsed $parsed · cache $cacheAge$seedFallback, edges ${ShardEdges.edges(context).size} edges")
         }
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
@@ -458,116 +458,87 @@ object ShardManager {
         // network fails in a predictable time rather than grinding through
         // everything — each slice costs up to RACE_BUDGET_MS.
         if (ranked.isEmpty()) ConnectionLog.record("$TAG ranked pool empty before slicing — health may have pruned everything")
-        // Full sweep: every node gets a chance, then the fastest success wins.
-        // This is what the user expects when the sub holds 200+ nodes — not
-        // "12 tried, gave up", but a live progress line per slice and a final
-        // least-ping winner. Bounded by pool size, not by 3 slices, so a healthy
-        // node buried at index 180 is still found — it just takes longer.
-        ConnectionLog.record("$TAG extracted ${ShardSubscription.cachedCount(context)} configs from sub — pool ${pool.size} nodes (no edge expand)")
-        val allSuccess = mutableListOf<Pair<ShardNode, Int>>()
-        var tested = 0
-        var sliceIdx = 0
-        var slicedWinner: ShardNode? = null
-        var bestLatency = Int.MAX_VALUE
-        val totalSlices = (ranked.size + RACE_WIDTH - 1) / RACE_WIDTH
-        while (sliceIdx * RACE_WIDTH < ranked.size) {
+        var raced: ShardNode? = null
+        for (slice in 0 until MAX_RACE_SLICES) {
+            // Checkpoint between slices: a Disconnect that arrived mid-race must
+            // land here within one slice (~12 s worst case), not after all three.
             if (stopRequestedDuringStart) {
                 lastError = "connect cancelled"
                 ConnectionLog.record("$TAG connect cancelled between race slices")
                 return false
             }
-            val candidates = ranked.drop(sliceIdx * RACE_WIDTH).take(RACE_WIDTH)
+            val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
+            if (candidates.isNotEmpty()) ConnectionLog.record("$TAG slice $slice: racing ${candidates.size} candidates")
             if (candidates.isEmpty()) break
-            ConnectionLog.record("$TAG scanning slice ${sliceIdx + 1}/$totalSlices — ${tested + 1}..${tested + candidates.size} of ${ranked.size}")
-            val before = System.currentTimeMillis()
-            val sliceWinner = race(context, candidates)
-            val sliceElapsed = (System.currentTimeMillis() - before).toInt()
-            tested += candidates.size
-            try { onProgress?.invoke(tested, ranked.size) } catch (_: Exception) {}
-            if (sliceWinner != null) {
-                allSuccess.add(sliceWinner to sliceElapsed)
-                if (sliceElapsed < bestLatency) { bestLatency = sliceElapsed; slicedWinner = sliceWinner }
-                ConnectionLog.record("$TAG slice ${sliceIdx + 1}: found ${sliceWinner.key.take(12)} in ${sliceElapsed}ms — best so far ${bestLatency}ms; tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
-            } else {
-                ConnectionLog.record("$TAG slice ${sliceIdx + 1}: no answer — tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
-            // Progress already reported via callback above
-            }
-            sliceIdx++
-            // No early exit: scan to the end, then pick least-ping among all successes
+            raced = race(context, candidates)
+            try { onProgress?.invoke((slice + 1) * RACE_WIDTH, ranked.size) } catch (_: Exception) {}
+            if (raced != null) break
         }
-        if (allSuccess.isEmpty()) {
-            lastError = "no node answered after $tested tried"
-            ConnectionLog.record("$TAG sweep done — no node answered after $tested/${ranked.size} — tried ${tested} — best none")
-            return false
-        }
-        // Sorted by probe latency: try the fastest that passed ping first, then the next healthy one.
-        val sorted = allSuccess.sortedBy { it.second }
-        ConnectionLog.record("$TAG health-checking ${sorted.size} ping-ok candidates in least-ping order")
+        val winner = raced ?: return false
         if (stopRequestedDuringStart) {
             lastError = "connect cancelled"
             return false
         }
 
+        // Wildcard only when the user asked for LAN sharing. The port is fixed
+        // either way: unlike the Rust core and Psiphon, SHARD's listener is also
+        // what tun2socks dials, so it cannot move to a user-chosen port.
         val listenHost = if (CoreConfig.lanSharingEnabled(context)) "0.0.0.0" else "127.0.0.1"
         val logLevel = if (verboseLog) "info" else "warning"
 
-        for ((candidate, pingMs) in sorted) {
-            if (stopRequestedDuringStart) {
-                lastError = "connect cancelled"
-                ConnectionLog.record("$TAG connect cancelled before health check")
-                return false
-            }
-            ConnectionLog.record("$TAG health check ${LogRedactor.nodeTag(candidate.key)} ping ${pingMs}ms — launching tunnel")
-            if (candidate.protocol == "anytls") {
-                if (AnyTlsManager.launchLive(context, candidate, listenHost, port, verboseLog)) {
-                    // Verify the sidecar actually carries traffic through a real HTTP 204
-                    val ok = AnyTlsManager.isRunning && ShardProbe.check(AnyTlsManager.listenPort, PROBE_TIMEOUT_MS)
-                    if (ok) {
-                        liveEngine = Engine.ANYTLS
-                        activeNode = candidate
-                        ConnectionLog.record("$TAG healthy ${LogRedactor.nodeTag(candidate.key)} — connected (ping ${pingMs}ms)")
-                        logLanSharing(context, listenHost, port)
-                        return true
-                    }
-                    ConnectionLog.record("$TAG ${LogRedactor.nodeTag(candidate.key)} unhealthy after launch — trying next")
-                    AnyTlsManager.stop()
-                    continue
-                }
-                ConnectionLog.record("$TAG ${LogRedactor.nodeTag(candidate.key)} failed to launch — trying next")
-                continue
-            }
-            liveEngine = Engine.XRAY
-            if (startSmartSplit(context, candidate, listenHost, port, logLevel)) return true
-
-            val config = ShardConfigs.tunnelConfig(context, candidate, listenHost, port, logLevel)
-            val configFile = ShardConfigs.writeConfig(context, "tunnel.json", config)
-            if (stopRequestedDuringStart) {
-                lastError = "connect cancelled"
-                ConnectionLog.record("$TAG connect cancelled before tunnel launch")
-                return false
-            }
-            if (!launch(context, configFile, TAG)) {
-                ConnectionLog.record("$TAG ${LogRedactor.nodeTag(candidate.key)} launch failed — trying next")
-                continue
-            }
-            if (!awaitListener(port)) {
-                ConnectionLog.record("$TAG ${LogRedactor.nodeTag(candidate.key)} listener never came up — trying next")
-                stop()
-                continue
-            }
-            // Real health on the LIVE port: must carry a 204 through DoH, not just port-80 ping.
-            if (ShardProbe.check(port, PROBE_TIMEOUT_MS)) {
-                running.set(true)
-                activeNode = candidate
-                ConnectionLog.record("$TAG healthy ${LogRedactor.nodeTag(candidate.key)} ping ${pingMs}ms — connected")
+        // AnyTLS winners never reach Smart Split: the fragment profiles are a
+        // property of the xray config (freedom-outbound finalmask), and the
+        // sidecar has no such knob. Falling straight to the node-only launch
+        // is the same behaviour a pool with no anytls nodes has, so nothing
+        // changes for existing users.
+        if (winner.protocol == "anytls") {
+            if (AnyTlsManager.launchLive(context, winner, listenHost, port, verboseLog)) {
+                liveEngine = Engine.ANYTLS
+                activeNode = winner
                 logLanSharing(context, listenHost, port)
                 return true
             }
-            ConnectionLog.record("$TAG ${LogRedactor.nodeTag(candidate.key)} unhealthy (no 204 through live tunnel) — trying next")
-            stop()
+            lastError = AnyTlsManager.lastError.ifBlank { "anytls tunnel failed to start" }
+            return false
         }
-        lastError = "no healthy node among ${sorted.size} ping-ok candidates"
-        ConnectionLog.record("$TAG no healthy node after checking ${sorted.size} ping-ok candidates of $tested tested")
+        liveEngine = Engine.XRAY
+
+        // Smart Split, when the user has it on: bring the tunnel up with a fragment
+        // profile and keep the first one that carries a blocked SNI. Returns true
+        // when the tunnel is up and split; false means fall through to node-only.
+        if (startSmartSplit(context, winner, listenHost, port, logLevel)) return true
+
+        val config = ShardConfigs.tunnelConfig(
+            context,
+            winner,
+            listenHost,
+            port,
+            logLevel,
+        )
+        val configFile = ShardConfigs.writeConfig(context, "tunnel.json", config)
+        // Last checkpoint before committing the winner: stop() may have killed the
+        // probe process moments ago, and launching the live tunnel into a cancelled
+        // session would just leave another process for the next stop to clean up.
+        if (stopRequestedDuringStart) {
+            lastError = "connect cancelled"
+            ConnectionLog.record("$TAG connect cancelled before tunnel launch")
+            return false
+        }
+        if (!launch(context, configFile, TAG)) return false
+
+        // Wait for the listener rather than assume it. Reporting CONNECTED before
+        // the port accepts would let tun2socks start into a closed port, which the
+        // user experiences as a tunnel that connects and passes nothing.
+        if (awaitListener(port)) {
+            running.set(true)
+            activeNode = winner
+            ConnectionLog.record("$TAG up on $port via ${LogRedactor.nodeTag(winner.key)}")
+            logLanSharing(context, listenHost, port)
+            return true
+        }
+        lastError = "tunnel listener never came up"
+        ConnectionLog.record("$TAG tunnel port $port never opened")
+        stop()
         return false
     }
 
@@ -901,7 +872,7 @@ object ShardManager {
                 lastError = "no node answered"
                 val sample = synchronized(failureSamples) { failureSamples.toList() }
                 val hint = if (sample.isNotEmpty()) " — e.g. ${sample.joinToString("; ")}" else ""
-                ConnectionLog.record("$TAG slice no answer in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes$hint")
+                ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes$hint")
             } else {
                 ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${winnerLatency.get()}ms")
             }
