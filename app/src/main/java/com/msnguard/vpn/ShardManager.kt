@@ -84,7 +84,7 @@ object ShardManager {
      * pool that a bad day still finds a winner, and not opening more sockets than
      * a carrier link can handle at once.
      */
-    private const val RACE_WIDTH = 12
+    private const val RACE_WIDTH = 24
 
     /**
      * Per-probe deadline in ms.

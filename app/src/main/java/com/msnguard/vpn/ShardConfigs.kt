@@ -260,10 +260,11 @@ object ShardConfigs {
         val out = mutableListOf<ShardNode>()
         for (pr in profiles) {
             val node = pr.toShardNode()
-            // keep original dedupe + drop ipv6 bracket + port check via ShardNode key
             if (node.address.contains("[") || node.address.contains("]")) continue
             if (node.port !in 1..65535) continue
-            if (seen.add(node.key)) out.add(node)
+            // Dedupe on full identity including fm — same credential with different fragment settings is a different candidate
+            val dedupeKey = node.key + "|" + node.finalMask
+            if (seen.add(dedupeKey)) out.add(node)
         }
         return out
     }
