@@ -3075,14 +3075,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
-                sendStatus(STATUS_CONNECTING, Strings.t("Finding a fast node…"), 15)
+                sendStatus(STATUS_CONNECTING, Strings.t("Finding a fast node…"), 10)
                 ConnectionLog.record("SHARD: TUN ready — racing the pool")
 
-                if (!ShardManager.start(this, verboseShardLog()) { tested, total ->
-                    val raw = if (total > 0) (tested * 100) / total else 15
-                    val pct = ((raw / 5) * 5).coerceIn(5, 95)
-                    publishProgress(pct)
-                }) {
+                if (!ShardManager.start(this, verboseShardLog(), onProgress = { pct, _ -> publishProgress(pct.coerceIn(10, 70)) })) {
                     error(
                         ShardManager.lastError.ifBlank { "No public node could be reached" }
                     )
