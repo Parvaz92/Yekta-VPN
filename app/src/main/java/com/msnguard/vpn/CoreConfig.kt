@@ -449,7 +449,7 @@ object CoreConfig {
             }
         }
 
-        // ECH: per-exit handling for MASQUE.
+        // ECH: per-exit handling — Identity via ECH like FCAE (2.3.2) & 3.0.11.
         // - Custom exit (sidecar Lithuania): goes via AETHER_UPSTREAM, so both
         //   api.cloudflareclient.com and the 162.159 scan ride the Lithuania
         //   egress — no DPI on this carrier, no ECH needed. Keep ECH OFF
@@ -459,10 +459,14 @@ object CoreConfig {
         //   scan to www.cloudflare.com must NOT offer cloudflare-ech.com or
         //   every probe fails — hence the split into AETHER_API_ECH (API
         //   only) and no AETHER_ECH for the H2 session (see tls.rs
-        //   API_ECH_OPTION + lib.rs resolve_ech).
+        //   API_ECH_OPTION + lib.rs resolve_ech). MASQUE sensitive: Freedom
+        //   direct embeds cloudflare-ech.com on AETHER_API_ECH only, H2 stays OFF.
+        //   WireGuard/WoW (gool) + Masque/MIM all need the same API ECH for
+        //   identity (filtered carrier); Fcae does it with AETHER_ECH=auto on
+        //   every WARP connect — we embed the key directly (no DoH, filtered).
         // User pref aether_ech still wins when set (off/0/false → force off).
         // Exit Node case is handled below in the socksProxyForCore branch;
-        // this if is Freedom direct only.
+        // this if is Freedom direct only. DO NOT touch Masque H2/fragment logic.
         if (socksProxyForCore.isBlank()) {
             val echRaw = text("aether_ech", "").trim()
             val echLower = echRaw.lowercase()
@@ -470,10 +474,14 @@ object CoreConfig {
             var echValue: String? = null
             var useApiEch = false
             var echIsEmbedded = false
+            // isMasqueForEnv covers masque + mim; add wireguard + gool (WoW) for identity.
+            val isWarpForIdentity = isMasqueForEnv || effectiveProtocol == "wireguard" || effectiveProtocol == "gool"
             when {
-                echLower.isEmpty() && isMasqueForEnv -> {
+                echLower.isEmpty() && isWarpForIdentity -> {
                     // Freedom direct: embed key on the API-only var so
-                    // resolve_ech for H2 stays OFF (no AETHER_ECH).
+                    // resolve_ech for H2 stays OFF (no AETHER_ECH). For
+                    // WireGuard/WoW there is no H2, but same API_ECH path
+                    // is the filtered-carrier fix (FCAE 2.3.2 -> embed).
                     useEch = true
                     echValue = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
                     echIsEmbedded = true
