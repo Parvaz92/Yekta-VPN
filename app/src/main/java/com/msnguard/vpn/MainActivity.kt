@@ -6282,7 +6282,7 @@ class MainActivity : Activity() {
                 isClickable = true
                 isFocusable = true
             }
-            val iconText = when (transport) { CoreConfig.WarpTransport.MASQUE -> "í ¼í¼"; CoreConfig.WarpTransport.WIREGUARD -> "âš¡"; else -> "í ½í´" }
+            val iconText = when (transport) { CoreConfig.WarpTransport.MASQUE -> "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"; CoreConfig.WarpTransport.WIREGUARD -> "âš¡"; else -> "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½" }
             val dropdownIcon = TextView(this).apply { text = if (isCustom) iconText else "â—‹"; textSize = 18f; setPadding(0, 0, dp(10), 0) }
             val dropdownLabel = label(currentLabel, 16f, INK, TypefaceStyle.MEDIUM).apply { setPadding(0, 0, dp(6), 0) }
             val dropdownHint = label(if (isCustom) Strings.t("Custom exit active") else Strings.t("Freedom â€” direct"), 12f, MUTED)
@@ -7594,7 +7594,7 @@ class MainActivity : Activity() {
         Protocol.WIREGUARD -> 32_000L
         Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
         Protocol.WARP_IN_WARP -> 55_000L
-        else -> 45_000L
+        else -> 240_000L // SHARD: 31 slices x12s=372s worst, 5 successes at slice 19 â‰ˆ228s â€” 240 covers it; 45s killed slice 4/31
     }
 
     /**
