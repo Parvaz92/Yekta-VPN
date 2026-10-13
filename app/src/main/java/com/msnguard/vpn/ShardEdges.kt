@@ -149,10 +149,8 @@ object ShardEdges {
      * nodes it knows nothing about.
      */
     fun expand(context: Context, nodes: List<ShardNode>): List<ShardNode> {
-        // Policy now: exactly as the sub provides — no edge multiplication.
-        // The 728-path expansion is disabled; pool size == sub parsed count.
-        val seen = HashSet<String>()
-        return nodes.filter { seen.add(it.key) }
+        // Policy: exactly as the sub provides — 225 lines -> 225 nodes, no dedupe.
+        return nodes
     }
 
     /** Whether swapping this node's address for another edge is meaningful. */
