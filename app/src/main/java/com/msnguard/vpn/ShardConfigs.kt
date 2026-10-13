@@ -1,5 +1,8 @@
 package com.msnguard.vpn
 
+import com.msnguard.vpn.shard.toShardNode
+import com.msnguard.vpn.shard.toShardProfile
+
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
@@ -256,7 +259,7 @@ object ShardConfigs {
         val seen = LinkedHashSet<String>()
         val out = mutableListOf<ShardNode>()
         for (pr in profiles) {
-            val node = com.msnguard.vpn.shard.toShardNode(pr)
+            val node = pr.toShardNode()
             // keep original dedupe + drop ipv6 bracket + port check via ShardNode key
             if (node.address.contains("[") || node.address.contains("]")) continue
             if (node.port !in 1..65535) continue
@@ -267,7 +270,7 @@ object ShardConfigs {
 
     private fun parseOne(line: String): ShardNode? = try {
         val pr = com.msnguard.vpn.shard.ShardImport.parseOne(line) ?: return null
-        com.msnguard.vpn.shard.toShardNode(pr)
+        pr.toShardNode()
     } catch (_: Exception) { null }
 
     /**
@@ -307,7 +310,7 @@ object ShardConfigs {
      */
     fun outbound(context: Context, node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
         val customIp = getCustomCfIp(context)
-        val profile = com.msnguard.vpn.shard.toShardProfile(node).apply {
+        val profile = node.toShardProfile().apply {
             if (customIp.isNotEmpty()) server = customIp
         }
         val out = com.msnguard.vpn.shard.ShardOutboundBuilder.outbound(profile, tag)
@@ -329,8 +332,7 @@ object ShardConfigs {
         }
         return out
     }
-    /**
-     * Connection multiplexing for [node]
+
     /**
      * Connection multiplexing for [node], or null when it must not be used.
      *
