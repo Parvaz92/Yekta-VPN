@@ -417,6 +417,7 @@ object ShardManager {
         context: Context,
         verboseLog: Boolean = false,
         port: Int = SOCKS_PORT,
+        onProgress: ((Int, Int) -> Unit)? = null,
     ): Boolean {
         // A stop may have latched while this start waited for the lock. That stop
         // was aimed at the PREVIOUS session, not at this fresh connect — and
@@ -482,12 +483,14 @@ object ShardManager {
             val sliceWinner = race(context, candidates)
             val sliceElapsed = (System.currentTimeMillis() - before).toInt()
             tested += candidates.size
+            try { onProgress?.invoke(tested, ranked.size) } catch (_: Exception) {}
             if (sliceWinner != null) {
                 allSuccess.add(sliceWinner to sliceElapsed)
                 if (sliceElapsed < bestLatency) { bestLatency = sliceElapsed; slicedWinner = sliceWinner }
                 ConnectionLog.record("$TAG slice ${sliceIdx + 1}: found ${sliceWinner.key.take(12)} in ${sliceElapsed}ms — best so far ${bestLatency}ms; tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
             } else {
                 ConnectionLog.record("$TAG slice ${sliceIdx + 1}: no answer — tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
+            // Progress already reported via callback above
             }
             sliceIdx++
             // No early exit: scan to the end, then pick least-ping among all successes
