@@ -443,7 +443,7 @@ object ShardManager {
             val parsed = ShardSubscription.cachedCount(context)
             val cacheAge = ShardSubscription.lastCheckMillis(context).let { if (it <= 0L) "never" else "${(System.currentTimeMillis() - it) / 1000}s ago" }
             val seedFallback = if (parsed == 0 && rawLines == 0) " — seed fallback" else ""
-            ConnectionLog.record("$TAG pool ${pool.size} nodes · raw $rawLines lines · parsed $parsed · cache $cacheAge$seedFallback, edges ${ShardEdges.edges(context).size} edges")
+            ConnectionLog.record("$TAG pool ${pool.size} nodes · raw $rawLines lines · parsed $parsed · cache $cacheAge$seedFallback")
         }
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
@@ -462,7 +462,7 @@ object ShardManager {
         // "12 tried, gave up", but a live progress line per slice and a final
         // least-ping winner. Bounded by pool size, not by 3 slices, so a healthy
         // node buried at index 180 is still found — it just takes longer.
-        ConnectionLog.record("$TAG extracted ${ShardSubscription.cachedCount(context)} configs from sub — total pool ${pool.size} paths after edge expand")
+        ConnectionLog.record("$TAG extracted ${ShardSubscription.cachedCount(context)} configs from sub — pool ${pool.size} nodes (no edge expand)")
         val allSuccess = mutableListOf<Pair<ShardNode, Int>>()
         var tested = 0
         var sliceIdx = 0
@@ -490,9 +490,7 @@ object ShardManager {
                 ConnectionLog.record("$TAG slice ${sliceIdx + 1}: no answer — tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
             }
             sliceIdx++
-            // Early exit: once we have at least one success, keep scanning only if user wants exhaustive?
-            // For responsiveness, stop after 30s or 5 successes: the sub has many duplicates, first few successes already give least-ping among top tier.
-            if (allSuccess.size >= 5 && (tested >= 60 || bestLatency < 800)) break
+            // No early exit: scan to the end, then pick least-ping among all successes
         }
         if (allSuccess.isEmpty()) {
             lastError = "no node answered after $tested tried"
@@ -899,7 +897,7 @@ object ShardManager {
                 lastError = "no node answered"
                 val sample = synchronized(failureSamples) { failureSamples.toList() }
                 val hint = if (sample.isNotEmpty()) " — e.g. ${sample.joinToString("; ")}" else ""
-                ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes$hint")
+                ConnectionLog.record("$TAG slice no answer in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes$hint")
             } else {
                 ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${winnerLatency.get()}ms")
             }
