@@ -84,7 +84,12 @@ object ShardEdges {
      * edge list does not get a duplicate ([expand] dedupes on `node.key`), so the
      * subscription's address is only counted when it is not one of the edges.
      */
-    fun pathsPerNode(context: Context): Int = 1
+    fun pathsPerNode(context: Context): Int {
+        // With a custom IP the pool is one address per node — see [expand].
+        if (ShardConfigs.hasCustomIp(context)) return 1
+        val edgeList = edges(context)
+        return edgeList.size + 1
+    }
 
     /**
      * Ports Cloudflare terminates. A node on anything else is not fanned out,
@@ -149,8 +154,34 @@ object ShardEdges {
      * nodes it knows nothing about.
      */
     fun expand(context: Context, nodes: List<ShardNode>): List<ShardNode> {
-        // Policy: exactly as the sub provides — 225 lines -> 225 nodes, no dedupe.
-        return nodes
+        // A custom IP pins every outbound to one address, so the edge fan-out
+        // would only multiply near-identical candidates racing that one address.
+        // Collapse it: one entry per node, the address the user chose.
+        if (ShardConfigs.hasCustomIp(context)) {
+            val seen = HashSet<String>()
+            return nodes.filter { seen.add(it.key) }
+        }
+        val edges = edges(context)
+        val out = ArrayList<ShardNode>(nodes.size * (edges.size + 1))
+        val seen = HashSet<String>()
+        nodes.forEachIndexed { index, node ->
+            if (!isExpandable(node)) {
+                if (seen.add(node.key)) out.add(node)
+                return@forEachIndexed
+            }
+            // The subscription's own address first in the rotation, so it is always
+            // present even when it is not one of [edges].
+            val addresses = ArrayList<String>(edges.size + 1)
+            addresses.add(node.address)
+            edges.forEach { if (it != node.address) addresses.add(it) }
+            val offset = index % addresses.size
+            for (step in addresses.indices) {
+                val address = addresses[(offset + step) % addresses.size]
+                val variant = if (address == node.address) node else node.copy(address = address)
+                if (seen.add(variant.key)) out.add(variant)
+            }
+        }
+        return out
     }
 
     /** Whether swapping this node's address for another edge is meaningful. */

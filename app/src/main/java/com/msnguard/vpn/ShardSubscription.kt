@@ -61,7 +61,7 @@ object ShardSubscription {
      * opens the app daily always has the current list within a day, sparse enough
      * that opening the app ten times in an afternoon costs one request.
      */
-    private const val MIN_INTERVAL_MS = 60 * 60 * 1000L
+    private const val MIN_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
     private const val CONNECT_TIMEOUT_MS = 12_000
     private const val READ_TIMEOUT_MS = 20_000
@@ -126,15 +126,7 @@ object ShardSubscription {
         val cached = cacheFile(context).takeIf { it.exists() }?.readText().orEmpty()
         if (cached.isNotBlank()) {
             val parsed = ShardConfigs.parse(cached)
-            if (parsed.isNotEmpty()) {
-                // Repair old cache that was deduped without fm — re-store with full 225 if raw says 225
-                val rawLines = cached.lines().count { it.trim().isNotEmpty() && !it.trim().startsWith("#") }
-                if (parsed.size < rawLines && rawLines > 200) {
-                    // Old cache hit: re-parse already did, but if still short, at least log; future refresh will fix
-                    ConnectionLog.record("$TAG cache repair: $rawLines raw but ${parsed.size} parsed — will refresh")
-                }
-                return parsed
-            }
+            if (parsed.isNotEmpty()) return parsed
         }
         return seedNodes(context)
     }

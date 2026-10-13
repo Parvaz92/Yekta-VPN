@@ -256,13 +256,14 @@ object ShardConfigs {
      */
     fun parse(body: String): List<ShardNode> {
         val profiles = com.msnguard.vpn.shard.ShardImport.parseBatch(body)
+        val seen = LinkedHashSet<String>()
         val out = mutableListOf<ShardNode>()
         for (pr in profiles) {
             val node = pr.toShardNode()
+            // keep original dedupe + drop ipv6 bracket + port check via ShardNode key
             if (node.address.contains("[") || node.address.contains("]")) continue
             if (node.port !in 1..65535) continue
-            // No dedupe — exactly as the sub provides, 225 lines -> 225 candidates
-            out.add(node)
+            if (seen.add(node.key)) out.add(node)
         }
         return out
     }
