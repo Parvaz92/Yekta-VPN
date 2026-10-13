@@ -531,16 +531,11 @@ object ShardConfigs {
         val outbounds = JSONArray()
             .put(outbound(context, node, "proxy", mux = false))
             .put(
-                // DoH resolver, chained through the node. This is the fix for the
-                // "Telegram works, nothing in a browser does" symptom: the node's
-                // Cloudflare WebSocket leg silently drops UDP datagrams above ~500
-                // bytes, so a browser's EDNS0-padded DNS query and its QUIC initial
-                // both vanish into the tunnel. TCP has no such ceiling — measured
-                // end to end on the live pool, a 612-byte padded UDP query timed
-                // out while an identical lookup over DoH returned in 95 bytes, and
-                // google/amazon/github/instagram all resolved that way. See
-                // [dohOutbound] and the port-53 rule in [routingRules].
-                dohOutbound()
+                JSONObject().apply {
+                    put("tag", "dns-out")
+                    put("protocol", "dns")
+                    put("settings", JSONObject().apply { put("userLevel", 1) })
+                }
             )
             .put(
                 JSONObject().apply {
@@ -643,21 +638,15 @@ object ShardConfigs {
                     // the name — an extra failure mode and a DNS leak surface. Both
                     // were tested against the real binary; both route correctly, and
                     // this is the safer one.
-                    if (smartSplit != null) {
-                        put(
-                            "sniffing",
-                            JSONObject().apply {
-                                put("enabled", true)
-                                put("destOverride", JSONArray().put("tls").put("http").put("quic"))
-                                put("routeOnly", true)
-                                // `quic` next to tls/http: a QUIC initial carries the
-                                // SNI too, so with it the `domain:`/`geosite:` rules
-                                // below decide QUIC flows as well instead of falling
-                                // to the catch-all. Cheap — same sniff, one more
-                                // parser — and it only reads the first packet.
-                            }
-                        )
-                    }
+                    // PattNG parity: always sniff+fakedns. Plain SHARD had no sniffing before, so fake IPs were never generated.
+                    put(
+                        "sniffing",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("destOverride", JSONArray().put("tls").put("http").put("quic").put("fakedns"))
+                            put("routeOnly", smartSplit != null)
+                        }
+                    )
                 }
             )
             if (listenHost != "127.0.0.1") {
@@ -684,21 +673,16 @@ object ShardConfigs {
             // With Smart Split this rule is unnecessary: that profile ships its own
             // DNS config with the same DoH endpoint, and adding this rule beside it
             // would only create a second resolver to reason about.
+            // PattNG parity: no DoH. Plain SHARD uses fakedns + dns-out like PattNG's configureLocalDns.
+            // Inbound sniffing carries "fakedns" so Xray synthesizes a fake IP per query and the routing rules resolve via dns-out.
             if (smartSplit == null) {
+                put("fakedns", JSONArray().put(JSONObject().apply {
+                    put("ipPool", "198.18.0.0/16")
+                    put("poolSize", 1024)
+                }))
                 put("dns", JSONObject().apply {
                     put("queryStrategy", "UseIP")
-                    put("useSystemHosts", true)
-                    put("serveStale", true)
-                    put(
-                        "servers",
-                        JSONArray().put(
-                            JSONObject().apply {
-                                put("tag", DOH_OUTBOUND_TAG)
-                                put("address", "https://cloudflare-dns.com/dns-query")
-                                put("timeoutMs", 12000)
-                            }
-                        )
-                    )
+                    put("servers", JSONArray().put(JSONObject().apply { put("address", "fakedns") }))
                 })
                 put(
                     "routing",
@@ -708,7 +692,7 @@ object ShardConfigs {
                             JSONObject().apply {
                                 put("type", "field")
                                 put("port", 53)
-                                put("outboundTag", DOH_OUTBOUND_TAG)
+                                put("outboundTag", "dns-out")
                             }
                         )
                     )
