@@ -401,6 +401,117 @@ object IdentityProvisioner {
     }
 
     /**
+     * Warp Setting — Identity Vault: direct provision (Quantum ECH).
+     *
+     * POSTs the same registration body as [provisionThroughShard] directly to
+     * [API_REGISTER_URL] without a proxy. On a 2xx response the body is handed
+     * to [saveIdentity] so the core finds the file on the next connect.
+     *
+     * Must be called on a worker thread — it blocks on the network.
+     * Logs to both [Log] and [ConnectionLog] so the vault terminal can surface
+     * the result.
+     *
+     * @return true when an identity was saved.
+     */
+    fun provisionDirect(context: Context, protocol: String): Boolean {
+        Log.i(TAG, "Identity Vault: provisioning $protocol directly")
+        ConnectionLog.record("Identity Vault: provisioning $protocol directly")
+        val body = JSONObject().apply {
+            put("install_id", "")
+            put("fcm_token", "")
+            put("tos", nowIso())
+            put("model", android.os.Build.MODEL)
+            put("serial_number", android.os.Build.SERIAL ?: "unknown")
+            put("locale", java.util.Locale.getDefault().toString())
+            put("key_type", "curve25519")
+            put("tunnel_type", "wireguard")
+        }
+        return try {
+            val connection = URL(API_REGISTER_URL).openConnection() as HttpURLConnection
+            connection.connectTimeout = 20_000
+            connection.readTimeout = 20_000
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("CF-Client-Version", CLIENT_VERSION)
+            connection.doOutput = true
+            connection.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                Log.w(TAG, "Identity Vault: direct registration for $protocol returned HTTP $code")
+                ConnectionLog.record("Identity Vault: direct registration for $protocol returned HTTP $code")
+                return false
+            }
+            val response = connection.inputStream.bufferedReader().readText()
+            val parsed = JSONObject(response)
+            val file = saveIdentity(context, protocol, parsed)
+            val ok = file != null
+            if (ok) {
+                Log.i(TAG, "Identity Vault: $protocol provisioned directly -> ${file!!.name}")
+                ConnectionLog.record("Identity Vault: $protocol provisioned directly")
+            } else {
+                Log.w(TAG, "Identity Vault: direct registration for $protocol saved no identity")
+                ConnectionLog.record("Identity Vault: direct registration for $protocol saved no identity")
+            }
+            ok
+        } catch (e: Exception) {
+            Log.w(TAG, "Identity Vault: direct provision for $protocol failed: ${e.message}")
+            ConnectionLog.record("Identity Vault: direct provision for $protocol failed — ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Warp Setting — Identity Vault: SHARD-backed provision.
+     *
+     * Wrapper around [ensureShardListener] + [provisionThroughShard] +
+     * [releaseShardListener]. Starts a SHARD listener when none is live,
+     * registers through it, then tears the session down only when this call
+     * started it — an existing user session is never released.
+     *
+     * Must be called on a worker thread — [ensureShardListener] blocks up to
+     * [START_BUDGET_MS] while xray races.
+     *
+     * @return true when an identity was saved.
+     */
+    fun provisionViaShard(context: Context, protocol: String): Boolean {
+        Log.i(TAG, "Identity Vault: provisioning $protocol via SHARD")
+        ConnectionLog.record("Identity Vault: provisioning $protocol via SHARD")
+        val wasRunning = ShardManager.isRunning
+        val listener = ensureShardListener(context)
+        if (listener == null) {
+            Log.w(TAG, "Identity Vault: SHARD listener not available for $protocol")
+            ConnectionLog.record("Identity Vault: SHARD listener not available for $protocol")
+            return false
+        }
+        val port = listener.substringAfterLast(":").toIntOrNull() ?: ShardManager.liveSocksPort
+        var success = false
+        try {
+            val file = provisionThroughShard(context, protocol, port)
+            success = file != null
+            if (success) {
+                Log.i(TAG, "Identity Vault: $protocol provisioned via SHARD -> ${file!!.name}")
+                ConnectionLog.record("Identity Vault: $protocol provisioned via SHARD")
+            } else {
+                Log.w(TAG, "Identity Vault: $protocol via SHARD returned no identity")
+                ConnectionLog.record("Identity Vault: $protocol via SHARD failed")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Identity Vault: provision via SHARD for $protocol failed: ${e.message}")
+            ConnectionLog.record("Identity Vault: provision via SHARD for $protocol failed — ${e.message}")
+            success = false
+        } finally {
+            val startedOurselves = !wasRunning
+            try {
+                releaseShardListener(startedOurselves)
+            } catch (e: Exception) {
+                Log.w(TAG, "Identity Vault: release SHARD after $protocol failed: ${e.message}")
+            }
+        }
+        return success
+    }
+
+    /**
      * Write the identity in the TOML shape [config] expects.
      *
      * The core's [PersistedIdentity] is a flat table, not the nested `[peer]` /
