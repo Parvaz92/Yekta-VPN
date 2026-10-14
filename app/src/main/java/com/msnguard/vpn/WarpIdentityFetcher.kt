@@ -4,23 +4,25 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
  * Manual WARP identity fetcher for Warp Setting — ECH path only.
  *
- * Runs the bundled engine (libaether.so) as a side process on
+ * Runs the bundled engine (libaether.so via [NativeCore]) on
  * 127.0.0.1:1839 so the registration takes the same ECH-camouflaged
  * route a normal WARP connect would. This fixes filtered carriers
  * where a plain HttpURLConnection POST to api.cloudflareclient.com
  * times out, while the engine's BoringSSL + ECH stack reaches it.
  *
+ * Implementation is NativeCore-based, not ProcessBuilder: libaether.so
+ * is a cdylib (JNI), not a standalone executable, so exec fails.
+ * The engine is started as a job (AETHER_* env), polled for the
+ * identity files (aether.toml etc), then stopped. Mirrors the main
+ * WARP connect's ECH path (AETHER_API_ECH embedded, no DoH).
+ *
  * Scope is strictly Warp Setting: it never starts the main tunnel,
  * never touches SHARD/Tor/Psiphon/WireGuard/WoW/Masque connect flow,
- * and only writes the identity files (aether.toml etc) the core
- * later loads. See sibling WarpKeyFetcher pattern for the file
- * layout and the backup/restore that keeps a previous identity safe
- * on failure/timeout/cancel.
+ * and only writes the identity files the core later loads.
  */
 object WarpIdentityFetcher {
 
@@ -36,25 +38,16 @@ object WarpIdentityFetcher {
     private const val SECONDARY_MASQUE = "aether-masque-secondary.toml"
     private val ALL_FILES = listOf(PRIMARY_WG, SECONDARY_WG, PRIMARY_MASQUE, SECONDARY_MASQUE)
 
-    private const val ECH_DOMAIN = "cloudflare-ech.com"
-    private const val ECH_DNS = "https://1.1.1.1/dns-query"
-
     fun canRun(): Boolean = !NativeCore.isRunning()
 
     fun fetch(context: Context, protocol: String): Boolean {
-        val dir = context.filesDir
-        val bin = File(context.applicationInfo.nativeLibraryDir, "libaether.so")
-        if (!bin.exists()) {
-            Log.e(TAG, "engine binary missing: ${bin.absolutePath}")
-            ConnectionLog.record("Warp Identity: engine binary missing")
-            return false
-        }
         if (NativeCore.isRunning()) {
             Log.w(TAG, "tunnel is running — disconnect before fetching identity")
             ConnectionLog.record("Warp Identity: tunnel is running — disconnect first")
             return false
         }
 
+        val dir = context.filesDir
         val norm = protocol.lowercase()
         val masque = norm in setOf("masque", "mim", "masque-in-masque", "masque over masque")
         val targets = identityFiles(dir, norm)
@@ -79,28 +72,26 @@ object WarpIdentityFetcher {
             moved += file
         }
 
-        var process: Process? = null
         var ok = false
         try {
-            val args = argsFor(norm)
-            val cmd = buildList {
-                add(bin.absolutePath)
-                addAll(args)
-            }
             val env = buildEnv(context, norm)
-            Log.i(TAG, "requesting fresh $protocol identity via ECH (bind $BIND) args=$args")
+            Log.i(TAG, "requesting fresh $protocol identity via ECH (bind $BIND)")
             ConnectionLog.record("Warp Identity: requesting $protocol via ECH")
 
-            val builder = ProcessBuilder(cmd).directory(dir).redirectErrorStream(true)
-            builder.environment().apply {
-                putAll(env)
-                put("AETHER_LOG_LEVEL", "info")
-                put("HOME", dir.absolutePath)
-                put("TMPDIR", dir.absolutePath)
+            CoreConfig.applyEnv(env)
+            val startRc = try {
+                NativeCore.startProxy("{}")
+            } catch (e: Exception) {
+                Log.w(TAG, "NativeCore start failed: ${e.message}")
+                -1
             }
-            val proc = builder.start()
-            process = proc
-            drain(proc)
+            if (startRc != 0 && !NativeCore.isRunning()) {
+                val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                Log.w(TAG, "engine did not start: $err")
+                ConnectionLog.record("Warp Identity: engine did not start${if (err.isNotBlank()) " — $err" else ""}")
+                restore(moved)
+                return false
+            }
 
             val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
             while (true) {
@@ -108,8 +99,16 @@ object WarpIdentityFetcher {
                     ok = true
                     break
                 }
-                if (!proc.isAlive) {
+                if (!NativeCore.isRunning()) {
+                    // Job finished (success or failure) — check files one last time.
                     ok = targets.all { complete(it, masque) }
+                    if (!ok) {
+                        val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                        if (err.isNotBlank()) {
+                            Log.w(TAG, "engine finished without identity: $err")
+                            ConnectionLog.record("Warp Identity: $protocol — $err")
+                        }
+                    }
                     break
                 }
                 if (SystemClock.elapsedRealtime() >= deadline) {
@@ -123,9 +122,12 @@ object WarpIdentityFetcher {
             Log.w(TAG, "Warp identity fetcher crashed: ${e.message}")
             ConnectionLog.record("Warp Identity: crashed — ${e.message}")
         } finally {
-            process?.let { stop(it) }
+            try { NativeCore.stop() } catch (_: Exception) {}
+            // Small grace for file flush
+            try { Thread.sleep(300) } catch (_: InterruptedException) {}
             if (ok) {
                 moved.forEach { backupOf(it).delete() }
+                // Also clean any stale bak that recover would have handled
                 Log.i(TAG, "new $protocol identity saved via ECH")
                 ConnectionLog.record("Warp Identity: $protocol saved")
             } else {
@@ -137,17 +139,6 @@ object WarpIdentityFetcher {
         return ok
     }
 
-    private fun argsFor(norm: String): List<String> {
-        val protoFlag = when (norm) {
-            "masque" -> "--masque"
-            "mim", "masque-in-masque", "masque over masque" -> "--mim"
-            "wireguard", "wg" -> "--wg"
-            "gool", "wow", "warp-in-warp" -> "--gool-classic"
-            else -> "--wg"
-        }
-        return listOf(protoFlag, "--turbo", "--no-quick-reconnect", "--ech", "auto", "--bind", BIND)
-    }
-
     private fun buildEnv(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) {
             "masque", "mim", "masque-in-masque", "masque over masque" -> "masque"
@@ -156,22 +147,26 @@ object WarpIdentityFetcher {
         }
         val base = CoreConfig.env(context, protocol = protoForEnv)
         val out = LinkedHashMap(base)
-        // Force ECH the same way every session would when the switch is on —
-        // single DoH resolver, embedded domain, auto key. This is what makes
-        // the registration survive the carrier's DPI.
-        out["AETHER_ECH"] = "auto"
-        out["AETHER_ECH_DOMAIN"] = ECH_DOMAIN
-        out["AETHER_ECH_DNS"] = ECH_DNS
+        // Quantum ECH: force Freedom-like ECH regardless of current exit mode.
+        // Use embedded AETHER_API_ECH (no DoH to 1.1.1.1) — same key main
+        // connect embeds for Freedom direct, so filtered carriers need no
+        // extra round-trip. Remove AETHER_ECH/AETHER_UPSTREAM like Freedom.
+        out["AETHER_API_ECH"] = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+        out.remove("AETHER_ECH")
+        out.remove("AETHER_ECH_DNS")
+        out.remove("AETHER_ECH_DOMAIN")
+        out.remove("AETHER_UPSTREAM")
+        out["AETHER_SOCKS"] = BIND
         out["AETHER_SCAN"] = "turbo"
         out["AETHER_QUICK_RECONNECT"] = "0"
-        out.remove("AETHER_UPSTREAM")
-        // Consumer WARP only: a Zero Trust team would make the file land under
-        // aether-team-*.toml which this fetcher does not watch.
+        out["AETHER_LOG_LEVEL"] = "info"
+        // Consumer WARP only
         out.remove("AETHER_TEAM")
         out.remove("AETHER_ACCESS_CLIENT_ID")
         out.remove("AETHER_ACCESS_CLIENT_SECRET")
         out.remove("AETHER_ACCESS_TOKEN")
         out.remove("AETHER_ACCESS_EMAIL")
+        out.remove("AETHER_GATEWAY")
         return out
     }
 
@@ -215,21 +210,5 @@ object WarpIdentityFetcher {
         val m = Regex("""(?m)^\s*${Regex.escape(key)}\s*=\s*(.+)$""").find(text) ?: return false
         val v = m.groupValues[1].trim()
         return v.isNotEmpty() && v != "\"\"" && v != "''"
-    }
-
-    private fun drain(process: Process) {
-        Thread({
-            runCatching { process.inputStream.bufferedReader().useLines { lines -> lines.forEach { Log.d(TAG, it) } } }
-        }, "warp-identity-drain").apply { isDaemon = true }.start()
-    }
-
-    private fun stop(process: Process) {
-        runCatching {
-            process.destroy()
-            if (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
-                process.destroyForcibly()
-                process.waitFor(1_000, TimeUnit.MILLISECONDS)
-            }
-        }
     }
 }
