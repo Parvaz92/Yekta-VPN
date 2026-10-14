@@ -141,7 +141,8 @@ object WarpIdentityFetcher {
 
     private fun buildEnv(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) {
-            "masque", "mim", "masque-in-masque", "masque over masque" -> "masque"
+            "mim", "masque-in-masque", "masque over masque" -> "mim"
+            "masque" -> "masque"
             "gool", "wow", "warp-in-warp" -> "gool"
             else -> "wireguard"
         }
