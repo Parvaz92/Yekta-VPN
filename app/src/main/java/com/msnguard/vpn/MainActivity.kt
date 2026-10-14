@@ -6366,7 +6366,8 @@ class MainActivity : Activity() {
             currentExitTransport = warpTransportOfRail(railSelected)
             val t = currentExitTransport
             val tag = exitLabelFor(t)
-            val isCustom = CoreConfig.warpExitIsCustom(this@MainActivity, t)
+            val mode = CoreConfig.warpExitMode(this@MainActivity, t)
+            val isCustom = mode == CoreConfig.WARP_EXIT_MODE_CUSTOM
             val raw = CoreConfig.warpExitCustom(this@MainActivity, t)
             exitField.setText(raw)
             exitField.hint = "vless://uuid@host:port?security=reality#name"
@@ -6472,7 +6473,7 @@ class MainActivity : Activity() {
             addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF3AD0FF.toInt()) })
         })
         vaultHeader.addView(label("\u25B8 " + Strings.t("Identity Vault"), 11f, connected, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
-        vaultHeader.addView(label("ECH \u00B7 SHARD", 10f, MUTED).apply { gravity = Gravity.END }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
+        vaultHeader.addView(label("ECH  \u00B7  SHARD", 10f, MUTED).apply { gravity = Gravity.END; setPadding(dp(6), 0, 0, 0) }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
         vaultBox.addView(vaultHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         vaultBox.addView(label(Strings.t("Pick method, pick strategy, then Start. Green means identity stored (persists per method)."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
 
@@ -6556,7 +6557,7 @@ class MainActivity : Activity() {
         lateinit var shardBtn: TextView
         fun refreshMethodRow() {
             if (vaultMethod == "ech") {
-                echBtn.background = roundedBackground(connectedContainer, 12, connected); echBtn.setTextColor(connected)
+                echBtn.background = roundedBackground(selectedSurface, 12, palette.violet); echBtn.setTextColor(palette.violet)
                 shardBtn.background = roundedBackground(SURFACE, 12, DIVIDER); shardBtn.setTextColor(MUTED)
             } else {
                 shardBtn.background = roundedBackground(selectedSurface, 12, palette.violet); shardBtn.setTextColor(palette.violet)
@@ -6588,7 +6589,8 @@ class MainActivity : Activity() {
         startBtn = createSettingsButton(Strings.t("START \u2014 GET IDENTITY"), backgroundOverride = primary, textColorOverride = primaryContainer) {
             if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
             val proto = vaultProtocolSelected(vaultSelected)
-            val methodName = if (vaultMethod == "ech") Strings.t("Quantum ECH") else Strings.t("Shard Relay")
+            val chosenMethod = vaultMethod
+            val methodName = if (chosenMethod == "ech") Strings.t("Quantum ECH") else Strings.t("Shard Relay")
             if (hasVaultIdentity(proto)) {
                 toastShort(proto + " \u2713 " + Strings.t("Key received"))
                 term.text = proto + " \u2014 " + Strings.t("Key received") + " (" + methodName + ")"
@@ -6602,7 +6604,7 @@ class MainActivity : Activity() {
             val ctx = this@MainActivity
             Thread {
                 val ok = try {
-                    if (vaultMethod == "shard") IdentityProvisioner.provisionViaShard(ctx, proto)
+                    if (chosenMethod == "shard") IdentityProvisioner.provisionViaShard(ctx, proto)
                     else IdentityProvisioner.provisionDirect(ctx, proto)
                 } catch (_: Exception) { false }
                 runOnUiThread {
