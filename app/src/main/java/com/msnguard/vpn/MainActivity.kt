@@ -6605,7 +6605,7 @@ class MainActivity : Activity() {
             Thread {
                 val ok = try {
                     if (chosenMethod == "shard") IdentityProvisioner.provisionViaShard(ctx, proto)
-                    else IdentityProvisioner.provisionDirect(ctx, proto)
+                    else WarpIdentityFetcher.fetch(ctx, proto)
                 } catch (_: Exception) { false }
                 runOnUiThread {
                     startBtn.isEnabled = true
