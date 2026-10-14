@@ -388,14 +388,24 @@ object IdentityProvisioner {
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = connection.responseCode
             if (code !in 200..299) {
-                Log.w(TAG, "registration through SHARD returned HTTP $code")
+                val errBody = runCatching { connection.errorStream?.bufferedReader()?.readText()?.take(400) }.getOrNull()
+                Log.w(TAG, "registration through SHARD returned HTTP $code${if (!errBody.isNullOrBlank()) " — ${errBody.take(200)}" else ""}")
+                ConnectionLog.record("Identity Vault: $protocol via Shard — HTTP $code${if (!errBody.isNullOrBlank()) " — ${errBody.take(120)}" else ""}")
                 return null
             }
             val response = connection.inputStream.bufferedReader().readText()
+            val snippet = response.take(300)
+            ConnectionLog.record("Identity Vault: $protocol via Shard — HTTP ${code} — ${snippet.take(120)}")
             val parsed = JSONObject(response)
-            saveIdentity(context, protocol, parsed)
+            val saved = saveIdentity(context, protocol, parsed)
+            if (saved == null) {
+                Log.w(TAG, "registration through SHARD: saveIdentity returned null for $protocol — keys: ${parsed.keys().asSequence().joinToString()} — body ${response.take(300)}")
+                ConnectionLog.record("Identity Vault: $protocol via Shard — parse/save null — keys ${parsed.keys().asSequence().joinToString().take(80)}")
+            }
+            saved
         } catch (e: Exception) {
             Log.w(TAG, "registration through SHARD failed: ${e.message}")
+            ConnectionLog.record("Identity Vault: $protocol via Shard — exception ${e.message?.take(140)}")
             null
         }
     }
