@@ -143,7 +143,65 @@ object WarpIdentityFetcher {
     }
 
     /**
-     * Warp Setting — Shard path (2.1.0 mechanism, isolated).
+     * Warp Setting — bare identity (no ECH, no Shard), for users outside Iran where
+     * api.cloudflareclient.com is openly reachable but 1.1.1.1 DoH is not.
+     * Uses the engine with a plain route (no ECH material, no upstream).
+     * Isolated to Warp Setting only.
+     */
+    fun fetchDirectPlain(context: Context, protocol: String): Boolean {
+        if (NativeCore.isRunning()) {
+            android.util.Log.w(TAG, "tunnel is running — disconnect before fetching identity")
+            ConnectionLog.record("Warp Identity: tunnel is running — disconnect first")
+            return false
+        }
+        val dir = context.filesDir
+        val norm = protocol.lowercase()
+        val masque = norm in setOf("masque", "mim", "masque-in-masque", "masque over masque")
+        val targets = identityFiles(dir, norm)
+        if (targets.isEmpty()) return false
+        recover(dir)
+        val moved = mutableListOf<java.io.File>()
+        for (file in targets) { if (!file.exists()) continue; val bak = backupOf(file); bak.delete(); if (!file.renameTo(bak)) { android.util.Log.e(TAG, "could not set " + file.name + " aside"); ConnectionLog.record("Warp Identity: could not set " + file.name + " aside"); restore(moved); return false }; moved += file }
+        var ok = false
+        try {
+            val env = buildEnvPlain(context, norm)
+            android.util.Log.i(TAG, "requesting fresh " + protocol + " identity via Native Link (bind " + BIND + ")")
+            ConnectionLog.record("Warp Identity: requesting " + protocol + " via Native Link…")
+            ConnectionLog.record("Warp Identity: registering " + protocol + "…")
+            CoreConfig.applyEnv(env)
+            val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { android.util.Log.w(TAG, "NativeCore start failed: " + e.message); -1 }
+            if (startRc != 0 && !NativeCore.isRunning()) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; android.util.Log.w(TAG, "engine did not start: " + err); ConnectionLog.record("Warp Identity: engine did not start" + (if (err.isNotBlank()) " — " + err else "")); restore(moved); return false }
+            val deadline = android.os.SystemClock.elapsedRealtime() + TIMEOUT_MS
+            while (true) {
+                if (targets.all { complete(it, masque) }) { ok = true; break }
+                if (!NativeCore.isRunning()) { ok = targets.all { complete(it, masque) }; if (!ok) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; if (err.isNotBlank()) { android.util.Log.w(TAG, "engine finished without identity: " + err); ConnectionLog.record("Warp Identity: " + protocol + " — " + err) } }; break }
+                if (android.os.SystemClock.elapsedRealtime() >= deadline) { android.util.Log.w(TAG, "Warp identity request timed out after " + TIMEOUT_MS + "ms"); ConnectionLog.record("Warp Identity: timed out after " + TIMEOUT_MS / 1000 + "s"); break }
+                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+            }
+        } catch (e: Exception) { android.util.Log.w(TAG, "Warp identity fetcher crashed: " + e.message); ConnectionLog.record("Warp Identity: crashed — " + e.message) }
+        finally {
+            try { NativeCore.stop() } catch (_: Exception) {}
+            try { Thread.sleep(300) } catch (_: InterruptedException) {}
+            if (ok) { moved.forEach { backupOf(it).delete() }; android.util.Log.i(TAG, "new " + protocol + " identity saved via Native Link"); ConnectionLog.record("Warp Identity: " + protocol + " saved") }
+            else { restore(moved); android.util.Log.w(TAG, protocol + " Warp identity failed — previous identity kept"); ConnectionLog.record("Warp Identity: " + protocol + " failed — previous kept") }
+        }
+        return ok
+    }
+
+    private fun buildEnvPlain(context: Context, norm: String): Map<String, String> {
+        val protoForEnv = when (norm) { "mim", "masque-in-masque", "masque over masque" -> "mim"; "masque" -> "masque"; "gool", "wow", "warp-in-warp" -> "gool"; else -> "wireguard" }
+        val base = CoreConfig.env(context, protocol = protoForEnv)
+        val out = LinkedHashMap(base)
+        // Plain route: no ECH at all, no upstream — raw carrier to api.cloudflareclient.com
+        out.remove("AETHER_API_ECH"); out.remove("AETHER_ECH"); out.remove("AETHER_ECH_DNS"); out.remove("AETHER_ECH_DOMAIN"); out.remove("AETHER_UPSTREAM")
+        out["AETHER_SOCKS"] = BIND; out["AETHER_SCAN"] = "turbo"; out["AETHER_QUICK_RECONNECT"] = "0"; out["AETHER_LOG_LEVEL"] = "info"
+        out.remove("AETHER_TEAM"); out.remove("AETHER_ACCESS_CLIENT_ID"); out.remove("AETHER_ACCESS_CLIENT_SECRET"); out.remove("AETHER_ACCESS_TOKEN"); out.remove("AETHER_ACCESS_EMAIL"); out.remove("AETHER_GATEWAY")
+        return out
+    }
+
+    /**
+     * Warp Setting — Shard path (2.1.0 mechanism, isolated) with cache-first.
+     * Tries the health-ranked top slice quickly; if none answers, falls back to full sweep (ensureShardListener).
      * Bring SHARD up, set AETHER_UPSTREAM=socks5://127.0.0.1:port, run the engine so it registers
      * through the listener (same as main connect), wait for identity files, then tear down SHARD.
      * Scope is Warp Setting only — core logic itself is untouched.
@@ -176,8 +234,17 @@ object WarpIdentityFetcher {
             }
             moved += file
         }
-        // Bring SHARD up first — same wait as IdentityProvisioner.ensureShardListener.
+        // Warp Setting cache-first: try health-ranked top slice quickly; if none answers, full sweep.
         val wasRunning = ShardManager.isRunning
+        if (!wasRunning) {
+            ConnectionLog.record("Warp Identity: trying cached SHARD nodes first…")
+            val fastStarted = tryFastShard(context)
+            if (fastStarted != null) {
+                ConnectionLog.record("Warp Identity: cached SHARD ready — registering " + protocol + "…")
+                return finishShardProvision(context, norm, protocol, masque, dir, targets, moved, fastStarted, wasRunning)
+            }
+            ConnectionLog.record("Warp Identity: cached SHARD did not answer — full scan…")
+        }
         ConnectionLog.record("Warp Identity: bringing SHARD up…")
         var listener: String? = IdentityProvisioner.ensureShardListener(context)
         if (listener == null) {
@@ -249,6 +316,141 @@ object WarpIdentityFetcher {
         }
         return ok
     }
+
+    /** Cache-first: race only the health-ranked top slice (<=24 nodes, ~12s). Returns upstream if winner found. */
+    private fun tryFastShard(context: Context): String? {
+        val pool = ShardSubscription.nodes(context)
+        if (pool.isEmpty()) return null
+        val ranked = ShardHealth.rank(context, pool)
+        if (ranked.isEmpty()) return null
+        val slice = ranked.take(24)
+        if (slice.isEmpty()) return null
+        // Run a single-slice race inline (probe only) then lift the winner to a live tunnel.
+        // We reuse ShardConfigs.probeConfig + manual live launch on SOCKS_PORT, but keep it Warp Setting local:
+        // start a one-slice probe on a temp port block, pick winner, then start live tunnel on SOCKS_PORT.
+        val probeBase = 21160
+        val anytlsBase = 21260
+        val xray = slice.filter { it.protocol != "anytls" }
+        val anytls = slice.filter { it.protocol == "anytls" }
+        var probeProc: Process? = null
+        var anytlsLaunched = false
+        try {
+            if (xray.isNotEmpty()) {
+                val cfg = ShardConfigs.probeConfig(context, xray, probeBase)
+                val f = ShardConfigs.writeConfig(context, "warp-fast-probe.json", cfg)
+                val bin = java.io.File(context.applicationInfo.nativeLibraryDir, "libxray.so")
+                if (!bin.exists()) return null
+                try {
+                    val pb = ProcessBuilder(bin.absolutePath, "run", "-c", f.absolutePath)
+                    pb.directory(f.parentFile); pb.redirectErrorStream(true)
+                    pb.environment()["HOME"] = context.filesDir.absolutePath
+                    pb.environment()["XRAY_LOCATION_ASSET"] = f.parent
+                    probeProc = pb.start()
+                    Thread({ try { java.io.BufferedReader(java.io.InputStreamReader(probeProc.inputStream)).forEachLine{} } catch(_: Exception){} }, "warp-fast-probe-log").apply{ isDaemon = true }.start()
+                } catch(_: Exception){ return null }
+            }
+            if (anytls.isNotEmpty()) {
+                val map = anytls.mapIndexed { i, n -> n to (anytlsBase + i) }.toMap()
+                anytlsLaunched = try { AnyTlsManager.launchProbe(context, anytls, map) } catch(_: Exception){ false }
+                if (!anytlsLaunched && probeProc == null) return null
+            }
+            val upProbe = if (probeProc != null) awaitPort(probeBase, 4000) else true
+            if (!upProbe) return null
+            if (anytlsLaunched && !awaitPort(anytlsBase, 4000)) return null
+            ConnectionLog.record("Warp Identity: fast racing " + slice.size + " nd — budget 12000ms, per-nd 5000ms")
+            val portOf = HashMap<ShardNode, Int>()
+            slice.forEachIndexed { idx, node -> portOf[node] = if (node.protocol == "anytls") anytlsBase + anytls.indexOf(node) else probeBase + xray.indexOf(node) }
+            val winnerRef = java.util.concurrent.atomic.AtomicReference<ShardNode?>(null)
+            val latch = java.util.concurrent.CountDownLatch(1)
+            val pool2 = java.util.concurrent.Executors.newFixedThreadPool(slice.size.coerceAtMost(24))
+            slice.forEach { node ->
+                pool2.execute {
+                    if (winnerRef.get() != null) return@execute
+                    val s = System.currentTimeMillis()
+                    val (ok, _) = ShardProbe.checkDetailed(portOf.getValue(node), 5000)
+                    val elapsed = (System.currentTimeMillis() - s).toInt()
+                    if (ok) { ShardHealth.recordSuccess(context, node, elapsed); if (winnerRef.compareAndSet(null, node)) latch.countDown() }
+                    else ShardHealth.recordFailure(context, node)
+                }
+            }
+            latch.await(12000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            pool2.shutdownNow()
+            val winner = winnerRef.get() ?: return null
+            ConnectionLog.record("Warp Identity: fast winner " + LogRedactor.nodeTag(winner.key))
+            // Bring winner up as live tunnel on SOCKS_PORT
+            if (winner.protocol == "anytls") {
+                if (!AnyTlsManager.launchLive(context, winner, "127.0.0.1", ShardManager.SOCKS_PORT, false)) return null
+            } else {
+                val cfg = ShardConfigs.tunnelConfig(context, winner, "127.0.0.1", ShardManager.SOCKS_PORT, "warning")
+                val f = ShardConfigs.writeConfig(context, "tunnel.json", cfg)
+                val bin = java.io.File(context.applicationInfo.nativeLibraryDir, "libxray.so")
+                if (!bin.exists()) return null
+                try {
+                    val pb = ProcessBuilder(bin.absolutePath, "run", "-c", f.absolutePath)
+                    pb.directory(f.parentFile); pb.redirectErrorStream(true)
+                    pb.environment()["HOME"] = context.filesDir.absolutePath
+                    pb.environment()["XRAY_LOCATION_ASSET"] = f.parent
+                    val proc = pb.start()
+                    Thread({ try{ java.io.BufferedReader(java.io.InputStreamReader(proc.inputStream)).forEachLine{} }catch(_: Exception){} }, "warp-fast-live-log").apply{ isDaemon=true }.start()
+                    val dl = System.currentTimeMillis()+6000
+                    var up = false
+                    while (System.currentTimeMillis()<dl) {
+                        if (portAccepts(ShardManager.SOCKS_PORT, 400)) { up = true; break }
+                        if (!proc.isAlive) break
+                        Thread.sleep(120)
+                    }
+                    if (!up) { try{ proc.destroy() }catch(_:Exception){}; return null }
+                    // Keep proc alive: patch ShardManager internal state so stop()/isRunning behave
+                    // Use reflection to set private process/activeNode/running/liveEngine — isolated, Warp Setting only.
+                    try {
+                        val m = ShardManager::class.java
+                        m.getDeclaredField("process").apply{ isAccessible = true }.set(ShardManager, proc)
+                        m.getDeclaredField("running").apply{ isAccessible = true }.let{ fld ->
+                            val ab = fld.get(ShardManager) as java.util.concurrent.atomic.AtomicBoolean
+                            ab.set(true)
+                        }
+                        m.getDeclaredField("activeNode").apply{ isAccessible = true }.set(ShardManager, winner)
+                        // liveEngine defaults to XRAY (null treated as xray)
+                    } catch(_: Exception) {}
+                } catch(_: Exception){ return null }
+            }
+            return "127.0.0.1:" + ShardManager.SOCKS_PORT
+        } finally {
+            try { probeProc?.destroy() } catch(_: Exception){}
+            if (anytlsLaunched) try { AnyTlsManager.killProbe() } catch(_: Exception){}
+        }
+    }
+
+    private fun finishShardProvision(context: Context, norm: String, protocol: String, masque: Boolean, dir: java.io.File, targets: List<java.io.File>, moved: MutableList<java.io.File>, upstreamRaw: String, wasRunning: Boolean): Boolean {
+        val upstream = when { upstreamRaw.startsWith("socks5://", ignoreCase = true) -> upstreamRaw; upstreamRaw.contains("://") -> upstreamRaw; else -> "socks5://" + upstreamRaw }
+        var ok = false
+        try {
+            val env = buildEnvForShard(context, norm, upstream)
+            android.util.Log.i(TAG, "requesting fresh " + protocol + " identity via SHARD (" + upstream + ")")
+            ConnectionLog.record("Warp Identity: SHARD ready — registering " + protocol + "…")
+            CoreConfig.applyEnv(env)
+            val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { android.util.Log.w(TAG, "NativeCore start failed: " + e.message); -1 }
+            if (startRc != 0 && !NativeCore.isRunning()) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; android.util.Log.w(TAG, "engine did not start: " + err); ConnectionLog.record("Warp Identity: engine did not start" + (if (err.isNotBlank()) " — " + err else "")); restore(moved); return false }
+            val deadline = android.os.SystemClock.elapsedRealtime() + TIMEOUT_MS
+            while (true) {
+                if (targets.all { complete(it, masque) }) { ok = true; break }
+                if (!NativeCore.isRunning()) { ok = targets.all { complete(it, masque) }; if (!ok) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; if (err.isNotBlank()) { android.util.Log.w(TAG, "engine finished without identity: " + err); ConnectionLog.record("Warp Identity: " + protocol + " — " + err) } }; break }
+                if (android.os.SystemClock.elapsedRealtime() >= deadline) { android.util.Log.w(TAG, "Warp identity request timed out after " + TIMEOUT_MS + "ms"); ConnectionLog.record("Warp Identity: timed out after " + TIMEOUT_MS / 1000 + "s"); break }
+                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+            }
+        } catch (e: Exception) { android.util.Log.w(TAG, "Warp identity fetcher crashed: " + e.message); ConnectionLog.record("Warp Identity: crashed — " + e.message) }
+        finally {
+            try { NativeCore.stop() } catch (_: Exception) {}
+            try { Thread.sleep(300) } catch (_: InterruptedException) {}
+            if (!wasRunning) try { IdentityProvisioner.releaseShardListener(startedOurselves = true) } catch (_: Exception) {}
+            if (ok) { moved.forEach { backupOf(it).delete() }; android.util.Log.i(TAG, "new " + protocol + " identity saved via SHARD"); ConnectionLog.record("Warp Identity: " + protocol + " saved via Shard") }
+            else { restore(moved); android.util.Log.w(TAG, protocol + " Warp identity via Shard failed — previous kept"); ConnectionLog.record("Warp Identity: " + protocol + " via Shard failed — previous kept") }
+        }
+        return ok
+    }
+
+    private fun awaitPort(port: Int, budgetMs: Long): Boolean { val dl = System.currentTimeMillis()+budgetMs; while(System.currentTimeMillis()<dl){ if(portAccepts(port, 300)) return true; Thread.sleep(100)}; return false }
+    private fun portAccepts(port: Int, timeoutMs: Int): Boolean = try { java.net.Socket().use{ it.connect(java.net.InetSocketAddress("127.0.0.1", port), timeoutMs); true } } catch(_:Exception){ false }
 
     private fun buildEnvForShard(context: Context, norm: String, upstream: String): Map<String, String> {
         val protoForEnv = when (norm) {
