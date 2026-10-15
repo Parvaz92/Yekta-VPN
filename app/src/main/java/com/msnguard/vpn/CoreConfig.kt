@@ -129,6 +129,29 @@ object CoreConfig {
         WarpTransport.WOW -> WARP_EXIT_MODE_PREF_WOW to WARP_EXIT_CUSTOM_PREF_WOW
     }
 
+    // Warp endpoint scanner selector — Warp Setting only (isolated).
+    // When the user picks Ptech, the engine's discovery surface stays identical
+    // (UDP-verify + AETHER_NOIZE), only the CANDIDATE list changes: the 7 Ptech
+    // /24s + 2 IPv6 /48s instead of the default WG_PREFIXES. No engine logic,
+    // no protocol policy, no SHARD/WoW code is touched — just which addresses
+    // the WireGuard/Masque/WoW prober samples before the wire check.
+    // REVERT: comment the block that writes AETHER_PTECH_SCAN (env/jSON below)
+    // and this whole pref becomes inert — the default scanner returns.
+    const val WARP_SCANNER_MODE_PREF = "warp_scanner_mode"
+    const val WARP_SCANNER_MODE_DEFAULT = "default" // default | ptech
+    fun warpScannerMode(context: Context): String =
+        context.profiled().getString(WARP_SCANNER_MODE_PREF, WARP_SCANNER_MODE_DEFAULT)
+            ?.trim()?.lowercase()?.takeIf { it == "ptech" } ?: WARP_SCANNER_MODE_DEFAULT
+    // Ptech surface: the 7 Warp v4 /24s warpendpoint samples + the 2 IPv6
+    // ranges install.sh builds (2606:4700:d0/d1). Sent as env so the engine
+    // needs zero new args — it just expands CIDRs it is given.
+    const val PTECH_PREFIXES_V4 = "162.159.192.0/24,162.159.193.0/24,162.159.195.0/24,188.114.96.0/24,188.114.97.0/24,188.114.98.0/24,188.114.99.0/24"
+    const val PTECH_PREFIXES_V6 = "2606:4700:d0::/48,2606:4700:d1::/48"
+    // Wire ports warpendpoint actually probes (install.sh → result.csv port col).
+    // Forwarded as AETHER_WG_PORTS override so the sweep stays on 2408/500/…
+    // instead of the full wireguard WG_PORTS list.
+    const val PTECH_WG_PORTS = "2408"
+
     fun warpTransportOf(protocol: String): WarpTransport? = when (protocol.trim().lowercase()) {
         "masque", "mim" -> WarpTransport.MASQUE
         "wireguard", "wg" -> WarpTransport.WIREGUARD
@@ -213,6 +236,10 @@ object CoreConfig {
             put("listen", if (listenOverride != null) "127.0.0.1:$listenOverride" else "${proxyBindHost(context)}:${sharedSocksPort(context)}")
             put("scan_mode", text("default_scan_mode", "balanced"))
             put("ip_scan", if (effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL) "v4" else text("default_scan", "both"))
+            // Warp Setting scanner — mirrored into JSON too so the service log
+            // shows which scanner this connect used (no engine read).
+            // REVERT: delete this put → JSON no longer mentions it.
+            put("warp_scanner", warpScannerMode(context))
             // forwarded verbatim when present — keeps pin/SHARD-identity logic from breaking
             if (socksProxyForCore.isNotBlank()) put("socks_proxy", socksProxyForCore)
             text("manual_endpoint").ifBlank { null }?.let { put("forced_peer", it) }
@@ -416,6 +443,18 @@ object CoreConfig {
         // AETHER_WG_NO_DATA_CHECK is the inverse of the app's toggle.
         if (!bool("wireguard_data_check", true)) {
             out["AETHER_WG_NO_DATA_CHECK"] = "1"
+        }
+
+        // Warp endpoint scanner override — Warp Setting isolated, reversible.
+        // When user picks Ptech, the engine keeps its UDP-verify + NOIZE
+        // but samples ONLY the 7 + 2 CIDRs warpendpoint uses. Default mode
+        // sends nothing extra, so the engine's own WG/Masque CIDRs rule.
+        // REVERT: delete this if/put block → engine falls back to built-ins.
+        if (warpScannerMode(context) == "ptech") {
+            out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
+            out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
+            out["AETHER_WG_PORTS"] = PTECH_WG_PORTS
+            out["AETHER_PTECH_SCAN"] = "1"
         }
 
         // Masque SNI (DPI bypass): engine reads AETHER_MASQUE_SNI as the ClientHello SNI for
@@ -622,6 +661,9 @@ object CoreConfig {
         val clearIfAbsent = listOf(
             "AETHER_UPSTREAM",
             "AETHER_ECH", "AETHER_API_ECH", "AETHER_ECH_DNS", "AETHER_ECH_DOMAIN",
+            // Ptech toggle: when user flips back to Default, the previous
+            // Ptech CIDRs/ports must not linger in the process env.
+            "AETHER_SCAN_CIDRS_V4", "AETHER_SCAN_CIDRS_V6", "AETHER_WG_PORTS", "AETHER_PTECH_SCAN",
         )
         for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
