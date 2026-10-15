@@ -194,6 +194,11 @@ object WarpIdentityFetcher {
         val out = LinkedHashMap(base)
         // Plain route: no ECH at all, no upstream — raw carrier to api.cloudflareclient.com
         out.remove("AETHER_API_ECH"); out.remove("AETHER_ECH"); out.remove("AETHER_ECH_DNS"); out.remove("AETHER_ECH_DOMAIN"); out.remove("AETHER_UPSTREAM")
+        // Do not leak Warp Setting scanner choice into identity fetch — it is for
+        // the data-plane scan (WireGuard/WoW), not for api.cloudflareclient.com.
+        // Leaving Ptech CIDRs here would narrow the engine's scan even though we
+        // set AETHER_SCAN=turbo below and the job only needs to write aether.toml.
+        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
         out["AETHER_SOCKS"] = BIND; out["AETHER_SCAN"] = "turbo"; out["AETHER_QUICK_RECONNECT"] = "0"; out["AETHER_LOG_LEVEL"] = "info"
         out.remove("AETHER_TEAM"); out.remove("AETHER_ACCESS_CLIENT_ID"); out.remove("AETHER_ACCESS_CLIENT_SECRET"); out.remove("AETHER_ACCESS_TOKEN"); out.remove("AETHER_ACCESS_EMAIL"); out.remove("AETHER_GATEWAY")
         return out
@@ -461,6 +466,10 @@ object WarpIdentityFetcher {
         }
         val base = CoreConfig.env(context, protocol = protoForEnv, socksProxyForCore = upstream)
         val out = LinkedHashMap(base)
+        // Do not leak Warp Setting scanner choice into identity fetch — it is for
+        // the data-plane scan, not for api.cloudflareclient.com. Shard path must
+        // not narrow the scan while waiting for aether.toml.
+        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
         // Do not publish a listener — we are a one-shot provision job, not a proxy.
         // Keep turbo/no-quick-reconnect like ECH path.
         out["AETHER_SCAN"] = "turbo"
@@ -484,6 +493,10 @@ object WarpIdentityFetcher {
         }
         val base = CoreConfig.env(context, protocol = protoForEnv)
         val out = LinkedHashMap(base)
+        // Do not leak Warp Setting scanner choice into identity fetch — it is for
+        // the data-plane scan, not for api.cloudflareclient.com. ECH job only
+        // needs to write aether.toml; narrowing scan CIDRs just slows it.
+        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
         // Quantum ECH: force Freedom-like ECH regardless of current exit mode.
         // Use embedded AETHER_API_ECH (no DoH to 1.1.1.1) — same key main
         // connect embeds for Freedom direct, so filtered carriers need no
