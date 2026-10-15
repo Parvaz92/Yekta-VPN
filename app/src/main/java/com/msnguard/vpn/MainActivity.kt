@@ -311,6 +311,7 @@ class MainActivity : Activity() {
     private var dnsPage: View? = null
     private var donatePage: View? = null
     private var mtuPage: View? = null
+    private var warpSettingPage: View? = null
     private var mtuScanning: Boolean = false
     private var mtuScanResult: MtuProbe.Result? = null
     private var trafficSpeedValue: TextView? = null
@@ -1254,7 +1255,18 @@ class MainActivity : Activity() {
                     // the carrier link proves nothing about the TUN, so if the
                     // core has still not moved a single byte after the settle
                     // window, do not leave the user on a confident green dial.
-                    watchForTunnelBytes(request, rxAtStart)
+                    // Tor/SHARD (and chained Psiphon) count bytes in their
+                    // front-ends, not in the core's TUN bridge — the core's
+                    // counter stays at 0 while TorSocksFront/ShardSocksFront
+                    // already moves bytes. Judging them on trafficRx painted
+                    // a healthy Tor session DEGRADED 12 s after connect. Only
+                    // the WARP native path genuinely needs this byte gate; for
+                    // front-end transports the probe that just passed already
+                    // went through the front (openTunnelConnection SOCKS) so it
+                    // IS inside the tunnel.
+                    if (TunnelStatus.isNativeTunMode) {
+                        watchForTunnelBytes(request, rxAtStart)
+                    }
                 } else {
                     ConnectionLog.record(
                         "No reachability after $attempts probe(s) — treating the tunnel as dead"
@@ -3264,6 +3276,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
             body.addView(navRow(Strings.t("MTU"), mtuSummary()) { openMtuScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            body.addView(navRow(Strings.t("Warp Setting"), warpSettingSummary()) { openWarpSettingScreen() }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
@@ -5296,6 +5312,16 @@ class MainActivity : Activity() {
                 "Cache & refresh" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName).apply()
                 "Fresh scan next time" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).apply()
                 else -> {
+                    // Mirror clearEndpointCaches(): the gateway cache JSON alone is
+                    // not enough — the core's lastconn file is what actually makes
+                    // it skip the scan ("cached gateway ... still works; skipping
+                    // scan"), and its name is derived from the identity file
+                    // (aether-masque.toml -> aether-masque-lastconn.toml). Deleting
+                    // only the JSON left the user's "clear" silently inert.
+                    File(filesDir, "aether-lastconn.toml").delete()
+                    File(filesDir, "aether-masque-lastconn.toml").delete()
+                    File(filesDir, "aether-gool-lastconn.toml").delete()
+                    File(filesDir, "aether-mim-lastconn.toml").delete()
                     File(filesDir, "masque-gateway-cache.json").delete()
                     toastShort(Strings.t("Saved gateways cleared"))
                 }
@@ -6223,6 +6249,462 @@ class MainActivity : Activity() {
         openSettingsScreen()
     }
 
+    // Warp Setting — per-transport (Masque / WireGuard / WoW): Direct (Freedom)
+    // vs Exit-Node (VLESS Lithuania sidecar). Each transport keeps its own
+    // Direct/Exit choice so Masque-Direct still means freedom even when WireGuard-Exit is set.
+    private fun warpSettingSummary(): String = ""
+
+    private fun openWarpSettingScreen() {
+        warpSettingPage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS); isClickable = true }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(16), dp(24), dp(24)) }
+        // Header
+        content.addView(LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL; addView(this@MainActivity.createHeaderBackButton { this@MainActivity.closeWarpSettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(this@MainActivity.label(Strings.t("Warp Setting"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }) })
+
+        // Rail — 4 equal chips like 801, no scroll, text only (no H2/H3)
+        val railTransports = listOf(
+            "masque" to "MASQUE",
+            "wireguard" to "WireGuard",
+            "gool" to "WoW",
+            "mim" to "MiM",
+        )
+        val defaultProto = intent?.getStringExtra("warp_proto")?.lowercase()
+            ?: preferences().getString("default_protocol", "wireguard")?.lowercase() ?: "wireguard"
+        var railSelected: String = when (defaultProto) {
+            "masque", "mim" -> if (defaultProto == "mim") "mim" else "masque"
+            "gool", "wow" -> "gool"
+            "wireguard" -> "wireguard"
+            else -> "masque"
+        }
+        // Map vault card protocol -> hasIdentity (no new files)
+        fun vaultProtocolSelected(p: String): String = when (p) {
+            "masque" -> "masque"; "mim" -> "mim"; "wireguard" -> "wireguard"; "gool" -> "gool"; else -> "masque"
+        }
+        fun hasVaultIdentity(p: String): Boolean = IdentityProvisioner.hasIdentity(this, vaultProtocolSelected(p))
+
+        val rail = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 16, stroke = DIVIDER)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        // Build chips with equal weight so they fit without scrolling
+        val chipViews = mutableListOf<TextView>()
+        val chipProtos = mutableListOf<String>()
+        for ((proto, labelText) in railTransports) {
+            val chip = TextView(this).apply {
+                text = labelText
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(11), dp(4), dp(11))
+                typeface = Typefaces.medium(this@MainActivity)
+                isClickable = true
+                isFocusable = true
+            }
+            chipViews.add(chip)
+            chipProtos.add(proto)
+            rail.addView(chip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (rail.indexOfChild(chip) > 0) leftMargin = dp(6)
+            })
+        }
+        content.addView(rail, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10); bottomMargin = dp(14) })
+        fun refreshRail() {
+            for (i in chipViews.indices) {
+                val proto = chipProtos[i]
+                val chip = chipViews[i]
+                val sel = proto == railSelected
+                if (sel) {
+                    chip.background = roundedBackground(connectedContainer, 12, connected)
+                    chip.setTextColor(connected)
+                } else {
+                    chip.background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
+                    chip.setTextColor(MUTED)
+                }
+            }
+        }
+        refreshRail()
+
+        // ── Box 1: Exit Route (per-transport like existing transportCard, but bound to railSelected)
+        fun warpTransportOfRail(p: String): CoreConfig.WarpTransport = when (p) {
+            "wireguard" -> CoreConfig.WarpTransport.WIREGUARD
+            "gool" -> CoreConfig.WarpTransport.WOW
+            else -> CoreConfig.WarpTransport.MASQUE
+        }
+        fun exitLabelFor(t: CoreConfig.WarpTransport): String = when (t) { CoreConfig.WarpTransport.MASQUE -> "Masque"; CoreConfig.WarpTransport.WIREGUARD -> "WireGuard"; CoreConfig.WarpTransport.WOW -> "WoW" }
+
+        val exitBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+        }
+        val exitHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        exitHeader.addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFF5F56.toInt()); setPadding(0, 0, dp(4), 0) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFFBD2E.toInt()); setPadding(0, 0, dp(4), 0) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF27C93F.toInt()) })
+        })
+        exitHeader.addView(label("\u25B8 " + Strings.t("Exit Route"), 11f, primary, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
+        exitHeader.addView(label(Strings.t("Direct \u00B7 Exit-Node"), 10f, MUTED).apply { gravity = Gravity.END; setPadding(dp(8), 0, 0, 0) }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
+        exitBox.addView(exitHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        exitBox.addView(label(Strings.t("Through your V2Ray exit \u2014 per transport, others untouched."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
+        val exitToggleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        lateinit var exitDirectBtn: TextView
+        lateinit var exitNodeBtn: TextView
+        val exitCollapse = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = roundedBackground(SURFACE, 14, DIVIDER); visibility = View.GONE }
+        val exitField = settingsField(value = "", hintText = "vless://uuid@host:port?security=reality#name", multiline = true).apply { minLines = 2; maxLines = 4 }
+        val exitHint = label(Strings.t("Per transport"), 10f, MUTED)
+        var applyBtn: TextView? = null
+        var currentExitTransport: CoreConfig.WarpTransport = warpTransportOfRail(railSelected)
+        fun refreshExitBox() {
+            currentExitTransport = warpTransportOfRail(railSelected)
+            val t = currentExitTransport
+            val tag = exitLabelFor(t)
+            val mode = CoreConfig.warpExitMode(this@MainActivity, t)
+            val isCustom = mode == CoreConfig.WARP_EXIT_MODE_CUSTOM
+            val raw = CoreConfig.warpExitCustom(this@MainActivity, t)
+            exitField.setText(raw)
+            exitField.hint = "vless://uuid@host:port?security=reality#name"
+            if (isCustom) {
+                exitNodeBtn.background = roundedBackground(connectedContainer, 12, connected)
+                exitNodeBtn.setTextColor(connected)
+                exitDirectBtn.background = roundedBackground(SURFACE, 12, DIVIDER)
+                exitDirectBtn.setTextColor(MUTED)
+                exitCollapse.visibility = View.VISIBLE
+            } else {
+                exitDirectBtn.background = roundedBackground(connectedContainer, 12, connected)
+                exitDirectBtn.setTextColor(connected)
+                exitNodeBtn.background = roundedBackground(SURFACE, 12, DIVIDER)
+                exitNodeBtn.setTextColor(MUTED)
+                exitCollapse.visibility = View.GONE
+            }
+            exitHint.text = tag + " \u00B7 " + Strings.t(if (isCustom) "Exit-Node" else "Direct")
+        }
+        exitDirectBtn = TextView(this).apply {
+            text = Strings.t("Direct"); textSize = 12f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity)
+            isClickable = true; isFocusable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                val t = warpTransportOfRail(railSelected)
+                val (modeKey, _) = CoreConfig.warpKeys(t)
+                preferences().edit().putString(modeKey, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit()
+                ConnectionLog.record("Warp Setting: " + exitLabelFor(t) + " \u2192 Direct")
+                refreshExitBox(); requestFreshScanAfterExitSwitch(exitLabelFor(t) + " Direct")
+                toastShort(Strings.t("Warp exit: ") + exitLabelFor(t) + " Direct")
+                refreshRail()
+            }
+        }
+        exitNodeBtn = TextView(this).apply {
+            text = Strings.t("Exit-Node"); textSize = 12f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity)
+            isClickable = true; isFocusable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                val t = warpTransportOfRail(railSelected)
+                val (modeKey, _) = CoreConfig.warpKeys(t)
+                val cur = CoreConfig.warpExitCustom(this@MainActivity, t)
+                if (cur.isBlank()) {
+                    preferences().edit().putString(modeKey, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit()
+                    exitCollapse.visibility = View.VISIBLE
+                    exitField.requestFocus()
+                    refreshExitBox()
+                    return@setOnClickListener
+                }
+                preferences().edit().putString(modeKey, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit()
+                refreshExitBox()
+            }
+        }
+        exitToggleRow.addView(exitDirectBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        exitToggleRow.addView(exitNodeBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        exitBox.addView(exitToggleRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val exitRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        exitRow.addView(exitField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(10) })
+        val localApplyBtn = createSettingsButton(Strings.t("Save"), backgroundOverride = primary, textColorOverride = primaryContainer) {
+            val raw = exitField.text.toString().trim()
+            if (raw.isEmpty()) { exitField.error = Strings.t("Paste a config first"); return@createSettingsButton }
+            if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
+            val t = warpTransportOfRail(railSelected)
+            val (modeKey, customKey) = CoreConfig.warpKeys(t)
+            preferences().edit().putString(customKey, raw).putString(modeKey, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit()
+            ConnectionLog.record("Warp Setting: " + exitLabelFor(t) + " custom exit saved (" + raw.take(48) + ")")
+            toastShort(Strings.t("Warp exit saved \u2014 ") + exitLabelFor(t))
+            requestFreshScanAfterExitSwitch(exitLabelFor(t) + " Exit-Node")
+            refreshExitBox()
+        }
+        applyBtn = localApplyBtn
+        exitRow.addView(localApplyBtn, LinearLayout.LayoutParams(dp(92), dp(46)))
+        exitCollapse.addView(exitRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val clearLink = label(Strings.t("Clear and go Direct"), 12f, MUTED).apply {
+            setPadding(dp(4), dp(10), dp(4), 0); isClickable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                val t = warpTransportOfRail(railSelected)
+                val (modeKey, customKey) = CoreConfig.warpKeys(t)
+                preferences().edit().remove(customKey).putString(modeKey, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit()
+                requestFreshScanAfterExitSwitch(exitLabelFor(t) + " Direct")
+                ConnectionLog.record("Warp Setting: " + exitLabelFor(t) + " cleared, back to Direct")
+                refreshExitBox()
+            }
+        }
+        exitCollapse.addView(clearLink, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        exitCollapse.addView(exitHint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        exitBox.addView(exitCollapse, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+        content.addView(exitBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
+        refreshExitBox()
+
+        // ── Box 2: Identity Vault — 2x2 grid + method row + START + terminal
+        val vaultBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+        }
+        val vaultHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        vaultHeader.addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF1BDE9A.toInt()); setPadding(0, 0, dp(4), 0) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF7C5CFF.toInt()); setPadding(0, 0, dp(4), 0) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF3AD0FF.toInt()) })
+        })
+        vaultHeader.addView(label("\u25B8 " + Strings.t("Identity Vault"), 11f, connected, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
+        vaultHeader.addView(label("ECH  \u00B7  SHARD", 10f, MUTED).apply { gravity = Gravity.END; setPadding(dp(6), 0, 0, 0) }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
+        vaultBox.addView(vaultHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        vaultBox.addView(label(Strings.t("Pick method, pick strategy, then Start. Green means identity stored (persists per method)."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
+
+        // Vault selection mirrors railSelected (bidirectional sync)
+        var vaultSelected: String = railSelected
+        var vaultMethod: String = "ech" // ech | shard | plain
+        val vaultProtos = listOf("masque" to "MASQUE", "mim" to "MiM", "wireguard" to "WireGuard", "gool" to "WoW")
+        val vaultCards = mutableListOf<LinearLayout>()
+        val vaultCardProtos = mutableListOf<String>()
+        val vaultGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var rowLinear: LinearLayout? = null
+        for ((idx, pair) in vaultProtos.withIndex()) {
+            if (idx % 2 == 0) {
+                rowLinear = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                vaultGrid.addView(rowLinear, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (idx > 0) topMargin = dp(10) })
+            }
+            val (proto, name) = pair
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(16), dp(12), dp(12))
+                isClickable = true; isFocusable = true
+            }
+            val icon = TextView(this).apply {
+                text = if (hasVaultIdentity(proto)) "\u2713" else when (proto) { "masque" -> "\u2B22"; "mim" -> "\u2B23"; else -> "\u2B21" }
+                textSize = 14f; gravity = Gravity.CENTER
+                setPadding(dp(2), dp(6), dp(2), dp(6))
+            }
+            val title = label(name, 12f, INK, TypefaceStyle.MEDIUM).apply { gravity = Gravity.CENTER }
+            val sub = label(if (hasVaultIdentity(proto)) Strings.t("Key received") else Strings.t("Get key"), 10.5f, MUTED).apply { gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0) }
+            card.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)).apply { bottomMargin = dp(6) })
+            card.addView(title, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            card.addView(sub, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            vaultCards.add(card); vaultCardProtos.add(proto)
+            rowLinear!!.addView(card, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (idx % 2 == 1) leftMargin = dp(10) })
+        }
+        fun refreshVaultCards() {
+            for (i in vaultCards.indices) {
+                val proto = vaultCardProtos[i]
+                val card = vaultCards[i]
+                val isOk = hasVaultIdentity(proto)
+                val isSel = !isOk && proto == vaultSelected
+                when {
+                    isOk -> {
+                        card.background = roundedBackground(connectedContainer, 14, connected)
+                        (card.getChildAt(0) as? TextView)?.let { it.background = roundedBackground(connected, 10, connected); it.setTextColor(0xFF08261C.toInt()) }
+                        (card.getChildAt(2) as? TextView)?.let { it.setTextColor(connected); it.text = Strings.t("Key received") }
+                    }
+                    isSel -> {
+                        card.background = roundedBackground(selectedSurface, 14, palette.violet)
+                        (card.getChildAt(0) as? TextView)?.let { it.background = roundedBackground(palette.violet, 10, palette.violet); it.setTextColor(0xFFE6E0FF.toInt()) }
+                        (card.getChildAt(2) as? TextView)?.let { it.setTextColor(MUTED); it.text = Strings.t("Get key") }
+                    }
+                    else -> {
+                        card.background = roundedBackground(SURFACE, 14, DIVIDER)
+                        (card.getChildAt(0) as? TextView)?.let { it.background = roundedBackground(SURFACE_VARIANT, 10, DIVIDER); it.setTextColor(MUTED) }
+                        (card.getChildAt(2) as? TextView)?.let { it.setTextColor(MUTED); it.text = Strings.t("Get key") }
+                    }
+                }
+            }
+        }
+        fun syncSelect(proto: String) {
+            vaultSelected = proto
+            railSelected = proto
+            refreshRail(); refreshVaultCards(); refreshExitBox()
+        }
+        // Rail ↔ vault bidirectional
+        for (i in chipViews.indices) {
+            val p = chipProtos[i]
+            chipViews[i].setOnClickListener { syncSelect(p) }
+        }
+        for (i in vaultCards.indices) {
+            val p = vaultCardProtos[i]
+            vaultCards[i].setOnClickListener { syncSelect(p) }
+        }
+        refreshVaultCards()
+        vaultBox.addView(vaultGrid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+
+        val methodRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        lateinit var echBtn: TextView
+        lateinit var shardBtn: TextView
+        lateinit var plainBtn: TextView
+        fun refreshMethodRow() {
+            val selBg = roundedBackground(selectedSurface, 12, palette.violet)
+            val offBg = roundedBackground(SURFACE, 12, DIVIDER)
+            echBtn.background = if (vaultMethod == "ech") selBg else offBg
+            shardBtn.background = if (vaultMethod == "shard") selBg else offBg
+            plainBtn.background = if (vaultMethod == "plain") selBg else offBg
+            echBtn.setTextColor(if (vaultMethod == "ech") palette.violet else MUTED)
+            shardBtn.setTextColor(if (vaultMethod == "shard") palette.violet else MUTED)
+            plainBtn.setTextColor(if (vaultMethod == "plain") palette.violet else MUTED)
+        }
+        echBtn = TextView(this).apply {
+            text = Strings.t("Quantum ECH"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener { vaultMethod = "ech"; refreshMethodRow() }
+        }
+        shardBtn = TextView(this).apply {
+            text = Strings.t("Shard Relay"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener { vaultMethod = "shard"; refreshMethodRow() }
+        }
+        plainBtn = TextView(this).apply {
+            text = Strings.t("Native Link"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener { vaultMethod = "plain"; refreshMethodRow() }
+        }
+        methodRow.addView(echBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        methodRow.addView(plainBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        vaultBox.addView(methodRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+        refreshMethodRow()
+
+        val term = TextView(this).apply {
+            textSize = 10.5f; setTextColor(MUTED); typeface = Typeface.MONOSPACE
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundedBackground(SURFACE, 10, DIVIDER)
+            visibility = View.GONE
+        }
+        lateinit var startBtn: TextView
+        startBtn = createSettingsButton(Strings.t("START \u2014 GET IDENTITY"), backgroundOverride = primary, textColorOverride = primaryContainer) {
+            if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
+            val proto = vaultProtocolSelected(vaultSelected)
+            val chosenMethod = vaultMethod
+            val methodName = when (chosenMethod) { "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("Shard Relay"); else -> Strings.t("Quantum ECH") }
+            if (hasVaultIdentity(proto)) {
+                toastShort(proto + " \u2713 " + Strings.t("Key received"))
+                term.text = proto + " \u2014 " + Strings.t("Key received") + " (" + methodName + ")"
+                term.visibility = View.VISIBLE
+                refreshVaultCards(); return@createSettingsButton
+            }
+            startBtn.isEnabled = false
+            startBtn.text = Strings.t("PROVISIONING...")
+            term.text = proto + " \u2014 " + methodName + " \u2014 connecting\u2026"
+            term.visibility = View.VISIBLE
+            val ctx = this@MainActivity
+            // Live term tail while provisioning — so user sees progress, not a frozen "connecting"
+            val termTail = object : Thread("vault-term-tail") {
+                @Volatile var done = false
+                override fun run() {
+                    var last = ""
+                    while (!done) {
+                        try { Thread.sleep(700) } catch (_: InterruptedException) { break }
+                        val tail = ConnectionLog.snapshot().lastOrNull()?.take(110) ?: continue
+                        if (tail == last) continue
+                        last = tail
+                        runOnUiThread { if (!done) term.text = tail }
+                    }
+                }
+            }.also { it.isDaemon = true; it.start() }
+            Thread {
+                val ok = try {
+                    when (chosenMethod) {
+                        "shard" -> WarpIdentityFetcher.fetchViaShard(ctx, proto)
+                        "plain" -> WarpIdentityFetcher.fetchDirectPlain(ctx, proto)
+                        else -> WarpIdentityFetcher.fetch(ctx, proto)
+                    }
+                } catch (_: Exception) { false }
+                runOnUiThread {
+                    termTail.done = true
+                    try { termTail.interrupt() } catch (_: Exception) {}
+                    startBtn.isEnabled = true
+                    startBtn.text = Strings.t("START \u2014 GET IDENTITY")
+                    if (ok && hasVaultIdentity(proto)) {
+                        term.text = proto + " \u2713 " + Strings.t("Key received") + " \u2014 " + methodName
+                        toastShort(proto + " \u2713 " + Strings.t("Key received"))
+                    } else {
+                        val last = ConnectionLog.snapshot().lastOrNull()?.take(120) ?: "failed"
+                        term.text = proto + " \u2014 failed: " + last
+                        toastShort(Strings.t("Failed") + ": " + last.take(48))
+                    }
+                    refreshVaultCards(); refreshRail()
+                }
+            }.start()
+        }
+        vaultBox.addView(startBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { bottomMargin = dp(10) })
+        vaultBox.addView(term, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        content.addView(vaultBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        page.setOnApplyWindowInsetsListener { _, insets -> content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24)); insets }
+        warpSettingPage = page; pageHost.addView(page); page.requestApplyInsets(); animatePageOpen(page)
+    }
+
+    private fun closeWarpSettingScreen() { warpSettingPage?.let { animatePageClose(it) { warpSettingPage = null } }; openSettingsScreen() }
+
+    /**
+     * Arm a one-shot fresh scan when the user switches the Masque exit between
+     * Freedom and a custom Exit Node.
+     *
+     * The two exits reach the Cloudflare edge through different egress paths, so
+     * the gateway cache and lastconn a previous session wrote are measured
+     * against a path that is no longer in use: the latency ranking is stale and
+     * the cached gateway may be unreachable through the new path. Reusing it
+     * shows up as "cached gateway ... still works; skipping scan" on a connect
+     * that then lands on the wrong exit. Forcing a fresh scan here makes the
+     * next connect re-measure, and [EndpointDiscovery.FRESH] is consumed once
+     * (startTunnel flips it back to cache), so this never turns into a
+     * permanent full scan.
+     *
+     * Also deletes the cache files directly: FRESH is only honoured on the next
+     * startTunnel, and clearing the lastconn here means a connect that does not
+     * go through that path still cannot reuse the stale gateway.
+     */
+    private fun requestFreshScanAfterExitSwitch(to: String) {
+        preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).commit()
+        runCatching {
+            val dir = filesDir
+            listOf(
+                "aether-lastconn.toml",
+                "aether-masque-lastconn.toml",
+                "aether-gool-lastconn.toml",
+                "aether-mim-lastconn.toml",
+                "masque-gateway-cache.json",
+            ).forEach { name -> java.io.File(dir, name).delete() }
+        }
+        ConnectionLog.record("Warp Setting: switched to $to — fresh scan armed for next connect")
+    }
+
+    private fun editWarpCustom(transport: CoreConfig.WarpTransport = CoreConfig.WarpTransport.MASQUE) {
+        if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return }
+        val cur = CoreConfig.warpExitCustom(this@MainActivity, transport)
+        val field = settingsField(value = cur, hintText = "vless://uuid@host:port?security=reality#name").apply { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2; maxLines = 5 }
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val sheet = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(24), dp(24), dp(24)); background = roundedBackground(SURFACE, 28, SURFACE) }
+        sheet.addView(LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(label(Strings.t("Custom exit"), 18f, INK, TypefaceStyle.MEDIUM)) })
+        sheet.addView(label(Strings.t("Paste a VLESS URL or outbound JSON. Masque scan will be chained through it; other transports ignore it."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(14) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val actions = LinearLayout(this).apply { gravity = Gravity.END; orientation = LinearLayout.HORIZONTAL }
+        actions.addView(createSettingsButton(Strings.t("Clear")) { run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().remove(ck).putString(mk, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Direct") }; ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(8) })
+        actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().putString(ck, raw).putString(mk, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Exit-Node") }; ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
+        sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
+        dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
+        dialog.show(); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
+    }
+
     private fun editMtu(method: MtuConfig.Method) {
         if (TunnelStatus.isActive()) {
             toastShort(Strings.t("Disconnect first to change MTU"))
@@ -6263,7 +6745,7 @@ class MainActivity : Activity() {
             scanButton.text = Strings.tf("Scanning… %s", MtuConfig.MIN_MTU)
             scanButton.isEnabled = false
             Thread {
-                val r = MtuProbe.measure(method) { size ->
+                val r = MtuProbe.measure(this, method) { size ->
                     runOnUiThread { scanButton.text = Strings.tf("Scanning… %s", size) }
                 }
                 runOnUiThread {
@@ -6272,25 +6754,33 @@ class MainActivity : Activity() {
                     scanButton.text = Strings.t("Scan the best value")
                     mtuScanResult = r
                     val found = r.inner
-                    when {
-                        found == null && r.localTermination ->
-                            toastShort(Strings.tf("%s needs no scan — using %s", method.title, MtuConfig.get(this, method)))
-                        found == null ->
-                            toastShort(Strings.t("This line dropped every probe — MTU unchanged"))
-                        else -> {
-                            field.setText(found.toString())
-                            toastShort(Strings.tf("Best MTU for %s on this line: %s", method.title, found))
+                    if (found == null) {
+                        toastShort(Strings.t("This line dropped every probe — MTU unchanged"))
+                    } else {
+                        // NOT persisted: the scan only fills the field. Apply is the
+                        // single write path — closing without it must leave the stored
+                        // value alone, even though the number is now visible.
+                        field.setText(found.toString())
+                        val note = if (r.capped) {
+                            " (WebSocket ceiling)"
+                        } else {
+                            " (path ${r.outerPathMtu ?: "—"}, ${r.probes} probes)"
                         }
+                        ConnectionLog.record("${method.title} MTU scan found $found$note — waiting for Apply")
+                        toastShort(Strings.tf("Found %s — press Apply to keep it", found))
                     }
                 }
             }.start()
         }
         sheet.addView(scanButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { bottomMargin = dp(14) })
-        mtuScanResult?.takeIf { it.method == method }?.inner?.let { found ->
-            sheet.addView(label(
-                Strings.tf("Last scan: %s (path %s, %s probes)", found, mtuScanResult?.outerPathMtu ?: "—", mtuScanResult?.probes ?: 0),
-                12f, MUTED,
-            ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+        mtuScanResult?.takeIf { it.method == method }?.let { res ->
+            val inner = res.inner
+            val line = if (res.capped) {
+                Strings.tf("Last scan: %s (WebSocket ceiling)", inner)
+            } else {
+                Strings.tf("Last scan: %s (path %s, %s probes)", inner, res.outerPathMtu ?: "—", res.probes)
+            }
+            sheet.addView(label(line, 12f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
         }
 
         val entry = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
@@ -7121,6 +7611,7 @@ class MainActivity : Activity() {
             dnsPage != null -> closeDnsScreen()
             donatePage != null -> closeDonateScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
+            warpSettingPage != null -> closeWarpSettingScreen()
             mtuPage != null -> closeMtuScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()
@@ -7377,7 +7868,7 @@ class MainActivity : Activity() {
         Protocol.WIREGUARD -> 32_000L
         Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
         Protocol.WARP_IN_WARP -> 55_000L
-        else -> 45_000L
+        else -> 240_000L // SHARD: 31 slices x12s=372s worst, 5 successes at slice 19 ≈228s — 240 covers it; 45s killed slice 4/31
     }
 
     /**

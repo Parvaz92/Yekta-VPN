@@ -29,35 +29,17 @@ object Tun2SocksManager {
     const val VPN_INTERFACE_MTU = 1500
 
     /**
-     * The MTU a SHARD session must advertise.
+     * SHARD's TUN MTU — identical to [VPN_INTERFACE_MTU].
      *
-     * Measured, not chosen. A SHARD session is TUN → tun2socks → [ShardSocksFront]
-     * → xray → VLESS/ws/TLS → Cloudflare, and the WebSocket leg silently drops
-     * any datagram whose payload crosses a hard ceiling. Probed from the VPS
-     * against the live pool with real DNS queries padded to exact sizes: 512
-     * bytes answers, 513 never does. That number is half of 1024, which is the
-     * shape of a fixed buffer, not a coincidence of a slow node.
-     *
-     * Advertising the default 1500 here is the bug it looks like: lwIP tells the
-     * app the path is 1500, the app's QUIC stack sends a 1250-byte Initial, and
-     * the WebSocket leg swallows it whole. The app then waits on a probe that
-     * cannot ever answer instead of falling back to TCP, and that wait — not a
-     * slow node, not a rate limit — is why a tunnel that carries chat fine
-     * cannot open a page smoothly.
-     *
-     * Lowering the MTU makes lwIP fragment the datagram at the IP layer before
-     * it ever reaches the SOCKS leg. Each fragment lands under the ceiling, so
-     * the reassembled datagram reaches the destination and the reply comes back
-     * the same way. QUIC stops probing a dead path and TCP fallback is never
-     * needed. UDP that already fits (DNS, most QUIC short packets, Telegram's
-     * media chunks on small MTUs) is unaffected — the datagram is not split
-     * when it already fits.
-     *
-     * The 512 is the SOCKS payload budget, not the IP MTU: the SOCKS5 UDP
-     * header (10 bytes for IPv4) rides inside it, and IP fragmentation overhead
-     * (20 bytes per fragment) comes out of the datagram lwIP splits.
+     * PattNG parity: this transport is PattNG's VLESS/Reality core
+     * (msn calls it SHARD). PattNG uses one MTU for every method:
+     * AppConfig.VPN_MTU = 1500, SettingsManager.getVpnMtu() defaults to it,
+     * CoreVpnService.builder.setMtu(getVpnMtu()) and TProxyService
+     * tunnel.mtu = getVpnMtu(). The previous 512 was a WebSocket *payload*
+     * ceiling, not a TUN MTU — the real UDP ceiling (500) stays enforced
+     * per-datagram inside ShardSocksFront.
      */
-    const val SHARD_TUNNEL_MTU = 512
+    const val SHARD_TUNNEL_MTU = 1500
     const val VPN_INTERFACE_IPV4_NETMASK = "255.255.255.0"
 
     /**
@@ -169,9 +151,10 @@ object Tun2SocksManager {
         tunFd: ParcelFileDescriptor,
         socksProxyPort: Int,
         dnsOnlyUdpgw: Boolean = false,
-        /** Path MTU the native stack should advertise. Defaults to the general
-         * 1500; SHARD passes [SHARD_TUNNEL_MTU] because its WebSocket leg drops
-         * datagrams past that size. See [SHARD_TUNNEL_MTU]. */
+        /** Path MTU the native stack should advertise. Defaults to
+         * [VPN_INTERFACE_MTU] (1500). PattNG parity: every transport uses the
+         * same 1500 — the WebSocket UDP ceiling (500) is enforced per-datagram
+         * in ShardSocksFront, not here. */
         mtu: Int = VPN_INTERFACE_MTU,
     ): Boolean {
         if (tun2SocksThread != null) {

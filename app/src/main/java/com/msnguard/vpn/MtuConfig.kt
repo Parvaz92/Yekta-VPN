@@ -11,15 +11,12 @@ import android.content.Context
  * Profile A and Profile B can keep different tunings.
  *
  * Defaults are MEASURED, not copied from the reference screenshot:
- * - MASQUE 1304, WireGuard 1440, WoW 1220 — the reference app's
+ * - MASQUE 1304, WireGuard 1440, WoW 1280 — the reference app's
  *   defaults, plausible for their respective encap overheads.
  * - Psiphon / Tor 1500 — they carry TCP directly, no extra tunnel
  *   header to account for beyond the TUN itself.
- * - SHARD 512 — not 1500. The pooled nodes sit behind a WebSocket
- *   leg that silently drops any datagram whose payload crosses 512
- *   bytes (probed on the live pool; see Tun2SocksManager.ShardTunnelMtu).
- *   Advertising 1500 there would make QUIC probe a dead path while
- *   chat still works — the exact "page won't open, chat fine" report.
+ * - SHARD 1500 — PattNG's VLESS/Reality core (msn calls it SHARD) — same TUN MTU as every other transport: AppConfig.VPN_MTU=1500. The WebSocket/Xray UDP payload ceiling (500) stays per-datagram
+ *   inside ShardSocksFront.
  *
  * Range 68..1500 — the IPv4 minimum header plus the Ethernet ceiling.
  * Anything narrower cannot carry a minimal packet; anything wider is
@@ -41,17 +38,16 @@ object MtuConfig {
     // Defaults shown as "1304 (default)" etc.
     const val DEFAULT_MASQUE = 1304
     const val DEFAULT_WIREGUARD = 1440
-    const val DEFAULT_WOW = 1220
+    const val DEFAULT_WOW = 1280
     const val DEFAULT_PSIPHON = 1500
     const val DEFAULT_TOR = 1500
-    /**
-     * SHARD's ceiling is measured, not a preference — the pooled nodes sit
-     * behind a WebSocket leg that silently drops any datagram whose payload
-     * crosses 512 bytes (probed on the live pool; 512 answers, 513 never).
-     * The screen still shows the value and the row is editable, but the field
-     * keeps the constant so nothing else hardcodes 512 and drifts.
-     */
-    const val DEFAULT_SHARD = Tun2SocksManager.SHARD_TUNNEL_MTU
+    // PattNG parity: SHARD is the PattNG core for VLESS/Reality — same TUN
+    // MTU as every other transport. PattNG's AppConfig.VPN_MTU = 1500 and
+    // SettingsManager.getVpnMtu() defaults to it; CoreVpnService and
+    // TProxyService both call builder.setMtu(getVpnMtu()). No method has a
+    // separate MTU. The WebSocket UDP ceiling (500) is a per-datagram limit
+    // inside ShardSocksFront, not a TUN MTU.
+    const val DEFAULT_SHARD = 1500
 
     /** All methods in the order the screen lists them. */
     enum class Method(
@@ -88,7 +84,6 @@ object MtuConfig {
 
     /** Whether [method] has a user override (vs default). */
     fun isCustom(context: Context, method: Method): Boolean {
-        // The same legacy-0 case as [get]: a key holding 0 is not a choice.
         val raw = context.profiled().getInt(method.prefKey, -1)
         return raw != -1 && raw != 0
     }
@@ -109,6 +104,14 @@ object MtuConfig {
     fun displayValue(context: Context, method: Method): String {
         val v = get(context, method)
         return if (isCustom(context, method)) "$v" else "$v (default)"
+    }
+
+    /** Map a protocol uppercase string to its WARP method, or null if not a WARP transport. */
+    fun methodForProtocol(protocolUpper: String): Method? = when {
+        protocolUpper.contains("MASQUE") || protocolUpper.contains("MIM") -> Method.MASQUE
+        protocolUpper.contains("WIREGUARD") -> Method.WIREGUARD
+        protocolUpper.contains("GOOL") || protocolUpper.contains("WOW") -> Method.WOW
+        else -> null
     }
 
     /**

@@ -5,8 +5,18 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val targetAbis = (project.findProperty("targetAbi") as String?)?.split(',')?.map(String::trim)?.filter(String::isNotEmpty) ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-val releaseKeystore = (project.findProperty("aetheryKeystore") as String?)?.takeIf { rootProject.file(it).let { f -> f.isFile && f.length() > 0 } }
+val targetAbis = (project.findProperty("targetAbi") as String?)
+    ?.split(',')
+    ?.map(String::trim)
+    ?.filter(String::isNotEmpty)
+    ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val releaseKeystore = project.findProperty("aetheryKeystore") as String?
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
 
 android {
     namespace = "com.msnguard.vpn"
@@ -14,17 +24,13 @@ android {
     buildToolsVersion = "36.0.0"
     ndkVersion = "26.3.11579264"
 
-    // Keep Kotlin on the JDK already installed by GitHub Actions.
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     defaultConfig {
         applicationId = "com.parvaz.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 275
-        versionName = "2.3.7"
+        versionCode = 349
+        versionName = "3.1.0-alpha14-pinned"
+
     }
 
     splits {
@@ -48,19 +54,60 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    packaging { jniLibs { useLegacyPackaging = true } }
+    androidResources {
+        // Fonts deflate well (~30-40%); letting AAPT compress them keeps the
+        // arm64 APK under Telegram's 50 MB document cap while load cost stays
+        // negligible (ResourcesCompat caches the Typeface).
+        // noCompress is intentionally NOT set for ttf.
+    }
+
+    packaging {
+        jniLibs {
+            // REQUIRED for Tor. Not a size tweak — the feature does not work
+            // without it.
+            //
+            // libtor.so and libobfs4proxy.so are executables that we exec() as
+            // processes, because the built libtor.so exports no tor_run_main to
+            // dlopen. Android 10+ forbids exec() from the app's writable home
+            // directory (a W^X violation), and the only place a packaged binary
+            // may be executed from is the read-only nativeLibraryDir under
+            // /data/app.
+            //
+            // AGP 8 defaults this to false, which leaves native libs compressed
+            // inside the APK and mapped straight out of it — nothing is ever
+            // written to nativeLibraryDir, so there is no file to exec and Tor
+            // fails with ENOENT no matter how correct the binary is.
+            //
+            // Side effect, in our favour: legacy packaging stores the libs
+            // deflated instead of uncompressed, so the APK gets smaller even
+            // with Tor added. The cost moves to installed size, since the system
+            // then keeps an extracted copy alongside the APK.
+            useLegacyPackaging = true
+        }
+    }
 
     if (releaseKeystore != null) {
         val envProps = Properties().apply {
             val envFile = rootProject.file("keystore.env")
-            if (envFile.exists()) envFile.inputStream().use { load(it) }
+            if (envFile.exists()) {
+                envFile.inputStream().use { load(it) }
+            }
         }
         signingConfigs {
             create("release") {
                 storeFile = rootProject.file(releaseKeystore)
-                storePassword = System.getenv("AETHERY_KEYSTORE_PASSWORD") ?: envProps.getProperty("storePassword")
-                keyAlias = System.getenv("AETHERY_KEY_ALIAS") ?: envProps.getProperty("keyAlias")
-                keyPassword = System.getenv("AETHERY_KEY_PASSWORD") ?: envProps.getProperty("keyPassword")
+                storePassword = System.getenv("AETHERY_KEYSTORE_PASSWORD")
+                    ?: envProps.getProperty("storePassword")
+                keyAlias = System.getenv("AETHERY_KEY_ALIAS")
+                    ?: envProps.getProperty("keyAlias")
+                keyPassword = System.getenv("AETHERY_KEY_PASSWORD")
+                    ?: envProps.getProperty("keyPassword")
+                // Anti-malware engines (Avast in particular) unpack an APK as a
+                // JAR to scan it, and a JAR without a v1 signature cannot be
+                // verified at all — that surfaces to the user as "Suspicious".
+                // v2 alone is valid for an Android install, so this only ever
+                // mattered to scanners. Sign with both: v1 for the JAR view,
+                // v2 for Android's own install integrity check.
                 enableV1Signing = true
                 enableV2Signing = true
             }
@@ -71,21 +118,48 @@ android {
             isShrinkResources = false
             isDebuggable = false
         }
-    } else {
-        buildTypes.named("release") {
-            signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = false
-            isShrinkResources = false
-            isDebuggable = false
-        }
     }
 }
 
-dependencies {
+    dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+}
+
+targetAbis.forEach { abi ->
+    val taskName = "buildRustCore${abi.split('-').joinToString("") { it.replaceFirstChar(Char::uppercase) }}"
+    tasks.register<Exec>(taskName) {
+        group = "build"
+        description = "Builds Aether for Android $abi"
+        val buildScript = if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
+            rootProject.file("core/build-android.ps1")
+        } else {
+            rootProject.file("core/build-android.sh")
+        }
+        if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
+            commandLine(
+                "powershell.exe",
+                "-ExecutionPolicy", "Bypass",
+                "-File", buildScript.absolutePath,
+                "-Abi", abi,
+            )
+        } else {
+            commandLine("bash", buildScript.absolutePath, "--abi", abi)
+        }
+        environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+        environment("ANDROID_SDK_ROOT", android.sdkDirectory.absolutePath)
+        environment("ANDROID_NDK_HOME", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+        environment("ANDROID_NDK_ROOT", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+        inputs.dir(rootProject.file("core/aether/src"))
+        inputs.file(rootProject.file("core/aether/Cargo.toml"))
+        inputs.dir(rootProject.file("core/quiche"))
+        inputs.file(buildScript)
+        val output = file("src/main/jniLibs/$abi/libaether.so")
+        outputs.file(output)
+    }
+    tasks.named("preBuild").configure { dependsOn(taskName) }
 }
 
 val yektaRebrand = tasks.register<Exec>("yektaRebrand") {
@@ -95,23 +169,3 @@ val yektaRebrand = tasks.register<Exec>("yektaRebrand") {
     commandLine("bash", rootProject.file("tools/rebrand.sh").absolutePath)
 }
 tasks.named("preBuild").configure { dependsOn(yektaRebrand) }
-
-targetAbis.forEach { abi ->
-    val taskName = "buildRustCore${abi.split('-').joinToString("") { it.replaceFirstChar(Char::uppercase) }}"
-    tasks.register<Exec>(taskName) {
-        group = "build"
-        description = "Builds Aether for Android $abi"
-        val buildScript = if (org.gradle.internal.os.OperatingSystem.current().isWindows) rootProject.file("core/build-android.ps1") else rootProject.file("core/build-android.sh")
-        if (org.gradle.internal.os.OperatingSystem.current().isWindows) commandLine("powershell.exe", "-ExecutionPolicy", "Bypass", "-File", buildScript.absolutePath, "-Abi", abi) else commandLine("bash", buildScript.absolutePath, "--abi", abi)
-        environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
-        environment("ANDROID_SDK_ROOT", android.sdkDirectory.absolutePath)
-        environment("ANDROID_NDK_HOME", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
-        environment("ANDROID_NDK_ROOT", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
-        inputs.dir(rootProject.file("core/aether/src"))
-        inputs.file(rootProject.file("core/aether/Cargo.toml"))
-        inputs.dir(rootProject.file("core/quiche"))
-        inputs.file(buildScript)
-        outputs.file(file("src/main/jniLibs/$abi/libaether.so"))
-    }
-    tasks.named("preBuild").configure { dependsOn(taskName) }
-}

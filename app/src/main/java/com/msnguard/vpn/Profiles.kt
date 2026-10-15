@@ -331,14 +331,26 @@ private class ProfiledEditor(
     private val real: SharedPreferences.Editor,
     private val rewrite: (String) -> String,
 ) : SharedPreferences.Editor {
-    override fun putString(key: String, value: String?) = real.putString(rewrite(key), value)
-    override fun putStringSet(key: String, values: Set<String>?) = real.putStringSet(rewrite(key), values)
-    override fun putInt(key: String, value: Int) = real.putInt(rewrite(key), value)
-    override fun putLong(key: String, value: Long) = real.putLong(rewrite(key), value)
-    override fun putFloat(key: String, value: Float) = real.putFloat(rewrite(key), value)
-    override fun putBoolean(key: String, value: Boolean) = real.putBoolean(rewrite(key), value)
-    override fun remove(key: String) = real.remove(rewrite(key))
-    override fun clear() = real.clear()
+    // Each mutator must return THIS wrapper, not the result of the delegate call.
+    // SharedPreferences.Editor.putString() etc. return the receiver (the raw
+    // delegate), so `= real.putString(rewrite(key), value)` handed back the
+    // UNPREFIXED editor — and every call chained after the first in a
+    // `.edit().putString(a, x).putString(b, y).commit()` wrote a BARE key.
+    // The Warp Setting Save is exactly that shape:
+    //   .putString(WARP_EXIT_CUSTOM_PREF, raw)      → p0_warp_exit_custom  ✓
+    //   .putString(WARP_EXIT_MODE_PREF, "custom")   → warp_exit_mode       ✗
+    // so the exit mode landed outside the profile, warpExitMode() never saw it,
+    // and the service read the default ("freedom") while the UI kept showing
+    // Freedom — Direct as selected. Returning `this` keeps the prefix on every
+    // chained call; single-put call sites are unaffected.
+    override fun putString(key: String, value: String?): SharedPreferences.Editor { real.putString(rewrite(key), value); return this }
+    override fun putStringSet(key: String, values: Set<String>?) = real.putStringSet(rewrite(key), values).let { this }
+    override fun putInt(key: String, value: Int) = real.putInt(rewrite(key), value).let { this }
+    override fun putLong(key: String, value: Long) = real.putLong(rewrite(key), value).let { this }
+    override fun putFloat(key: String, value: Float) = real.putFloat(rewrite(key), value).let { this }
+    override fun putBoolean(key: String, value: Boolean) = real.putBoolean(rewrite(key), value).let { this }
+    override fun remove(key: String) = real.remove(rewrite(key)).let { this }
+    override fun clear() = real.clear().let { this }
     override fun commit() = real.commit()
     override fun apply() = real.apply()
 }

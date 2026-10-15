@@ -88,6 +88,27 @@ object NativeCore {
     fun attach(service: MsnGuardVpnService) = nativeAttach(service)
     fun detach() = nativeDetach()
 
+    /**
+     * Installs the engine log relay. PattNG reads the core's stdout line by
+     * line; an in-process library has none, so the engine calls back instead.
+     * Every line it emits then reaches ConnectionLog via
+     * [MsnGuardVpnService.onEngineLog], which is what made a MASQUE connect
+     * fail in silence — no log line, no lastError, just 90s of nothing.
+     */
+    fun setLogSink() = nativeSetLogSink()
+
+    /**
+     * Installs the socket protector. The engine's own outgoing sockets must be
+     * exempt from the Android VPN interface the service establishes, or every
+     * dial re-enters the tunnel it is serving and loops back (`Connection
+     * refused` for the API, `no clean endpoint found` for every scan
+     * candidate). PattNG never dials direct — it chains aether through a
+     * loopback socks5 proxy, and loopback is exempt by being loopback; MSN
+     * runs the engine in-process, so the exemption must come from protect().
+     * No-op when no TUN is up: protectSocket() returns true then anyway.
+     */
+    fun setSocketProtector() = nativeSetSocketProtector()
+
     interface CoreCallback {
         fun onEvent(json: String)
     }
@@ -97,12 +118,16 @@ object NativeCore {
      * engine reads. Used by [CoreConfig.applyEnv] before a start.
      */
     fun setEnv(key: String, value: String) = nativeSetEnv(key, value)
+    fun unsetEnv(key: String) = nativeUnsetEnv(key)
+    /** Remove [key] from the process env so a stale value cannot leak into the next connect. */
+    fun clearEnv(key: String) = try { nativeUnsetEnv(key) } catch (_: Throwable) {}
 
     /** Snapshot of aether's byte counters (AETHER_STATS). Returns [up, down]. */
     fun statsSnapshot(): LongArray? = try { nativeStatsSnapshot() } catch (_: Throwable) { null }
 
     @JvmStatic private external fun nativePrepare(config: String): Int
     @JvmStatic private external fun nativeSetEnv(key: String, value: String)
+    @JvmStatic private external fun nativeUnsetEnv(key: String)
     @JvmStatic private external fun nativeStatsSnapshot(): LongArray
     @JvmStatic private external fun nativeLastResult(): String
     @JvmStatic private external fun nativeRequestEmailCode(team: String, email: String): Int
@@ -116,4 +141,6 @@ object NativeCore {
     @JvmStatic private external fun nativeLastLog(): String
     @JvmStatic private external fun nativeAttach(service: MsnGuardVpnService)
     @JvmStatic private external fun nativeDetach()
+    @JvmStatic private external fun nativeSetLogSink()
+    @JvmStatic private external fun nativeSetSocketProtector()
 }

@@ -39,18 +39,12 @@ object ShardSubscription {
     private const val TAG = "ShardSubscription"
 
     /**
-     * The subscription. Our own mirror, not the publisher's URL: the SHARD
-     * node list must be editable on GitHub and reach every installed app —
-     * old and new, Smart Split on or off — with no release. The mirror is
-     * rebuilt by `.github/workflows/shard-nodes-sync.yml` every six hours
-     * from the publisher's live list, so a node change reaches the fleet
-     * with no build and no version bump.
-     *
-     * v1.8.7 and later dial this URL. Versions before it read the publisher
-     * directly; they keep working, they just do not follow our edits.
+     * The subscription — direct from publisher, refreshed every few hours.
+     * The app itself fetches and extracts all configs from this link; the old
+     * mirror is no longer used.
      */
     const val SUBSCRIPTION_URL =
-        "https://raw.githubusercontent.com/mbm110/MSN-GUARD/master/remote/shard-nodes.txt"
+        "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt"
 
     /** Seed list in assets, so the first ever connect works with no network. */
     private const val SEED_ASSET = "shard-seed.txt"
@@ -85,6 +79,17 @@ object ShardSubscription {
 
     /** How many nodes the cache last yielded. Shown in settings as a subtitle. */
     fun cachedCount(context: Context): Int = prefs(context).getInt(LAST_COUNT_PREF, 0)
+
+    /** Raw non-# non-empty lines in the cached file; 0 when no cache. For the effective race log. */
+    fun rawLineCount(context: Context): Int {
+        val f = cacheFile(context)
+        if (!f.exists()) return 0
+        return try {
+            var n = 0
+            f.bufferedReader().useLines { seq -> seq.forEach { line -> if (line.trim().isNotEmpty() && !line.trim().startsWith("#")) n++ } }
+            n
+        } catch (_: Exception) { 0 }
+    }
 
     /**
      * How many distinct paths those nodes expand to across the CDN edges.
@@ -199,7 +204,9 @@ object ShardSubscription {
             }
 
             val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val rawLines = body.lines().count { it.trim().isNotEmpty() && !it.trim().startsWith("#") }
             val parsed = ShardConfigs.parse(body)
+            ConnectionLog.record("$TAG extracted $rawLines lines · parsed ${parsed.size} configs from sub")
             // Refuse to replace a working cache with something that yields nothing.
             // A truncated response or a publisher mistake must not disarm the
             // button — the user would see a transport that worked yesterday and

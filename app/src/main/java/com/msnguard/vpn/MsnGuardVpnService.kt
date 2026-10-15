@@ -528,6 +528,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var psiphonTunnel: PsiphonTunnel? = null
     private var psiphonConfigJson: String = ""
     private var psiphonVpnMode = false
+    private var psiphonUdpFilteredLogged = false
 
     /**
      * Whether THIS session is proxy-only, latched at [startTunnel].
@@ -946,6 +947,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         /** Value of [EXIT_COUNTRY_PREF] meaning "whichever edge answers first". */
         const val EXIT_COUNTRY_AUTO = "auto"
+        const val ENDPOINT_DISCOVERY = "endpoint_discovery"
 
         /**
          * The floor of endpoint rotations one user-initiated connect may
@@ -1324,7 +1326,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
-        if (!TunEngineManager.start(this, tunFd, port, mtu = MtuConfig.get(this, MtuConfig.Method.PSIPHON))) {
+        if (!TunEngineManager.start(this, tunFd, port)) {
             failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
@@ -1451,6 +1453,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     override fun onDiagnosticMessage(message: String) {
+        // Psiphon's s0 proxy logs every UDP ASSOCIATE (0x03) as a Warning:
+        // tun2socks forwards ALL UDP through SOCKS, but Psiphon only speaks
+        // CONNECT (0x01). Hundreds of QUIC/DNS attempts per second then flood
+        // the screen with an identical scary line that has nothing to do with
+        // whether TCP sites load. Filter it here — TCP is the real signal.
+        if (message.contains("s0 proxy accept error") &&
+            message.contains("0x03, not 0x01")
+        ) {
+            // Count, don't print: one line per session is enough to prove the
+            // filter is live without drowning the next real diagnostic.
+            if (!psiphonUdpFilteredLogged) {
+                psiphonUdpFilteredLogged = true
+                ConnectionLog.record("Psiphon: UDP ASSOCIATE not supported — filtered (TCP sites unaffected)")
+            }
+            return
+        }
         ConnectionLog.record("Psiphon: $message")
         // Capture the protocol that actually carried the tunnel.
         //
@@ -2538,6 +2556,33 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     fun protectSocket(fd: Int): Boolean = !vpnModeActive.get() || protect(fd)
 
+    /**
+     * The JNI socket protector the engine calls on every socket it opens: 1 when
+     * the socket is exempt from the VPN interface, 0 when it is not. It is 1 by
+     * definition when no TUN is up ([protectSocket]), which covers the engine's
+     * proxy-mode dials too.
+     */
+    @JvmName("protectSocketInt")
+    fun protectSocketInt(fd: Int): Int = if (protectSocket(fd)) 1 else 0
+
+    /**
+     * The engine's own log, relayed line by line. PattNG reads the core's
+     * stdout; an in-process library has none, so [NativeCore.setLogSink]
+     * installs a callback the engine calls for every record. This is what
+     * makes a MASQUE connect diagnosable: identity provisioning, the scan
+     * (candidates, budget, the gateway chosen) and the tunnel's own exit
+     * reason all appear here instead of ending in 90s of silence.
+     *
+     * Called from the engine's logger thread, so the work here stays cheap:
+     * record and return.
+     */
+    @androidx.annotation.Keep
+    fun onEngineLog(line: String) {
+        val text = line.trim()
+        if (text.isEmpty()) return
+        ConnectionLog.record("aether: $text")
+    }
+
     override fun onEvent(json: String) {
         try {
             val event = JSONObject(json)
@@ -2725,8 +2770,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (!proxyMode) {
                     val address = Tun2SocksManager.selectPrivateAddress()
                     ConnectionLog.record("Chain: creating TUN before either tunnel starts")
-                    val psiphonChainMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.PSIPHON)
-                    ConnectionLog.record("MTU: $psiphonChainMtu for Psiphon (chain)")
+                    val psiphonChainMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                    ConnectionLog.record("MTU: $psiphonChainMtu for Psiphon (legacy path)")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonChainMtu)
@@ -2831,8 +2876,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Tor: creating TUN before Tor starts")
-                val torMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.TOR)
-                ConnectionLog.record("MTU: $torMtu for Tor")
+                val torMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                ConnectionLog.record("MTU: $torMtu for Tor (legacy path)")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(torMtu)
@@ -2940,7 +2985,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // e.g. speed tests) DNS replies came back on rebinded conids and
                 // were rejected as "wrong remote address" — name resolution died
                 // mid-session while the tunnel itself was still healthy.
-                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnly = true, mtu = MtuConfig.get(this, MtuConfig.Method.TOR))) {
+                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnly = true)) {
                     error("Could not start device routing")
                 }
 
@@ -3004,7 +3049,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
-                val shardMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.SHARD)
+                val shardMtu = Tun2SocksManager.VPN_INTERFACE_MTU
                 ConnectionLog.record("MTU: $shardMtu for SHARD")
                 tun = Builder()
                     .setSession("MSN-GUARD")
@@ -3030,10 +3075,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
-                sendStatus(STATUS_CONNECTING, Strings.t("Finding a fast node…"), 15)
+                sendStatus(STATUS_CONNECTING, Strings.t("Finding a fast node…"), 10)
                 ConnectionLog.record("SHARD: TUN ready — racing the pool")
 
-                if (!ShardManager.start(this, verboseShardLog())) {
+                if (!ShardManager.start(this, verboseShardLog(), onProgress = { pct, _ -> publishProgress(pct.coerceIn(10, 70)) })) {
                     error(
                         ShardManager.lastError.ifBlank { "No public node could be reached" }
                     )
@@ -3884,15 +3929,35 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         sendStatus(STATUS_CONNECTING, Strings.tf("Reconnecting after %s…", reason))
         ConnectionLog.record("Auto reconnect #$reconnectAttempts in ${delay}s")
         reconnectTask?.cancel(false)
-        reconnectTask = ladderScheduler.schedule({
-            try {
-                if (userInitiatedStop.get() || connected.get()) return@schedule
-                startTunnel(config)
-            } catch (e: Exception) {
-                ConnectionLog.record("Auto reconnect failed to start: ${e.message}")
-                scheduleAutoReconnect("start failure")
-            }
-        }, delay, TimeUnit.SECONDS)
+        reconnectTask = try {
+            ladderScheduler.schedule({
+                try {
+                    if (userInitiatedStop.get() || connected.get()) return@schedule
+                    // Auto fresh-scan on repeated failure: if the tunnel keeps dying on the
+                    // same cached gateway (watchdog / native exit), evict the gateway cache
+                    // so the retry actually scans instead of re-verifying the same dead peer.
+                    // Applied to every WARP transport (MASQUE/WireGuard/WoW).
+                    if (reconnectAttempts >= 2) {
+                        runCatching {
+                            clearEndpointCaches()
+                            clearStaleWireguardCache(this)
+                            ConnectionLog.record("Auto-reconnect: cleared cached gateways after repeated failure — scanning fresh")
+                        }
+                    }
+                    startTunnel(config)
+                } catch (e: Exception) {
+                    ConnectionLog.record("Auto reconnect failed to start: ${e.message}")
+                    scheduleAutoReconnect("start failure")
+                }
+            }, delay, TimeUnit.SECONDS)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // onDestroy() may win the race with a failure callback. A terminated
+            // scheduler means the service is already leaving; never crash the
+            // worker while trying to schedule a retry on a dead executor.
+            ConnectionLog.record("Auto reconnect skipped: scheduler is terminated")
+            reconnectTask = null
+            return
+        }
     }
 
     private fun cancelAutoReconnect() {
@@ -3913,21 +3978,33 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // carrier back to open: the blocked verdict belongs to the link
                 // we just left, not the one we just joined.
                 IdentityProvisioner.clearApiBlockedCache()
+                // Carrier flip (Samantel -> MCI etc): the lastconn gateway is bound to the previous
+                // carrier's anycast/route. Evict it so the next connect scans fresh on the new link.
+                // Applies to every WARP transport.
+                runCatching {
+                    clearEndpointCaches()
+                    clearStaleWireguardCache(this@MsnGuardVpnService)
+                    ConnectionLog.record("Network change: cleared cached gateways — next connect will scan fresh")
+                }
                 // Connectivity restored - reset backoff and try immediately if we're in auto-reconnect
                 if (willAutoReconnect() && !connected.get() && !userInitiatedStop.get()) {
                     ConnectionLog.record("NetworkCallback: connectivity restored, resetting backoff and retrying")
                     reconnectAttempts = 0
                     reconnectTask?.cancel(false)
-                    reconnectTask = ladderScheduler.schedule({
-                        try {
-                            if (userInitiatedStop.get() || connected.get()) return@schedule
-                            val config = storedConfig
-                            if (config != null) startTunnel(config)
-                        } catch (e: Exception) {
-                            ConnectionLog.record("Auto reconnect after network restore failed: ${e.message}")
-                            scheduleAutoReconnect("network restore failure")
-                        }
-                    }, 0, TimeUnit.SECONDS)
+                    reconnectTask = runCatching {
+                        ladderScheduler.schedule({
+                            try {
+                                if (userInitiatedStop.get() || connected.get()) return@schedule
+                                val config = storedConfig
+                                if (config != null) startTunnel(config)
+                            } catch (e: Exception) {
+                                ConnectionLog.record("Auto reconnect after network restore failed: ${e.message}")
+                                scheduleAutoReconnect("network restore failure")
+                            }
+                        }, 0, TimeUnit.SECONDS)
+                    }.onFailure {
+                        ConnectionLog.record("Network restore retry skipped: scheduler is terminated")
+                    }.getOrNull()
                 }
             }
 
@@ -4310,6 +4387,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // exitPin() compares the saved pin against it, and a stale value from
         // the previous session would let a pin saved for one transport be
         // injected into another.
+        // Fresh-scan gate: honoured on every WARP/masque transport (same for WireGuard/WoW).
+        // "Fresh scan next time" must ACTUALLY scan — evict every on-disk gateway cache
+        // (lastconn rings + masque JSON + exit pin) and flip the pref back to cache so
+        // the gate is one-shot ("next time", not "forever").
+        runCatching {
+            val disc = profiled().getString(ENDPOINT_DISCOVERY, "cache")?.lowercase()
+            if (disc == "fresh") {
+                clearEndpointCaches()
+                clearExitPin("fresh scan requested")
+                profiled().edit().putString(ENDPOINT_DISCOVERY, "cache").apply()
+                ConnectionLog.record("Fresh scan: cleared cached gateways — scanning anew")
+                // Also clear the wireguard/masque shared cache helper for older installs
+                clearStaleWireguardCache(this)
+            }
+        }
+
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
         // Exit-country preference: latched for the whole session, like
@@ -4618,8 +4711,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     val address = Tun2SocksManager.selectPrivateAddress()
 
                     ConnectionLog.record("Creating TUN interface BEFORE Psiphon starts")
-                    val psiphonMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.PSIPHON)
-                    ConnectionLog.record("MTU: $psiphonMtu for Psiphon")
+                    val psiphonMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                    ConnectionLog.record("MTU: $psiphonMtu for Psiphon (legacy path)")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonMtu)
@@ -4683,6 +4776,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 ConnectionLog.record("Preparing $currentProtocol identity")
                 NativeCore.attach(this)
+                // PattNG relays the core's own output line by line; an
+                // in-process library has no stdout, so install the callback
+                // before the engine starts. Without it a MASQUE connect that
+                // fails inside identity provisioning or the scan shows the
+                // user nothing but 90s of silence.
+                NativeCore.setLogSink()
+                // The engine dials the Cloudflare edge itself; those sockets
+                // must be exempt from the VPN interface this service is about
+                // to establish, or they loop back into the tunnel and every
+                // dial fails with Connection refused (the 3.0.22 log on
+                // Freedom: the API refused, and all 2011 scan candidates were
+                // rejected in 2s with "no clean endpoint found"). Custom exit
+                // never saw it because it dials 127.0.0.1, which is exempt by
+                // being loopback. Registered once here, honoured for the life
+                // of the process.
+                NativeCore.setSocketProtector()
 
                 // SOCKS TUNNEL TYPE on a WARP transport: no TUN, no consent, no
                 // tun2socks. The core runs its userspace netstack and publishes the
@@ -4702,9 +4811,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (proxyMode) {
                     // WARP over SOCKS still counts through the same AETHER_STATS
                     // counters; installs the same env the VPN branch already did.
-                    CoreConfig.applyEnv(
-                        CoreConfig.envFromEffectiveConfig(this@MsnGuardVpnService, effectiveConfig),
-                    )
+                    var _proxyWarpUpstream: String? = null
+                    val _proxyProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
+                    val _proxyWarpTransport = CoreConfig.warpTransportOf(_proxyProto)
+                    val _proxyWarpCustom = _proxyWarpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _proxyWarpTransport)
+                    if (_proxyWarpTransport != null && _proxyWarpCustom) {
+                        val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _proxyWarpTransport)
+                        ConnectionLog.record("Warp Setting: custom exit (proxy mode) for ${_proxyWarpTransport.name}, starting sidecar")
+                        val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
+                        if (ok) _proxyWarpUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}" else ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError}")
+                    }
+                    val _proxyBaseEnv = CoreConfig.envFromEffectiveConfig(this@MsnGuardVpnService, effectiveConfig)
+                    val _proxyPatchedEnv = if (_proxyWarpUpstream != null) LinkedHashMap(_proxyBaseEnv).apply { put("AETHER_UPSTREAM", _proxyWarpUpstream!!) } else _proxyBaseEnv
+                    CoreConfig.applyEnv(_proxyPatchedEnv)
                     val port = CoreConfig.proxyListenPort(this@MsnGuardVpnService)
                     val host = CoreConfig.proxyBindHost(this@MsnGuardVpnService)
                     NativeCore.prepare(effectiveConfig)
@@ -4798,12 +4917,36 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // Aether 2.3.0 reads its whole config from AETHER_*; install it before the
                 // engine starts. The engine owns no TUN — it publishes the SOCKS listener
                 // AETHER_SOCKS names and the TunEngine below bridges the VPN interface to it.
-                CoreConfig.applyEnv(
-                    CoreConfig.envFromEffectiveConfig(
-                        this@MsnGuardVpnService,
-                        effectiveConfig,
-                    ),
+                // Warp Setting — per-transport (Masque / WireGuard / WoW): bring up the
+                // shared WarpExit sidecar (xray on 1826) for whichever WARP transport
+                // this connect is actually using. WireGuard's xray stack is the same
+                // SOCKS → VLESS chain Masque uses (see CoreOutboundBuilder parity).
+                var warpExitUpstream: String? = null
+                val _warpProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
+                val _warpTransport = CoreConfig.warpTransportOf(_warpProto)
+                val _exitCustom = _warpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _warpTransport)
+                if (_warpTransport == null) {
+                    ConnectionLog.record("Warp Setting: not a WARP transport (proto=${_warpProto.ifBlank { "none" }}) — sidecar skipped")
+                } else if (!_exitCustom) {
+                    ConnectionLog.record("Warp Setting: ${_warpTransport.name} is Direct (Freedom) — sidecar skipped")
+                }
+                if (_warpTransport != null && _exitCustom) {
+                    val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _warpTransport)
+                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting sidecar")
+                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
+                    if (ok) {
+                        warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                        ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}")
+                    } else {
+                        ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
+                    }
+                }
+                val baseEnv = CoreConfig.envFromEffectiveConfig(
+                    this@MsnGuardVpnService,
+                    effectiveConfig,
                 )
+                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply { put("AETHER_UPSTREAM", warpExitUpstream!!) } else baseEnv
+                CoreConfig.applyEnv(patchedEnv)
                 val addresses = NativeCore.prepare(effectiveConfig)
                 if (addresses.organization.isNotBlank()) {
                     ConnectionLog.record("Zero Trust organization ${addresses.organization}")
@@ -4844,29 +4987,35 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 //    Per-method since 2.3.20 — MtuConfig resolves the user's choice
                 //    for THIS transport (MASQUE/WireGuard/WoW), defaulting to the
                 //    measured value each path shipped before the screen existed.
-                //    SHARD is the only tunnel bound to 512 — its WebSocket leg
+                //    SHARD uses the same TUN MTU (1500) as every transport — PattNG parity; the WebSocket UDP leg
                 //    drops anything bigger, and it has its own Builder below. A WARP
                 //    leg (like the one behind Psiphon or Tor) is
                 //    WireGuard/MASQUE+jumbo-safe, so pushing it down to 512 would
                 //    fragment every real page while helping nothing. The two must
                 //    agree — a 1500 TUN feeding a 1420 engine (or vice versa) still
                 //    asks the peer to carry more than the hop advertises.
-                val warpMtu = MtuConfig.forWarpProtocol(this@MsnGuardVpnService, currentProtocol)
-                ConnectionLog.record("MTU: $warpMtu for $currentProtocol")
-                tun = Builder()
-                    .setSession("MSN-GUARD")
-                    .setMtu(warpMtu)
-                    .applyTunnelAddresses(addresses)
-                    .applyDns(effectiveConfig, addresses, activeEngine)
-                    .applyGatewayProxy(effectiveConfig, addresses)
-                    .applyLanAccess(addresses)
-                    .applyIranBypass()
-                    .applySplitTunneling()
-                    .establish() ?: error("Android could not establish the VPN interface")
-                vpnModeActive.set(true)
-                TunnelStatus.isNativeTunMode = false
-                TunnelStatus.isProxyMode = false
-                if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = warpMtu)) {
+                // WARP MTU auto-retry: stored/default → 1500 → Scan result. One ladder per connect.
+                // Each rung that reaches SOCKS is persisted for next time (Psiphon/Tor/SHARD excluded).
+                val warpMethod = MtuConfig.methodForProtocol(currentProtocol)
+                if (warpMethod != null) {
+                    if (!runWarpWithMtuRetry(effectiveConfig, warpMethod, socksForEngine, activeEngine, warpListen, generation)) return@execute
+                } else {
+                    val warpMtu = MtuConfig.forWarpProtocol(this@MsnGuardVpnService, currentProtocol)
+                    ConnectionLog.record("MTU: $warpMtu for $currentProtocol")
+                    tun = Builder()
+                        .setSession("MSN-GUARD")
+                        .setMtu(warpMtu)
+                        .applyTunnelAddresses(addresses)
+                        .applyDns(effectiveConfig, addresses, activeEngine)
+                        .applyGatewayProxy(effectiveConfig, addresses)
+                        .applyLanAccess(addresses)
+                        .applyIranBypass()
+                        .applySplitTunneling()
+                        .establish() ?: error("Android could not establish the VPN interface")
+                    vpnModeActive.set(true)
+                    TunnelStatus.isNativeTunMode = false
+                    TunnelStatus.isProxyMode = false
+                    if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = warpMtu)) {
                     ConnectionLog.record("TunEngine failed — falling back to native TUN")
                     try { TunEngineManager.stop(this) } catch (_: Throwable) {}
                     tun?.close(); tun = null; vpnModeActive.set(false)
@@ -4980,6 +5129,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     if (!willAutoReconnect()) sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
                 }
                 nativeExitWasUnexpected = diedOnItsOwn && result != 0
+                }
                 }
             } catch (error: Exception) {
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
@@ -5121,6 +5271,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // rendezvous, so it has to come down here too — leaving it bound across
         // a reconnect would fail the next start() with "already running" and
         // silently drop the front again.
+        WarpExitManager.stop()
         WarpUdpgwFront.stop()
         TunnelStatus.isNativeTunMode = false
         // AI Mode's Smart DNS Split runs inside the Rust core's TUN bridge, so
@@ -5367,6 +5518,276 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         } catch (_: java.io.IOException) {
             false
         }
+    }
+
+    /**
+     * Try the WARP tunnel on this MTU ladder, stopping on first SOCKS success.
+     * Returns true when the tunnel came up (caller should return@execute), false when non-WARP.
+     * The original VPN-mode plumbing — Builder, TunEngine, fronts, NativeCore.startProxy —
+     * is replicated per rung so each attempt is clean. A failed rung tears down its TUN
+     * and engine state before the next.
+     */
+    private fun runWarpWithMtuRetry(
+        effectiveConfig: String,
+        method: MtuConfig.Method,
+        socksForEngine: Int,
+        activeEngine: String,
+        warpListen: String,
+        generationAtStart: Int,
+    ): Boolean {
+        val storedMtu = MtuConfig.get(this, method)
+        // Build ladder: stored → 1500 → Scan result. Deduplicated, in-range only.
+        val ladder = mutableListOf<Int>()
+        fun addMtu(v: Int) { if (MtuConfig.isValid(v) && v !in ladder) ladder.add(v) }
+        addMtu(storedMtu)
+        addMtu(1500)
+        val needScan = storedMtu != 1500
+        var scanned: Int? = null
+        var scanTried = false
+        // We do not scan upfront — only after the first two rungs fail, per spec.
+        // persist on rung success; budget per rung uses a share of SOCKS_READY_TIMEOUT_MS
+        // so the whole ladder cannot exceed roughly one normal connect.
+        // per-rung budget must cover the core's own scan before it binds the SOCKS
+        // listener. The WARP scan's overall_deadline is 80s (wg_prober Balanced) and
+        // WoW's is 180s, so a 45s/50s rung fires "no s0 listener" while the core is
+        // still scanning — the tunnel is healthy, the app just gave up on it. It is
+        // fine on Direct (the cache answers fast) but with an Exit Node the scan
+        // always runs and always costs the full budget. Bumped to the core deadline
+        // + dial/validate margin; the ladder still terminates via the ladder itself.
+        val perRungBudgetMsDefault = when (method) {
+            MtuConfig.Method.WIREGUARD -> 110_000L
+            // MASQUE: the engine binds the SOCKS listener only AFTER
+            // load_or_enrol_masque + the balanced scan + establish_masque,
+            // not at job start. With ECH the 109s enable_warp penalty is
+            // gone (api.cloudflareclient.com goes encrypted), so the rung
+            // needs only the 120s scan (prober.rs Balanced overall_deadline)
+            // + margin — no 300s ladder. PattNG provisions in <60s for the
+            // same reason.
+            MtuConfig.Method.MASQUE -> 150_000L
+            else -> 200_000L // WOW: two stacked scans (outer + inner, 80s + 180s)
+        }
+        val perRungBudgetMsFollow = when (method) {
+            MtuConfig.Method.MASQUE -> 150_000L
+            else -> perRungBudgetMsDefault
+        }
+        for ((rungIdx, mtu) in ladder.withIndex()) {
+            if (stopRequested.get() || userInitiatedStop.get()) return true
+            if (generationAtStart != sessionGeneration) return true
+            if (rungIdx > 0) {
+                ConnectionLog.record("MTU auto-retry for " + method.title + ": trying " + mtu)
+            } else {
+                ConnectionLog.record("MTU: " + mtu + " for " + currentProtocol)
+            }
+            // Ensure AETHER_* carries this rung's MTU, not a stale one.
+            runCatching {
+                val env = CoreConfig.envFromEffectiveConfig(this, effectiveConfig)
+                val patched = LinkedHashMap(env)
+                when (method) {
+                    MtuConfig.Method.MASQUE -> patched["AETHER_MASQUE_MTU"] = mtu.toString()
+                    MtuConfig.Method.WIREGUARD -> patched["AETHER_WG_MTU"] = mtu.toString()
+                    MtuConfig.Method.WOW -> { patched["AETHER_WG_MTU"] = mtu.toString(); patched["AETHER_MASQUE_MTU"] = mtu.toString() }
+                    else -> {}
+                }
+                // Preserve WarpExit upstream across the MTU ladder: the rung rebuilds
+                // envFromEffectiveConfig does NOT carry Warp Setting state, so without
+                // this the 2nd MTU rung drops AETHER_UPSTREAM even on an Exit-Node
+                // connect — the Exit Node scan shows IR until the app is Force Stopped.
+                // Now per-transport: only re-attach for the transport this connect is on.
+                run {
+                    val ladderProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
+                    val ladderTransport = CoreConfig.warpTransportOf(ladderProto)
+                    if (ladderTransport != null && CoreConfig.warpExitIsCustom(this, ladderTransport) && WarpExitManager.isRunning) {
+                        patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                    }
+                }
+                CoreConfig.applyEnv(patched)
+            }
+            val addresses = NativeCore.prepare(effectiveConfig)
+            tun = Builder()
+                .setSession("MSN-GUARD")
+                .setMtu(mtu)
+                .applyTunnelAddresses(addresses)
+                .applyDns(effectiveConfig, addresses, activeEngine)
+                .applyGatewayProxy(effectiveConfig, addresses)
+                .applyLanAccess(addresses)
+                .applyIranBypass()
+                .applySplitTunneling()
+                .establish() ?: run {
+                    ConnectionLog.record("MTU " + mtu + " — Android rejected the VPN interface")
+                    continue
+                }
+            vpnModeActive.set(true)
+            TunnelStatus.isNativeTunMode = false
+            TunnelStatus.isProxyMode = false
+            if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = mtu)) {
+                ConnectionLog.record("TunEngine failed — falling back to native TUN")
+                try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+                tun?.close(); tun = null; vpnModeActive.set(false)
+                val fbAddr = NativeCore.prepare(effectiveConfig)
+                tun = Builder().setSession("MSN-GUARD").setMtu(mtu).applyTunnelAddresses(fbAddr).applyDns(effectiveConfig, fbAddr, TunEnginePref.LEGACY).applyGatewayProxy(effectiveConfig, fbAddr).applyLanAccess(fbAddr).applyIranBypass().applySplitTunneling().establish() ?: run {
+                    ConnectionLog.record("MTU " + mtu + " — Android rejected the VPN interface (native fallback)")
+                    continue
+                }
+                TunnelStatus.isNativeTunMode = true; vpnModeActive.set(true)
+                val fbResult = NativeCore.start(effectiveConfig, tun!!.fd)
+                val fbDead = !stopRequested.get()
+                if (fbResult != 0 && !stopRequested.get()) {
+                    val d = NativeCore.lastError().ifBlank { "Tunnel exited with code " + fbResult }
+                    ConnectionLog.record("Native tunnel exited: " + d)
+                    if (startedWithExitPin) { clearExitPin("the pinned endpoint failed"); startedWithExitPin = false; storedConfig = unpinnedStoredConfig ?: storedConfig }
+                } else if (fbResult == 0 && !stopRequested.get()) {
+                    ConnectionLog.record("aether job running — identity/scan in progress")
+                    val effectiveBudget = if (rungIdx == 0) perRungBudgetMsDefault else perRungBudgetMsFollow
+                    val ok = waitForSocksReadyBudget("127.0.0.1:" + CoreConfig.SOCKS_PORT, effectiveBudget)
+                    if (ok) {
+                        if (mtu != storedMtu) { MtuConfig.set(this, method, mtu); ConnectionLog.record("MTU " + mtu + " connected — saved for " + method.title) }
+                        while (!stopRequested.get() && NativeCore.isRunning()) { try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } }
+                        return true
+                    }
+                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (effectiveBudget/1000) + "s")
+                    runCatching {
+                        val err = NativeCore.lastError().takeIf { e -> e.isNotBlank() }
+                        if (err != null) ConnectionLog.record("aether lastError: " + err)
+                        val tailLines = NativeCore.lastLog().lineSequence().filter { line -> line.isNotBlank() }.toList().takeLast(20)
+                        if (tailLines.isNotEmpty()) tailLines.forEach { line -> ConnectionLog.record("aether: " + line) }
+                    }
+                } else if (stopRequested.get()) {
+                    if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
+                    return true
+                }
+                // Tear down before next rung
+                try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+                try { NativeCore.stop() } catch (_: Throwable) {}
+                try { tun?.close() } catch (_: Throwable) {}
+                tun = null; vpnModeActive.set(false); TunnelStatus.isNativeTunMode = false
+                // Also clear the AETHER MTU override for next rung scan fairness — next iteration patches again
+                WarpUdpgwFront.stop(); SmartDnsFront.stop()
+                socksListenerPortForWatchdog = null
+                try { NativeCore.detach() } catch (_: Throwable) {}
+                // If this was the last ladder rung and we haven't scanned yet, scan now and extend ladder
+                if (rungIdx == ladder.lastIndex && needScan && !scanTried) {
+                    scanTried = true
+                    ConnectionLog.record("Scanning MTU for " + method.title + "…")
+                    val r = runCatching { MtuProbe.measure(this, method) }.getOrNull()
+                    val v = r?.inner
+                    if (v != null && MtuConfig.isValid(v) && v !in ladder) {
+                        scanned = v
+                        ladder.add(v)
+                        ConnectionLog.record("Scan MTU for " + method.title + ": " + v + " — retrying")
+                        continue
+                    } else {
+                        ConnectionLog.record("Scan MTU for " + method.title + ": no result")
+                    }
+                }
+                if (rungIdx == ladder.lastIndex && scanned == null && needScan && scanTried) {
+                    // ladder exhausted and scan already attempted — fall through to failure handling below
+                } else if (rungIdx < ladder.lastIndex) {
+                    // next ladder entry
+                }
+                continue
+            } else {
+                ConnectionLog.record("TunEngine " + TunEngineManager.current(this).label + " → " + warpListen)
+                val result = NativeCore.startProxy(org.json.JSONObject(effectiveConfig).apply { put("listen", warpListen) }.toString())
+                val diedOnItsOwn = !stopRequested.get()
+                if (result != 0 && !stopRequested.get()) {
+                    val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code " + result }
+                    ConnectionLog.record("Native tunnel exited: " + detail)
+                    if (startedWithExitPin) { clearExitPin("the pinned endpoint failed"); startedWithExitPin = false; storedConfig = unpinnedStoredConfig ?: storedConfig }
+                } else if (result == 0 && !stopRequested.get()) {
+                    ConnectionLog.record("aether job running — identity/scan in progress")
+                    val effectiveBudget2 = if (rungIdx == 0) perRungBudgetMsDefault else perRungBudgetMsFollow
+                    val ok = waitForSocksReadyBudget(warpListen, effectiveBudget2)
+                    if (ok) {
+                        if (mtu != storedMtu) { MtuConfig.set(this, method, mtu); ConnectionLog.record("MTU " + mtu + " connected — saved for " + method.title) }
+                        while (!stopRequested.get() && NativeCore.isRunning()) { try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } }
+                        return true
+                    }
+                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (effectiveBudget2/1000) + "s")
+                    runCatching {
+                        val err = NativeCore.lastError().takeIf { e -> e.isNotBlank() }
+                        if (err != null) ConnectionLog.record("aether lastError: " + err)
+                        val tailLines = NativeCore.lastLog().lineSequence().filter { line -> line.isNotBlank() }.toList().takeLast(20)
+                        if (tailLines.isNotEmpty()) tailLines.forEach { line -> ConnectionLog.record("aether: " + line) }
+                    }
+                } else if (stopRequested.get()) {
+                    if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
+                    return true
+                } else {
+                    ConnectionLog.record("Native tunnel stopped unexpectedly")
+                }
+                // Tear down before next rung
+                try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+                try { NativeCore.stop() } catch (_: Throwable) {}
+                try { tun?.close() } catch (_: Throwable) {}
+                tun = null; vpnModeActive.set(false); TunnelStatus.isNativeTunMode = false
+                WarpUdpgwFront.stop(); SmartDnsFront.stop()
+                socksListenerPortForWatchdog = null
+                try { NativeCore.detach() } catch (_: Throwable) {}
+                if (rungIdx == ladder.lastIndex && needScan && !scanTried) {
+                    scanTried = true
+                    ConnectionLog.record("Scanning MTU for " + method.title + "…")
+                    val r = runCatching { MtuProbe.measure(this, method) }.getOrNull()
+                    val v = r?.inner
+                    if (v != null && MtuConfig.isValid(v) && v !in ladder) {
+                        scanned = v
+                        ladder.add(v)
+                        ConnectionLog.record("Scan MTU for " + method.title + ": " + v + " — retrying")
+                        continue
+                    } else {
+                        ConnectionLog.record("Scan MTU for " + method.title + ": no result")
+                    }
+                }
+                continue
+            }
+        }
+        // All rungs exhausted without a SOCKS listener. Leave failure to the existing willAutoReconnect path:
+        // set nativeExitWasUnexpected so finally triggers a reconnect attempt rather than a hard stop.
+        // Also ensure no stale TUN/engine remains.
+        try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+        try { NativeCore.stop() } catch (_: Throwable) {}
+        try { tun?.close() } catch (_: Throwable) {}
+        tun = null; vpnModeActive.set(false); TunnelStatus.isNativeTunMode = false
+        WarpUdpgwFront.stop(); SmartDnsFront.stop()
+        socksListenerPortForWatchdog = null
+        try { NativeCore.detach() } catch (_: Throwable) {}
+        ConnectionLog.record("MTU auto-retry exhausted for " + method.title + " — tried " + ladder.joinToString(","))
+        // Signal the outer finally: treat as an unexpected exit so willAutoReconnect can schedule the normal backoff.
+        nativeExitWasUnexpected = true
+        if (!willAutoReconnect()) sendStatus(STATUS_FAILED, "Could not connect with any MTU (" + ladder.joinToString(",") + ")")
+        return true
+    }
+
+        /**
+     * Bounded SOCKS wait for the MTU auto-retry ladder.
+     * Returns true if the listener answered within [budgetMs], false otherwise.
+     * On true it also publishes CONNECTED and arms/watchdogs the same as waitForSocksReady.
+     * Never exceeds its budget — the caller controls the retry clock.
+     */
+    private fun waitForSocksReadyBudget(listenAddress: String, budgetMs: Long): Boolean {
+        val port = runCatching { listenAddress.substringAfter(':').toInt() }.getOrElse { return false }
+        socksListenerPortForWatchdog = port
+        val deadline = SystemClock.elapsedRealtime() + budgetMs.coerceAtLeast(1L)
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (stopRequested.get() || userInitiatedStop.get()) return false
+            if (!NativeCore.isRunning()) return false
+            try {
+                java.net.Socket().use { probe ->
+                    probe.connect(java.net.InetSocketAddress("127.0.0.1", port), SOCKS_READY_PROBE_MS)
+                }
+                connected.set(true)
+                TunnelStatus.isProxyMode = proxyMode
+                TunnelStatus.isNativeTunMode = false
+                repostNotification()
+                sendStatus(STATUS_CONNECTED)
+                ConnectionLog.record("aether SOCKS listener up at " + listenAddress + " — connected")
+                startWatchdog()
+                startWarpTrafficPolling()
+                return true
+            } catch (_: java.io.IOException) {
+            }
+            try { Thread.sleep(SOCKS_READY_POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
+        }
+        return false
     }
 
     private fun waitForSocksReady(listenAddress: String) {
@@ -5625,6 +6046,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // out a window inherited from the tunnel that just died.
         prevSpeedSampleMs = 0
         lastTrafficSampleMs = 0
+        psiphonUdpFilteredLogged = false
         // Per-session latch: each tunnel gets one chance to prove its transport
         // works. Without this reset the flag would stay set for the life of the
         // process, so a later session on a different transport (or a different
@@ -5764,8 +6186,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * is an rtt-sorted pool, not a record of what carried this session.
      */
     private fun currentSessionEndpoint(): String {
+        // The core derives the lastconn filename from the identity it loaded:
+        // aether.toml (WireGuard) -> aether-lastconn.toml, aether-masque.toml
+        // (MASQUE, and the outer leg of WoW) -> aether-masque-lastconn.toml.
+        // coreLastconnFile("wireguard") was used for MASQUE too, so the endpoint
+        // reported for a MASQUE session was whatever a *WireGuard* session last
+        // wrote — usually empty, which is why the value looked right by luck and
+        // hid the mismatch.
         val direct = when (currentProtocol) {
-            "MASQUE", "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
+            "MASQUE" -> readLastconnPeer(File(filesDir, "aether-masque-lastconn.toml"))
+            "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
             "GOOL" -> readLastconnPeer(coreLastconnFile("gool"))
             "MIM" -> readLastconnPeer(coreLastconnFile("mim"))
             else -> ""
@@ -5843,10 +6273,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * in [resetIdentities], gated behind a confirmation the user has to read.
      */
     private fun clearEndpointCaches() {
+        // The core derives every lastconn path from the identity file it loaded:
+        //   aether.toml        -> aether-lastconn.toml      (WireGuard)
+        //   aether-masque.toml -> aether-masque-lastconn.toml (MASQUE + WoW outer)
+        //   aether-gool.toml   -> aether-gool-lastconn.toml
+        //   aether-mim.toml    -> aether-mim-lastconn.toml
+        // coreLastconnFile() below produces exactly the first three of these, but
+        // through `when (protocol) { "gool" -> ...; "mim" -> ...; else -> "lastconn" }`
+        // — MASQUE falls into `else`, so it mapped to the *WireGuard* file
+        // (aether-lastconn.toml) and the real aether-masque-lastconn.toml was
+        // never touched. A "Fresh scan" therefore deleted the wrong file and the
+        // core went on reusing the cached gateway it was asked to forget — the
+        // 3.0.23 log shows "Fresh scan: cleared cached gateways" immediately
+        // followed by "cached gateway ... still works; skipping scan". Named
+        // explicitly here so the mapping cannot drift again.
         val targets = listOf(
-            coreLastconnFile("wireguard"),
-            coreLastconnFile("gool"),
-            coreLastconnFile("mim"),
+            File(filesDir, "aether-lastconn.toml"),
+            File(filesDir, "aether-masque-lastconn.toml"),
+            File(filesDir, "aether-gool-lastconn.toml"),
+            File(filesDir, "aether-mim-lastconn.toml"),
             File(filesDir, "masque-gateway-cache.json"),
         )
         for (file in targets) {
@@ -6372,9 +6817,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         packages.forEach { pkg ->
             try {
                 when (mode) {
-                    SplitTunnelSettings.Mode.ALL -> {
-                        // ALL is handled above and returns immediately.
-                    }
                     SplitTunnelSettings.Mode.INCLUDE -> {
                         addAllowedApplication(pkg)
                         addedCount++

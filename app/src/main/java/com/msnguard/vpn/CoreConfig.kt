@@ -106,6 +106,74 @@ object CoreConfig {
     /** The core's protocol name for masque-over-masque. */
     const val MIM_PROTOCOL = "mim"
 
+    // ── Warp Setting — per-transport (Masque / WireGuard / WoW) ──
+    // The single-transport keys below stay as the Masque alias so a user who
+    // already saved a Masque Lithuania exit before 3.0.28 does not lose it.
+    const val WARP_EXIT_MODE_PREF = "warp_exit_mode"
+    const val WARP_EXIT_MODE_FREEDOM = "freedom"
+    const val WARP_EXIT_MODE_CUSTOM = "custom"
+    const val WARP_EXIT_MODE_DEFAULT = WARP_EXIT_MODE_FREEDOM
+    const val WARP_EXIT_CUSTOM_PREF = "warp_exit_custom"
+    const val WARP_EXIT_MODE_PREF_MASQUE = "warp_exit_mode_masque"
+    const val WARP_EXIT_CUSTOM_PREF_MASQUE = "warp_exit_custom_masque"
+    const val WARP_EXIT_MODE_PREF_WIREGUARD = "warp_exit_mode_wireguard"
+    const val WARP_EXIT_CUSTOM_PREF_WIREGUARD = "warp_exit_custom_wireguard"
+    const val WARP_EXIT_MODE_PREF_WOW = "warp_exit_mode_wow"
+    const val WARP_EXIT_CUSTOM_PREF_WOW = "warp_exit_custom_wow"
+
+    enum class WarpTransport { MASQUE, WIREGUARD, WOW }
+
+    fun warpKeys(t: WarpTransport): Pair<String, String> = when (t) {
+        WarpTransport.MASQUE -> WARP_EXIT_MODE_PREF_MASQUE to WARP_EXIT_CUSTOM_PREF_MASQUE
+        WarpTransport.WIREGUARD -> WARP_EXIT_MODE_PREF_WIREGUARD to WARP_EXIT_CUSTOM_PREF_WIREGUARD
+        WarpTransport.WOW -> WARP_EXIT_MODE_PREF_WOW to WARP_EXIT_CUSTOM_PREF_WOW
+    }
+
+    fun warpTransportOf(protocol: String): WarpTransport? = when (protocol.trim().lowercase()) {
+        "masque", "mim" -> WarpTransport.MASQUE
+        "wireguard", "wg" -> WarpTransport.WIREGUARD
+        "gool", "wow", "warp-in-warp", "warp_in_warp" -> WarpTransport.WOW
+        else -> null
+    }
+
+    private fun warpExitModeRaw(context: android.content.Context, t: WarpTransport): String {
+        val (modeKey, _) = warpKeys(t)
+        val v = context.profiled().getString(modeKey, null)?.trim()?.lowercase().orEmpty()
+        if (v == WARP_EXIT_MODE_CUSTOM || v == WARP_EXIT_MODE_FREEDOM) return v
+        // One-time migration for Masque: if the namespaced key was never written
+        // but the legacy single key was, treat the legacy value as the Masque one.
+        if (t == WarpTransport.MASQUE) {
+            val legacy = context.profiled().getString(WARP_EXIT_MODE_PREF, null)?.trim()?.lowercase().orEmpty()
+            if (legacy == WARP_EXIT_MODE_CUSTOM || legacy == WARP_EXIT_MODE_FREEDOM) return legacy
+        }
+        return WARP_EXIT_MODE_DEFAULT
+    }
+
+    private fun warpExitCustomRaw(context: android.content.Context, t: WarpTransport): String {
+        val (_, customKey) = warpKeys(t)
+        val v = context.profiled().getString(customKey, null)?.trim().orEmpty()
+        if (v.isNotBlank()) return v
+        if (t == WarpTransport.MASQUE) {
+            val legacy = context.profiled().getString(WARP_EXIT_CUSTOM_PREF, null)?.trim().orEmpty()
+            if (legacy.isNotBlank()) return legacy
+        }
+        return ""
+    }
+
+    fun warpExitMode(context: android.content.Context, t: WarpTransport): String =
+        warpExitModeRaw(context, t).let { if (it == WARP_EXIT_MODE_CUSTOM) WARP_EXIT_MODE_CUSTOM else WARP_EXIT_MODE_FREEDOM }
+
+    fun warpExitCustom(context: android.content.Context, t: WarpTransport): String = warpExitCustomRaw(context, t)
+
+    fun warpExitIsCustom(context: android.content.Context, t: WarpTransport): Boolean =
+        warpExitMode(context, t) == WARP_EXIT_MODE_CUSTOM && warpExitCustom(context, t).isNotBlank()
+
+    // Legacy single-transport surface — Masque alias. Kept so existing callers
+    // compile and existing installs keep their Masque exit.
+    fun warpExitMode(context: android.content.Context): String = warpExitMode(context, WarpTransport.MASQUE)
+    fun warpExitCustom(context: android.content.Context): String = warpExitCustom(context, WarpTransport.MASQUE)
+    fun warpExitIsCustom(context: android.content.Context): Boolean = warpExitIsCustom(context, WarpTransport.MASQUE)
+
     /** Whether the user armed masque-over-masque. */
     fun mimArmed(context: Context): Boolean =
         context.profiled()
@@ -144,7 +212,7 @@ object CoreConfig {
             put("config_path", java.io.File(context.filesDir, "aether.toml").absolutePath)
             put("listen", if (listenOverride != null) "127.0.0.1:$listenOverride" else "${proxyBindHost(context)}:${sharedSocksPort(context)}")
             put("scan_mode", text("default_scan_mode", "balanced"))
-            put("ip_scan", text("default_scan", "both"))
+            put("ip_scan", if (effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL) "v4" else text("default_scan", "both"))
             // forwarded verbatim when present — keeps pin/SHARD-identity logic from breaking
             if (socksProxyForCore.isNotBlank()) put("socks_proxy", socksProxyForCore)
             text("manual_endpoint").ifBlank { null }?.let { put("forced_peer", it) }
@@ -259,15 +327,19 @@ object CoreConfig {
         // ironclad/real/verify/guaranteed, everything else -> balanced.
         // IpScan::parse takes v6/ipv6/6, both/all/dual, everything else -> v4.
         out["AETHER_SCAN"] = text("default_scan_mode", "balanced")
-        // Both means scan IPv4 and IPv6; the engine tries IPv6 first and
-        // falls back to IPv4 when v6 is unreachable, which is exactly the
-        // "v6 first, then v4" order requested.
-        out["AETHER_IP"] = text("default_scan", "both")
+        // Masque in Iran: always H2 and always IPv4 (hardcoded, 2026-10-10). Other
+        // transports keep the user's choice; masque/mim ignore it.
+        val isMasqueForEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL
+        out["AETHER_IP"] = if (isMasqueForEnv) "v4" else text("default_scan", "both")
 
         // Obfuscation (aethernoize). off/light/balanced/aggressive/firewall/gfw;
         // the engine defaults wireguard to "firewall" and masque to "balanced".
-        text("obfuscation_profile").ifBlank { "balanced" }.let {
-            out["AETHER_NOIZE"] = it
+        // PattNG parity: MASQUE over H2 takes no obfuscation at all (UDP-only).
+        // MSN hardcodes masque to H2, so skip NOIZE for masque/mim.
+        if (!isMasqueForEnv) {
+            text("obfuscation_profile").ifBlank { "balanced" }.let {
+                out["AETHER_NOIZE"] = it
+            }
         }
 
         // Manual obfuscation overrides. 2.3.0 exposes only the profile through
@@ -297,10 +369,11 @@ object CoreConfig {
             }
         }
 
-        // MASQUE transport: HTTP/2 over TCP when the user asked for it (UDP/QUIC
-        // blocked or throttled), HTTP/3 over QUIC otherwise. The engine reads a
-        // truthy AETHER_MASQUE_HTTP2.
-        if (text("default_masque_transport", "h3") == "h2") {
+        // MASQUE transport: H2/TCP is the only working mode on this carrier.
+        // Hardcode for masque/mim (2026-10-10); other transports keep the toggle.
+        if (isMasqueForEnv) {
+            out["AETHER_MASQUE_HTTP2"] = "1"
+        } else if (text("default_masque_transport", "h3") == "h2") {
             out["AETHER_MASQUE_HTTP2"] = "1"
         }
 
@@ -345,6 +418,13 @@ object CoreConfig {
             out["AETHER_WG_NO_DATA_CHECK"] = "1"
         }
 
+        // Masque SNI (DPI bypass): engine reads AETHER_MASQUE_SNI as the ClientHello SNI for
+        // MASQUE handshakes (H2 + H3). PattNG 512726 changed default from
+        // consumer-masque.cloudflareclient.com to www.cloudflare.com; set explicitly, only for masque/mim.
+        if (effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL) {
+            out["AETHER_MASQUE_SNI"] = "www.cloudflare.com"
+        }
+
         // Traffic counters for the WARP path: socks.rs add_up/add_down is
         // gated on AETHER_STATS, and 2.3.0's job model emits no "traffic"
         // events to the host. Without this the VPN-mode MASQUE/WireGuard/WoW
@@ -357,45 +437,83 @@ object CoreConfig {
         out["AETHER_LOG_LEVEL"] = text("log_level", "info")
         out["AETHER_PERF_PROFILE"] = text("perf_profile", "auto")
 
-        // H2 fragmentation. FCAE sends AETHER_MASQUE_H2_FRAGMENT_SNI only when
-        // fragment_enabled is true (config.rs: if fragment_enabled { ... SNI ... } else { None }).
-        // Mixed-case SNI when fragmentation is OFF would be a behaviour FCAE never has
-        // — so gate it the same way, not independently.
-        if (text("h2_fragmentation", "on") == "on") {
+        // H2 fragmentation. PattNG screenshot 1-22-03 shows Fragment OFF yet
+        // MASQUE connects in <30s; MSN with fragment ON (default "on") found
+        // 0 gateways in 120s (3.0.19 log). Match PattNG: MASQUE fragment OFF
+        // by default — user can still turn it on via h2_fragmentation pref.
+        // Mixed-case SNI only inside fragment branch (FCAE parity).
+        if (isMasqueForEnv && text("h2_fragmentation", "off") == "on") {
             out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
-            // Only while fragmented; FCAE nests SNI inside the fragment branch.
             if (bool("mixed_case_sni", false)) {
                 out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
             }
         }
 
-        // Distributed identity via ECH — EXACTLY as FCAE does.
-        // FCAE never raised SHARD and never set AETHER_UPSTREAM for a fresh
-        // install; its log says:
-        //   fetched ECHConfigList (71 bytes) for cloudflare-ech.com via udp://1.1.1.1:53
-        //   fetched ECHConfigList automatically for the WARP API (71 bytes)
-        //   registration went over ECH
-        // That path is inside the engine: with AETHER_ECH=auto the engine
-        // looks the ECHConfigList up over udp://1.1.1.1:53 for
-        // cloudflare-ech.com and offers it on the api.cloudflareclient.com
-        // ClientHello, so the register goes encrypted and is not named on the
-        // wire. On a filtered carrier it is the ONLY way the API answers.
-        // Enabling it is the whole fix for (1) and (3): the engine provisions
-        // on its own link, no SHARD session, no probe, no timeout.
+        // ECH: per-exit handling — Identity via ECH like FCAE (2.3.2) & 3.0.11.
+        // - Custom exit (sidecar Lithuania): goes via AETHER_UPSTREAM, so both
+        //   api.cloudflareclient.com and the 162.159 scan ride the Lithuania
+        //   egress — no DPI on this carrier, no ECH needed. Keep ECH OFF
+        //   like PattNG screenshot 1-22-03.
+        // - Freedom (direct): api.cloudflareclient.com IS filtered on this
+        //   carrier (log: Connection refused). The API needs ECH but the H2
+        //   scan to www.cloudflare.com must NOT offer cloudflare-ech.com or
+        //   every probe fails — hence the split into AETHER_API_ECH (API
+        //   only) and no AETHER_ECH for the H2 session (see tls.rs
+        //   API_ECH_OPTION + lib.rs resolve_ech). MASQUE sensitive: Freedom
+        //   direct embeds cloudflare-ech.com on AETHER_API_ECH only, H2 stays OFF.
+        //   WireGuard/WoW (gool) + Masque/MIM all need the same API ECH for
+        //   identity (filtered carrier); Fcae does it with AETHER_ECH=auto on
+        //   every WARP connect — we embed the key directly (no DoH, filtered).
+        // User pref aether_ech still wins when set (off/0/false → force off).
+        // Exit Node case is handled below in the socksProxyForCore branch;
+        // this if is Freedom direct only. DO NOT touch Masque H2/fragment logic.
         if (socksProxyForCore.isBlank()) {
-            if (text("aether_ech", "").isBlank()) {
-                out["AETHER_ECH"] = "auto"
-            } else {
-                out["AETHER_ECH"] = text("aether_ech", "auto")
+            val echRaw = text("aether_ech", "").trim()
+            val echLower = echRaw.lowercase()
+            val useEch: Boolean
+            var echValue: String? = null
+            var useApiEch = false
+            var echIsEmbedded = false
+            // isMasqueForEnv covers masque + mim; add wireguard + gool (WoW) for identity.
+            val isWarpForIdentity = isMasqueForEnv || effectiveProtocol == "wireguard" || effectiveProtocol == "gool"
+            when {
+                echLower.isEmpty() && isWarpForIdentity -> {
+                    // Freedom direct: embed key on the API-only var so
+                    // resolve_ech for H2 stays OFF (no AETHER_ECH). For
+                    // WireGuard/WoW there is no H2, but same API_ECH path
+                    // is the filtered-carrier fix (FCAE 2.3.2 -> embed).
+                    useEch = true
+                    echValue = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+                    echIsEmbedded = true
+                    useApiEch = true
+                }
+                echLower.isEmpty() -> useEch = false
+                echLower in setOf("auto", "1", "true") -> { useEch = true; echValue = "auto" }
+                echLower in setOf("off", "0", "false") -> useEch = false
+                else -> { useEch = true; echValue = echRaw }
             }
-            // Same for the AETHER_UPSTREAM comment above: with AETHER_ECH the
-            // carrier no longer dictates an uplink for the account API.
-            // AETHER_UPSTREAM is kept only for the two transports that have no
-            // account at all (Psiphon, Tor) and for the case a future setting
-            // explicitly wants a proxy — otherwise it stays unset, exactly as
-            // in the FCAE run whose log you sent.
+            if (useEch && echValue != null) {
+                if (useApiEch) {
+                    out["AETHER_API_ECH"] = echValue
+                } else {
+                    out["AETHER_ECH"] = echValue
+                    if (!echIsEmbedded) {
+                        val dns = text("aether_ech_dns", "").trim()
+                        if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
+                        val dom = text("aether_ech_domain", "").trim()
+                        if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+                    }
+                }
+            }
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
+            // Exit Node via Lithuania: no ECH — the log proves 3.0.20 worked
+            // with ECH OFF from the very first Freedom=custom attempt.
+            // Do not set AETHER_ECH here even if the pre-patched env would have.
+            out.remove("AETHER_ECH")
+            out.remove("AETHER_API_ECH")
+            out.remove("AETHER_ECH_DNS")
+            out.remove("AETHER_ECH_DOMAIN")
         }
 
         // Zero Trust / Teams. The engine reads the team name and the Access
@@ -424,6 +542,16 @@ object CoreConfig {
         }
         text("route_direct").ifBlank { "" }.takeIf { it.isNotBlank() }?.let {
             out["AETHER_ROUTE_DIRECT"] = it
+        }
+
+        // Endpoint discovery: honoured on every WARP transport (MASQUE/WireGuard/WoW).
+        // CACHE (default): quick-reconnect may reuse a verified lastconn ring.
+        // FRESH: force a new scan on next connect by disabling quick-reconnect.
+        // The service clears the on-disk cache before start as well; this env is
+        // the in-engine half so even a lingering file cannot be reused.
+        when (text("endpoint_discovery", "cache").lowercase()) {
+            "fresh" -> out["AETHER_QUICK_RECONNECT"] = "0"
+            else -> { /* cache: let the engine decide; do not force */ }
         }
 
         return out
@@ -472,13 +600,30 @@ object CoreConfig {
      * Installs [env] on this process so the Aether engine reads it.
      *
      * The engine is dlopen'd in-process and reads `std::env`. Java has no
-     * `setenv`, so the write goes through NativeCore.nativeSetEnv, which calls
-     * libc `setenv` — the JNI bridge then inherits it on
+     * `setenv`, so the write goes through NativeCore.nativeSetEnv/nativeUnsetEnv,
+     * which call libc `setenv`/`unsetenv` — the JNI bridge then inherits it on
      * `aether_core_start`. Call immediately before NativeCore.start(); a later
      * start rewrites it wholesale, so nothing is ever left stale.
+     *
+     * Variables that were set on a previous connect but are absent from the new
+     * [map] must be UNSET, not left behind. The critical one is
+     * AETHER_UPSTREAM: an Exit Node run writes
+     * `AETHER_UPSTREAM=socks5://127.0.0.1:1826`, and a Freedom run builds its
+     * [map] with `socksProxyForCore=""` so the `AETHER_UPSTREAM` else-branch
+     * never fires. Without an unset the Freedom run still dials through the
+     * dead sidecar and every probe fails with `no clean endpoint found` — only a
+     * Force Stop (fresh process) clears the env. Same for AETHER_API_ECH /
+     * AETHER_ECH which are Freedom-only.
      */
     fun applyEnv(map: Map<String, String>) {
         for ((key, value) in map) NativeCore.setEnv(key, value)
+        // Env vars that can appear in one exit mode and not the other.
+        // Anything in the map wins; anything absent is actively cleared.
+        val clearIfAbsent = listOf(
+            "AETHER_UPSTREAM",
+            "AETHER_ECH", "AETHER_API_ECH", "AETHER_ECH_DNS", "AETHER_ECH_DOMAIN",
+        )
+        for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
 
     /**

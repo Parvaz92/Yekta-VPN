@@ -5,6 +5,8 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+plugins {
+}
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
@@ -14,5 +16,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Yekta-VPN"
+rootProject.name = "MSN-GUARD"
 include(":app")
+

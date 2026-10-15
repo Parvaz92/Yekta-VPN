@@ -35,6 +35,8 @@ const char* aether_job_cancel(unsigned long long id);
 const char* aether_job_free(unsigned long long id);
 const char* aether_stats_snapshot();
 void aether_string_free(const char* raw);
+void aether_set_log_sink(void (*callback)(const char* line));
+void aether_set_socket_protector(int (*protector)(int fd));
 }
 
 namespace {
@@ -48,7 +50,75 @@ unsigned long long g_job = 0;
 JavaVM* g_vm = nullptr;
 jobject g_service = nullptr;
 jmethodID g_on_event = nullptr;
+jmethodID g_on_log = nullptr;
+jmethodID g_protect = nullptr;
 std::mutex g_service_mutex;
+
+// The engine's log relay. PattNG reads the core's stdout line by line; an
+// in-process library has none, so the engine calls this for every log record
+// and the host routes it to ConnectionLog. The signature is
+// onEngineLog(String) on the service.
+extern "C" JNIEXPORT void JNICALL
+Java_com_msnguard_vpn_NativeCore_nativeSetLogSink(JNIEnv*, jobject) {
+    // Looked up lazily: attach() may not have run when a test sets the sink.
+    aether_set_log_sink([](const char* line) {
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (g_vm == nullptr) return;
+        if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+            if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+            attached = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_service_mutex);
+            if (g_service != nullptr && g_on_log != nullptr) {
+                jstring jline = env->NewStringUTF(line);
+                env->CallVoidMethod(g_service, g_on_log, jline);
+                env->DeleteLocalRef(jline);
+            }
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        if (attached) g_vm->DetachCurrentThread();
+    });
+}
+
+
+/// The engine calls this for every socket it opens. Routed to the service's
+/// protectSocket(fd), which is VpnService.protect(fd) while a TUN this
+/// service established is up. Without it the engine's own dials to the
+/// Cloudflare edge enter the VPN interface it is itself serving and loop
+/// back: `Connection refused` for the API and "no clean endpoint found" for
+/// every scan candidate, which is exactly what the 3.0.22 log showed on
+/// Freedom while custom exit (loopback socks5) worked.
+extern "C" JNIEXPORT void JNICALL
+Java_com_msnguard_vpn_NativeCore_nativeSetSocketProtector(JNIEnv*, jobject) {
+    aether_set_socket_protector([](int fd) -> int {
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (g_vm == nullptr) return 0;
+        if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+            if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return 0;
+            attached = true;
+        }
+        int result = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_service_mutex);
+            if (g_service != nullptr && g_protect != nullptr) {
+                result = env->CallIntMethod(g_service, g_protect, fd);
+            }
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        if (attached) g_vm->DetachCurrentThread();
+        return result;
+    });
+}
+
 
 void on_event(const std::string& json) {
     JNIEnv* env = nullptr;
@@ -325,6 +395,14 @@ Java_com_msnguard_vpn_NativeCore_nativeSetEnv(JNIEnv* env, jobject, jstring key,
     env->ReleaseStringUTFChars(key, k);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_msnguard_vpn_NativeCore_nativeUnsetEnv(JNIEnv* env, jobject, jstring key) {
+    const char* k = env->GetStringUTFChars(key, nullptr);
+    if (k == nullptr) return;
+    unsetenv(k);
+    env->ReleaseStringUTFChars(key, k);
+}
+
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_msnguard_vpn_NativeCore_nativeStatsSnapshot(JNIEnv* env, jobject) {
     const char* raw = aether_stats_snapshot();
@@ -367,6 +445,8 @@ Java_com_msnguard_vpn_NativeCore_nativeAttach(JNIEnv* env, jobject, jobject serv
     g_service = env->NewGlobalRef(service);
     const jclass type = env->GetObjectClass(service);
     g_on_event = env->GetMethodID(type, "onEvent", "(Ljava/lang/String;)V");
+    g_on_log = env->GetMethodID(type, "onEngineLog", "(Ljava/lang/String;)V");
+    g_protect = env->GetMethodID(type, "protectSocketInt", "(I)I");
     env->DeleteLocalRef(type);
 }
 
@@ -376,6 +456,8 @@ Java_com_msnguard_vpn_NativeCore_nativeDetach(JNIEnv* env, jobject) {
     if (g_service != nullptr) env->DeleteGlobalRef(g_service);
     g_service = nullptr;
     g_on_event = nullptr;
+    g_on_log = nullptr;
+    g_protect = nullptr;
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {

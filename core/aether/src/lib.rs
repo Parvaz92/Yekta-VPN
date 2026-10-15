@@ -99,13 +99,23 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         .map(|v| v.trim().to_lowercase())
         .filter(|v| matches!(v.as_str(), "error" | "warn" | "info" | "debug" | "trace"))
         .unwrap_or_else(|| "info".to_string());
-    let default_filter = format!("info,aether={level}");
-    let _ =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+
+    // PattNG relays the core's own output line by line; an in-process library
+    // has no stdout, so when the host installed a sink it is the log target
+    // and env_logger stays for logcat. Both receive every line.
+    if ffi::sink_installed() {
+        // set_logger takes &'static, so the logger is a static, not a local.
+        static SINK: ffi::SinkLogger = ffi::SinkLogger;
+        let _ = log::set_logger(&SINK)
+            .map(|()| log::set_max_level(log::LevelFilter::Info));
+        log::info!("Aether v{} (host log sink)", env!("CARGO_PKG_VERSION"));
+    } else {
+        let default_filter = format!("info,aether={level}");
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
             .format_timestamp_millis()
             .try_init();
-
-    log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
+        log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
+    }
     sysprofile::log_summary();
     sysprofile::raise_fd_limit();
     egress::init()?;
@@ -1118,7 +1128,7 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             let mode = prober::ScanMode::parse(&mode_str);
             let probe = prober::MasqueProbe {
-                sni: consts::CONNECT_SNI.to_string(),
+                sni: quic::masque_sni()?,
                 authority: quic::default_authority().to_string(),
                 path: quic::default_path().to_string(),
                 cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1226,14 +1236,14 @@ async fn select_wg_peers(
 /// server name never goes out in the clear.
 async fn resolve_ech() -> Result<Option<Vec<u8>>> {
     let setting = std::env::var(tls::SESSION_ECH_OPTION.variable).ok();
-    if setting.as_deref().is_some_and(|value| !value.is_empty()) {
-        if let Some(key) = account::api_ech_in_use() {
-            log::info!(
-                "[+] offering the ECHConfigList the WARP API took ({} bytes)",
-                key.len()
-            );
-            return Ok(Some(key));
-        }
+    if setting.as_deref().is_none_or(str::is_empty) {
+        return Ok(None);
+    }
+    if account::api_ech_in_use().is_some() {
+        log::info!(
+            "[+] ECH for the H2 session disabled — the API's ECH key is not reused for MASQUE H2"
+        );
+        return Ok(None);
     }
     let key = tls::ech_key(&tls::SESSION_ECH_OPTION, setting.as_deref(), || {
         dns::fetch_ech_config(&dns::SESSION_ECH)
@@ -1275,7 +1285,7 @@ async fn hunt_masque_peer(
     );
     let mode = prober::ScanMode::parse(mode_str);
     let probe = prober::MasqueProbe {
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: quic::masque_sni()?,
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1316,9 +1326,18 @@ async fn quick_verify_masque_peer(
     peer: SocketAddr,
     ech: Option<Vec<u8>>,
 ) -> bool {
+    // The core checks the name as it starts; a job of the library given no domain name fails
+    // every check here.
+    let sni = match quic::masque_sni() {
+        Ok(sni) => sni,
+        Err(e) => {
+            log::warn!("[-] {e}");
+            return false;
+        }
+    };
     let vp = quic::VerifyParams {
         peer,
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: sni.clone(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -1332,7 +1351,7 @@ async fn quick_verify_masque_peer(
     if masque_h2::enabled() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: consts::CONNECT_SNI.to_string(),
+            sni,
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -1584,7 +1603,7 @@ async fn establish_masque(
     let tunnel_task = if h2 {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer,
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: quic::masque_sni()?,
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -1605,7 +1624,7 @@ async fn establish_masque(
     } else {
         let cfg = quic::TunnelConfig {
             peer,
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: quic::masque_sni()?,
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
