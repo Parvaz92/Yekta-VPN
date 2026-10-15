@@ -37,21 +37,29 @@ done
 
 # Add the two public channels to the home screen without hand-editing the very
 # large upstream MainActivity. The marker makes this safe to run repeatedly.
-python3 - "$ROOT/app/src/main/java/com/msnguard/vpn/MainActivity.kt" <<'PY'
+# If upstream reshapes the home screen, skip the links instead of failing the
+# whole build: a missing link must never block a VPN update.
+if [ -f "$SRC/ParvazSocialLinks.kt" ]; then
+python3 - "$SRC/MainActivity.kt" <<'PY'
 from pathlib import Path
-p = Path(__import__('sys').argv[1])
+import sys
+p = Path(sys.argv[1])
 s = p.read_text()
 marker = '        // YEKTA_SOCIAL_LINKS\n'
 if marker not in s:
     s = s.replace('        // PARVAZ_SOCIAL_LINKS\n', marker, 1)
-if marker not in s:
-    needle = '''        addView(transportRail, LinearLayout.LayoutParams(\n'''
-    insert = marker + '''        addView(ParvazSocialLinks.build(this@MainActivity), LinearLayout.LayoutParams(\n            ViewGroup.LayoutParams.MATCH_PARENT,\n            ViewGroup.LayoutParams.WRAP_CONTENT,\n        ).apply { topMargin = dp(10) })\n\n'''
-    if needle not in s:
-        raise SystemExit("home-screen insertion point not found")
-    s = s.replace(needle, insert + needle, 1)
+if marker in s:
     p.write_text(s)
+    sys.exit(0)
+needle = '''        addView(transportRail, LinearLayout.LayoutParams(\n'''
+if needle not in s:
+    print("WARN: home-screen insertion point not found; social links skipped this build")
+    sys.exit(0)
+insert = marker + '''        addView(ParvazSocialLinks.build(this@MainActivity), LinearLayout.LayoutParams(\n            ViewGroup.LayoutParams.MATCH_PARENT,\n            ViewGroup.LayoutParams.WRAP_CONTENT,\n        ).apply { topMargin = dp(10) })\n\n'''
+s = s.replace(needle, insert + needle, 1)
+p.write_text(s)
 PY
+fi
 
 echo "==> Rendering artwork"
 if ! command -v rsvg-convert >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
