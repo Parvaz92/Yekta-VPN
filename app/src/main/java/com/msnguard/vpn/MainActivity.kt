@@ -6604,7 +6604,7 @@ class MainActivity : Activity() {
             val ctx = this@MainActivity
             Thread {
                 val ok = try {
-                    if (chosenMethod == "shard") IdentityProvisioner.provisionViaShard(ctx, proto)
+                    if (chosenMethod == "shard") WarpIdentityFetcher.fetchViaShard(ctx, proto)
                     else WarpIdentityFetcher.fetch(ctx, proto)
                 } catch (_: Exception) { false }
                 runOnUiThread {
