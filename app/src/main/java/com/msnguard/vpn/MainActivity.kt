@@ -6453,6 +6453,67 @@ class MainActivity : Activity() {
         content.addView(exitBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
         refreshExitBox()
 
+        // ── Box 1b: Endpoint Scanner — Warp Setting only (isolated, reversible)
+        // A standalone selector that decides which CIDRs the engine samples.
+        // No protocol logic, no SHARD/WoW code, no VPN flow — just the
+        // candidate addresses fed to the UDP-verify. Revert: set pref back to
+        // "default" and the engine falls through to its own prefixes.
+        val scannerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+        }
+        scannerBox.addView(LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFFBD2E.toInt()); setPadding(0, 0, dp(4), 0) })
+                addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF27C93F.toInt()); setPadding(0, 0, dp(4), 0) })
+                addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFF5F56.toInt()) })
+            })
+            addView(label("\u25B8 " + Strings.t("Endpoint Scanner"), 11f, primary, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
+        })
+        scannerBox.addView(label(Strings.t("Which addresses the scan samples — Ptech's 7 v4 /24s + 2 v6 /48s, or the engine defaults. Applies to WireGuard · WoW · Masque."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
+        var scannerMode = CoreConfig.warpScannerMode(this@MainActivity)
+        lateinit var scannerDefaultBtn: TextView
+        lateinit var scannerPtechBtn: TextView
+        fun refreshScannerRow() {
+            val selBg = roundedBackground(selectedSurface, 12, palette.violet)
+            val offBg = roundedBackground(SURFACE, 12, DIVIDER)
+            scannerDefaultBtn.background = if (scannerMode == "default") selBg else offBg
+            scannerPtechBtn.background = if (scannerMode == "ptech") selBg else offBg
+            scannerDefaultBtn.setTextColor(if (scannerMode == "default") palette.violet else MUTED)
+            scannerPtechBtn.setTextColor(if (scannerMode == "ptech") palette.violet else MUTED)
+        }
+        scannerDefaultBtn = TextView(this).apply {
+            text = Strings.t("Default"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                scannerMode = "default"
+                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, "default").commit()
+                ConnectionLog.record("Warp Setting: scanner → Default (engine CIDRs)")
+                refreshScannerRow(); toastShort(Strings.t("Scanner: Default"))
+            }
+        }
+        scannerPtechBtn = TextView(this).apply {
+            text = Strings.t("Ptech"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                scannerMode = "ptech"
+                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, "ptech").commit()
+                ConnectionLog.record("Warp Setting: scanner → Ptech (7 v4 /24s + 2 v6 /48s, only port 2408 for WG)")
+                refreshScannerRow(); toastShort(Strings.t("Scanner: Ptech"))
+            }
+        }
+        val scannerRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        scannerRow.addView(scannerDefaultBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        scannerRow.addView(scannerPtechBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        scannerBox.addView(scannerRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+        scannerBox.addView(label(Strings.t("Revert: switch back to Default — no CIDR override is sent, the engine scans its own prefixes."), 10f, MUTED))
+        content.addView(scannerBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
+        refreshScannerRow()
+
         // ── Box 2: Identity Vault — 2x2 grid + method row + START + terminal
         val vaultBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
