@@ -139,6 +139,130 @@ object WarpIdentityFetcher {
         return ok
     }
 
+    /**
+     * Warp Setting — Shard path (2.1.0 mechanism, isolated).
+     * Bring SHARD up, set AETHER_UPSTREAM=socks5://127.0.0.1:port, run the engine so it registers
+     * through the listener (same as main connect), wait for identity files, then tear down SHARD.
+     * Scope is Warp Setting only — core logic itself is untouched.
+     */
+    fun fetchViaShard(context: Context, protocol: String): Boolean {
+        if (NativeCore.isRunning()) {
+            Log.w(TAG, "tunnel is running — disconnect before fetching identity")
+            ConnectionLog.record("Warp Identity: tunnel is running — disconnect first")
+            return false
+        }
+        val dir = context.filesDir
+        val norm = protocol.lowercase()
+        val masque = norm in setOf("masque", "mim", "masque-in-masque", "masque over masque")
+        val targets = identityFiles(dir, norm)
+        if (targets.isEmpty()) {
+            Log.w(TAG, "unknown protocol $protocol")
+            return false
+        }
+        recover(dir)
+        val moved = mutableListOf<File>()
+        for (file in targets) {
+            if (!file.exists()) continue
+            val bak = backupOf(file)
+            bak.delete()
+            if (!file.renameTo(bak)) {
+                Log.e(TAG, "could not set ${file.name} aside")
+                ConnectionLog.record("Warp Identity: could not set ${file.name} aside")
+                restore(moved)
+                return false
+            }
+            moved += file
+        }
+        // Bring SHARD up first — same wait as IdentityProvisioner.ensureShardListener.
+        val wasRunning = ShardManager.isRunning
+        val listener = IdentityProvisioner.ensureShardListener(context)
+        if (listener == null) {
+            Log.w(TAG, "SHARD listener not available for $protocol")
+            ConnectionLog.record("Warp Identity: SHARD listener not available for $protocol")
+            restore(moved)
+            return false
+        }
+        val upstream = when {
+            listener.startsWith("socks5://", ignoreCase = true) -> listener
+            listener.contains("://") -> listener
+            else -> "socks5://$listener"
+        }
+        var ok = false
+        try {
+            val env = buildEnvForShard(context, norm, upstream)
+            Log.i(TAG, "requesting fresh $protocol identity via SHARD ($upstream)")
+            ConnectionLog.record("Warp Identity: requesting $protocol via Shard ($upstream)")
+            CoreConfig.applyEnv(env)
+            val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { Log.w(TAG, "NativeCore start failed: ${e.message}"); -1 }
+            if (startRc != 0 && !NativeCore.isRunning()) {
+                val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                Log.w(TAG, "engine did not start: $err")
+                ConnectionLog.record("Warp Identity: engine did not start${if (err.isNotBlank()) " — $err" else ""}")
+                restore(moved)
+                return false
+            }
+            val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+            while (true) {
+                if (targets.all { complete(it, masque) }) { ok = true; break }
+                if (!NativeCore.isRunning()) {
+                    ok = targets.all { complete(it, masque) }
+                    if (!ok) {
+                        val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                        if (err.isNotBlank()) { Log.w(TAG, "engine finished without identity: $err"); ConnectionLog.record("Warp Identity: $protocol — $err") }
+                    }
+                    break
+                }
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    Log.w(TAG, "Warp identity request timed out after ${TIMEOUT_MS}ms")
+                    ConnectionLog.record("Warp Identity: timed out after ${TIMEOUT_MS / 1000}s")
+                    break
+                }
+                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Warp identity fetcher crashed: ${e.message}")
+            ConnectionLog.record("Warp Identity: crashed — ${e.message}")
+        } finally {
+            try { NativeCore.stop() } catch (_: Exception) {}
+            try { Thread.sleep(300) } catch (_: InterruptedException) {}
+            // Only tear down SHARD when we started it — same rule as provisionViaShard.
+            if (!wasRunning) try { IdentityProvisioner.releaseShardListener(startedOurselves = true) } catch (_: Exception) {}
+            if (ok) {
+                moved.forEach { backupOf(it).delete() }
+                Log.i(TAG, "new $protocol identity saved via SHARD")
+                ConnectionLog.record("Warp Identity: $protocol saved via Shard")
+            } else {
+                restore(moved)
+                Log.w(TAG, "$protocol Warp identity via Shard failed — previous kept")
+                ConnectionLog.record("Warp Identity: $protocol via Shard failed — previous kept")
+            }
+        }
+        return ok
+    }
+
+    private fun buildEnvForShard(context: Context, norm: String, upstream: String): Map<String, String> {
+        val protoForEnv = when (norm) {
+            "mim", "masque-in-masque", "masque over masque" -> "mim"
+            "masque" -> "masque"
+            "gool", "wow", "warp-in-warp" -> "gool"
+            else -> "wireguard"
+        }
+        val base = CoreConfig.env(context, protocol = protoForEnv, socksProxyForCore = upstream)
+        val out = LinkedHashMap(base)
+        // Do not publish a listener — we are a one-shot provision job, not a proxy.
+        // Keep turbo/no-quick-reconnect like ECH path.
+        out["AETHER_SCAN"] = "turbo"
+        out["AETHER_QUICK_RECONNECT"] = "0"
+        out["AETHER_LOG_LEVEL"] = "info"
+        out.remove("AETHER_TEAM")
+        out.remove("AETHER_ACCESS_CLIENT_ID")
+        out.remove("AETHER_ACCESS_CLIENT_SECRET")
+        out.remove("AETHER_ACCESS_TOKEN")
+        out.remove("AETHER_ACCESS_EMAIL")
+        out.remove("AETHER_ACCESS_GATEWAY")
+        return out
+    }
+
     private fun buildEnv(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) {
             "mim", "masque-in-masque", "masque over masque" -> "mim"
