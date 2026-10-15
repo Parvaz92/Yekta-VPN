@@ -147,10 +147,13 @@ object CoreConfig {
     // needs zero new args — it just expands CIDRs it is given.
     const val PTECH_PREFIXES_V4 = "162.159.192.0/24,162.159.193.0/24,162.159.195.0/24,188.114.96.0/24,188.114.97.0/24,188.114.98.0/24,188.114.99.0/24"
     const val PTECH_PREFIXES_V6 = "2606:4700:d0::/48,2606:4700:d1::/48"
-    // Wire ports warpendpoint actually probes (install.sh → result.csv port col).
-    // Forwarded as AETHER_WG_PORTS override so the sweep stays on 2408/500/…
-    // instead of the full wireguard WG_PORTS list.
-    const val PTECH_WG_PORTS = "2408"
+    // Wire ports Ptech-quality Warp surfaces actually answer on. 2408 is
+    // warpendpoint's default, but limiting to a single port starved the
+    // scan for diversity (log #21: stale after 12s). Send the 4 real
+    // WARP ports so the hunt keeps the Ptech CIDRs but tests enough
+    // candidates to find a stable peer. REVERT: delete this const's
+    // use in env() and WG_PORTS falls back to the engine built-ins.
+    const val PTECH_WG_PORTS = "2408,500,1701,4500"
 
     fun warpTransportOf(protocol: String): WarpTransport? = when (protocol.trim().lowercase()) {
         "masque", "mim" -> WarpTransport.MASQUE
