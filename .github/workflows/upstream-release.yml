@@ -39,7 +39,6 @@ jobs:
           git merge --no-commit --no-ff -X theirs FETCH_HEAD || true
 
           # 1) Every file that exists upstream becomes EXACTLY the upstream file.
-          #    No more half-old / half-new Kotlin or Gradle files.
           git checkout FETCH_HEAD -- .
 
           # Anything still unmerged was deleted upstream: drop it.
@@ -76,7 +75,6 @@ jobs:
           git commit --no-edit -m "Sync MSN-GUARD update into Yekta VPN"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      # Same toolchain upstream uses, so its code always compiles here too.
       - name: Set up JDK 17
         if: steps.sync.outputs.changed == 'true'
         uses: actions/setup-java@v4
@@ -168,8 +166,7 @@ jobs:
           set -e
           version=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts | head -1)
           tag="v${version}-$(date -u +%Y%m%d%H%M)"
-          printf 'Yekta VPN automatic update.
-
-Version: %s
-' "$version" > release-notes.md
+          echo "Yekta VPN automatic update." > release-notes.md
+          echo "" >> release-notes.md
+          echo "Version: $version" >> release-notes.md
           gh release create "$tag" app/build/outputs/apk/release/*.apk --title "Yekta VPN ${tag}" --notes-file release-notes.md --latest
