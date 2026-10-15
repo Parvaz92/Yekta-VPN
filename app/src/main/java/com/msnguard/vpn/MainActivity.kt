@@ -6252,13 +6252,7 @@ class MainActivity : Activity() {
     // Warp Setting — per-transport (Masque / WireGuard / WoW): Direct (Freedom)
     // vs Exit-Node (VLESS Lithuania sidecar). Each transport keeps its own
     // Direct/Exit choice so Masque-Direct still means freedom even when WireGuard-Exit is set.
-    private fun warpSettingSummary(): String {
-        fun part(t: CoreConfig.WarpTransport, label: String): String {
-            val m = CoreConfig.warpExitMode(this, t)
-            return if (m == CoreConfig.WARP_EXIT_MODE_CUSTOM && CoreConfig.warpExitIsCustom(this@MainActivity, t)) label + ": Exit-Node" else label + ": Direct"
-        }
-        return listOf(part(CoreConfig.WarpTransport.MASQUE, "Masque"), part(CoreConfig.WarpTransport.WIREGUARD, "WG"), part(CoreConfig.WarpTransport.WOW, "WoW")).joinToString(" · ")
-    }
+    private fun warpSettingSummary(): String = ""
 
     private fun openWarpSettingScreen() {
         warpSettingPage?.let(pageHost::removeView)
@@ -6602,12 +6596,28 @@ class MainActivity : Activity() {
             term.text = proto + " \u2014 " + methodName + " \u2014 connecting\u2026"
             term.visibility = View.VISIBLE
             val ctx = this@MainActivity
+            // Live term tail while provisioning — so user sees progress, not a frozen "connecting"
+            val termTail = object : Thread("vault-term-tail") {
+                @Volatile var done = false
+                override fun run() {
+                    var last = ""
+                    while (!done) {
+                        try { Thread.sleep(700) } catch (_: InterruptedException) { break }
+                        val tail = ConnectionLog.snapshot().lastOrNull()?.take(110) ?: continue
+                        if (tail == last) continue
+                        last = tail
+                        runOnUiThread { if (!done) term.text = tail }
+                    }
+                }
+            }.also { it.isDaemon = true; it.start() }
             Thread {
                 val ok = try {
                     if (chosenMethod == "shard") WarpIdentityFetcher.fetchViaShard(ctx, proto)
                     else WarpIdentityFetcher.fetch(ctx, proto)
                 } catch (_: Exception) { false }
                 runOnUiThread {
+                    termTail.done = true
+                    try { termTail.interrupt() } catch (_: Exception) {}
                     startBtn.isEnabled = true
                     startBtn.text = Strings.t("START \u2014 GET IDENTITY")
                     if (ok && hasVaultIdentity(proto)) {

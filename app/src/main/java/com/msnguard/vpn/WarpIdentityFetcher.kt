@@ -76,7 +76,8 @@ object WarpIdentityFetcher {
         try {
             val env = buildEnv(context, norm)
             Log.i(TAG, "requesting fresh $protocol identity via ECH (bind $BIND)")
-            ConnectionLog.record("Warp Identity: requesting $protocol via ECH")
+            ConnectionLog.record("Warp Identity: requesting $protocol via ECH…")
+            ConnectionLog.record("Warp Identity: registering $protocol…")
 
             CoreConfig.applyEnv(env)
             val startRc = try {
@@ -116,6 +117,8 @@ object WarpIdentityFetcher {
                     ConnectionLog.record("Warp Identity: timed out after ${TIMEOUT_MS / 1000}s")
                     break
                 }
+                // Live tick so vault term visibly moves while engine works
+                if (SystemClock.elapsedRealtime() % 4000 < 500) ConnectionLog.record("Warp Identity: still working on $protocol…")
                 try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
             }
         } catch (e: Exception) {
@@ -175,9 +178,10 @@ object WarpIdentityFetcher {
         }
         // Bring SHARD up first — same wait as IdentityProvisioner.ensureShardListener.
         val wasRunning = ShardManager.isRunning
+        ConnectionLog.record("Warp Identity: bringing SHARD up…")
         var listener: String? = IdentityProvisioner.ensureShardListener(context)
         if (listener == null) {
-            // One gentle retry — same nT76D transient seen in log 17 (wireguard try1 / mim try2)
+            ConnectionLog.record("Warp Identity: SHARD busy — retrying…")
             try { Thread.sleep(1200) } catch (_: InterruptedException) {}
             listener = IdentityProvisioner.ensureShardListener(context)
         }
@@ -196,7 +200,8 @@ object WarpIdentityFetcher {
         try {
             val env = buildEnvForShard(context, norm, upstream)
             Log.i(TAG, "requesting fresh $protocol identity via SHARD ($upstream)")
-            ConnectionLog.record("Warp Identity: requesting $protocol via Shard ($upstream)")
+            ConnectionLog.record("Warp Identity: requesting $protocol via Shard…")
+            ConnectionLog.record("Warp Identity: SHARD ready — registering $protocol…")
             CoreConfig.applyEnv(env)
             val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { Log.w(TAG, "NativeCore start failed: ${e.message}"); -1 }
             if (startRc != 0 && !NativeCore.isRunning()) {
