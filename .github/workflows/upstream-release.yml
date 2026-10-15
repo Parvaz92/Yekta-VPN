@@ -15,14 +15,14 @@ concurrency:
 jobs:
   update-build-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout Yekta
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Merge MSN-GUARD updates (locally, not pushed yet)
+      - name: Sync with MSN-GUARD (exact upstream code + Yekta branding)
         id: sync
         run: |
           set -euo pipefail
@@ -38,38 +38,58 @@ jobs:
 
           git merge --no-commit --no-ff -X theirs FETCH_HEAD || true
 
-          # Resolve any leftover conflicts in favour of upstream.
+          # 1) Every file that exists upstream becomes EXACTLY the upstream file.
+          #    No more half-old / half-new Kotlin or Gradle files.
+          git checkout FETCH_HEAD -- .
+
+          # Anything still unmerged was deleted upstream: drop it.
           for f in $(git diff --name-only --diff-filter=U); do
-            if git checkout --theirs -- "$f" 2>/dev/null; then
-              git add -- "$f"
-            else
-              git rm -q -f -- "$f" || true
+            git rm -q -f -- "$f" || true
+          done
+
+          # 2) Restore the files Yekta owns: workflows, website, docs, notices.
+          for p in .github/workflows docs README.md README.en.md NOTICE.md; do
+            if git cat-file -e "HEAD:$p" 2>/dev/null; then
+              git rm -r -q -f --cached -- "$p" 2>/dev/null || true
+              rm -rf -- "$p"
+              git checkout HEAD -- "$p"
             fi
           done
 
-          # Keep Yekta-owned files exactly as they are on our master.
-          for f in app/build.gradle.kts settings.gradle.kts core/build-android.sh; do
-            git checkout HEAD -- "$f"
-          done
+          # 3) Yekta identity on top of upstream's own build file.
+          sed -i 's/applicationId = "com.msnguard.vpn"/applicationId = "com.parvaz.vpn"/' app/build.gradle.kts
+          grep -q 'applicationId = "com.parvaz.vpn"' app/build.gradle.kts
+          if ! grep -q 'yektaRebrand' app/build.gradle.kts; then
+          cat >> app/build.gradle.kts <<'KTS'
 
-          # Never take upstream workflow changes. GitHub refuses pushes that
-          # touch .github/workflows from GITHUB_TOKEN, which is what broke
-          # every run since Oct 9.
-          git rm -r -q -f --cached .github/workflows || true
-          rm -rf .github/workflows
-          git checkout HEAD -- .github/workflows
+          val yektaRebrand = tasks.register<Exec>("yektaRebrand") {
+              group = "build"
+              description = "Applies Yekta VPN branding"
+              onlyIf { !org.gradle.internal.os.OperatingSystem.current().isWindows }
+              commandLine("bash", rootProject.file("tools/rebrand.sh").absolutePath)
+          }
+          tasks.named("preBuild").configure { dependsOn(yektaRebrand) }
+          KTS
+          fi
 
           git add -A
           git commit --no-edit -m "Sync MSN-GUARD update into Yekta VPN"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Java
+      # Same toolchain upstream uses, so its code always compiles here too.
+      - name: Set up JDK 17
         if: steps.sync.outputs.changed == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
+
+      - name: Set up JDK 21
+        if: steps.sync.outputs.changed == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Set up Android SDK
         if: steps.sync.outputs.changed == 'true'
@@ -78,10 +98,11 @@ jobs:
           packages: "ndk;26.3.11579264 cmake;3.22.1"
           accept-android-sdk-licenses: true
 
-      - name: Set up Rust
+      - name: Install Rust and branding tools
         if: steps.sync.outputs.changed == 'true'
         run: |
           set -e
+          sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
@@ -109,19 +130,31 @@ jobs:
           keyPassword=$KEY_PASSWORD
           EOF2
 
+      - name: Build hev-socks5-tunnel (same as upstream)
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          set -e
+          NDK="$ANDROID_HOME/ndk/26.3.11579264"
+          if [ -d app/src/main/cpp/hev ]; then
+            "$NDK/ndk-build" -C app/src/main/cpp/hev NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk -j"$(nproc)"
+            for abi in arm64-v8a armeabi-v7a x86_64; do
+              src="app/src/main/cpp/hev/libs/$abi/libhev-socks5-tunnel.so"
+              dst="app/src/main/jniLibs/$abi/libhev-socks5-tunnel.so"
+              if [ -f "$src" ]; then mkdir -p "app/src/main/jniLibs/$abi"; cp "$src" "$dst"; fi
+            done
+          fi
+
       - name: Build signed APKs
         if: steps.sync.outputs.changed == 'true'
         env:
           AETHERY_KEYSTORE_PASSWORD: ${{ secrets.AETHERY_KEYSTORE_PASSWORD }}
           AETHERY_KEY_ALIAS: ${{ secrets.AETHERY_KEY_ALIAS }}
           AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
+          ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-download: 'false'
         run: |
           set -e
           chmod +x gradlew tools/rebrand.sh core/build-android.sh
-          echo "org.gradle.java.installations.auto-download=false" >> gradle.properties
-          echo "kotlin.compiler.execution.strategy=in-process" >> gradle.properties
           ./gradlew assembleRelease --no-daemon --stacktrace -PaetheryKeystore=release.keystore
-          git checkout -- gradle.properties
 
       - name: Push synced code (only after a successful build)
         if: steps.sync.outputs.changed == 'true'
@@ -135,5 +168,8 @@ jobs:
           set -e
           version=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts | head -1)
           tag="v${version}-$(date -u +%Y%m%d%H%M)"
-          printf 'Yekta VPN automatic update.\n\nVersion: %s\n' "$version" > release-notes.md
+          printf 'Yekta VPN automatic update.
+
+Version: %s
+' "$version" > release-notes.md
           gh release create "$tag" app/build/outputs/apk/release/*.apk --title "Yekta VPN ${tag}" --notes-file release-notes.md --latest
