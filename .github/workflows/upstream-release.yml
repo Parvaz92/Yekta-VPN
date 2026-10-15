@@ -2,25 +2,30 @@ name: Auto-update Yekta VPN
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: yekta-auto-update
+  cancel-in-progress: false
+
 jobs:
   update-build-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout Yekta
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check and merge MSN-GUARD updates
+      - name: Merge MSN-GUARD updates (locally, not pushed yet)
         id: sync
         run: |
-          set -e
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch https://github.com/mbm110/MSN-GUARD.git master
@@ -31,20 +36,31 @@ jobs:
             exit 0
           fi
 
-          mkdir -p /tmp/yekta-preserved
-          cp .github/workflows/build.yml /tmp/yekta-preserved/build.yml
-          cp app/build.gradle.kts /tmp/yekta-preserved/app-build.gradle.kts
-          cp settings.gradle.kts /tmp/yekta-preserved/settings.gradle.kts
+          git merge --no-commit --no-ff -X theirs FETCH_HEAD || true
 
-          git merge --no-edit -X theirs FETCH_HEAD || true
-          git checkout --theirs .
-          cp /tmp/yekta-preserved/build.yml .github/workflows/build.yml
-          cp /tmp/yekta-preserved/app-build.gradle.kts app/build.gradle.kts
-          cp /tmp/yekta-preserved/settings.gradle.kts settings.gradle.kts
+          # Resolve any leftover conflicts in favour of upstream.
+          for f in $(git diff --name-only --diff-filter=U); do
+            if git checkout --theirs -- "$f" 2>/dev/null; then
+              git add -- "$f"
+            else
+              git rm -q -f -- "$f" || true
+            fi
+          done
+
+          # Keep Yekta-owned files exactly as they are on our master.
+          for f in app/build.gradle.kts settings.gradle.kts core/build-android.sh; do
+            git checkout HEAD -- "$f"
+          done
+
+          # Never take upstream workflow changes. GitHub refuses pushes that
+          # touch .github/workflows from GITHUB_TOKEN, which is what broke
+          # every run since Oct 9.
+          git rm -r -q -f --cached .github/workflows || true
+          rm -rf .github/workflows
+          git checkout HEAD -- .github/workflows
 
           git add -A
-          git diff --cached --quiet || git commit -m "Sync MSN-GUARD update into Yekta VPN"
-          git push origin master
+          git commit --no-edit -m "Sync MSN-GUARD update into Yekta VPN"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Java
@@ -66,7 +82,7 @@ jobs:
         if: steps.sync.outputs.changed == 'true'
         run: |
           set -e
-          curl --proto '=https' --tlsv1.2 --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           cargo install cargo-ndk
@@ -85,7 +101,7 @@ jobs:
           test -n "$KEYSTORE_PASSWORD"
           test -n "$KEY_ALIAS"
           test -n "$KEY_PASSWORD"
-          echo "$KEYSTORE_BASE64" | base64 --decode > release.keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > release.keystore
           test -s release.keystore
           cat > keystore.env <<EOF2
           storePassword=$KEYSTORE_PASSWORD
@@ -101,10 +117,15 @@ jobs:
           AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
         run: |
           set -e
-          chmod +x gradlew tools/rebrand.sh
+          chmod +x gradlew tools/rebrand.sh core/build-android.sh
           echo "org.gradle.java.installations.auto-download=false" >> gradle.properties
           echo "kotlin.compiler.execution.strategy=in-process" >> gradle.properties
           ./gradlew assembleRelease --no-daemon --stacktrace -PaetheryKeystore=release.keystore
+          git checkout -- gradle.properties
+
+      - name: Push synced code (only after a successful build)
+        if: steps.sync.outputs.changed == 'true'
+        run: git push origin HEAD:master
 
       - name: Publish automatic Release
         if: steps.sync.outputs.changed == 'true'
@@ -113,9 +134,6 @@ jobs:
         run: |
           set -e
           version=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts | head -1)
-          tag="v${version}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            tag="${tag}-$(date -u +%Y%m%d%H%M)"
-          fi
+          tag="v${version}-$(date -u +%Y%m%d%H%M)"
           printf 'Yekta VPN automatic update.\n\nVersion: %s\n' "$version" > release-notes.md
           gh release create "$tag" app/build/outputs/apk/release/*.apk --title "Yekta VPN ${tag}" --notes-file release-notes.md --latest
