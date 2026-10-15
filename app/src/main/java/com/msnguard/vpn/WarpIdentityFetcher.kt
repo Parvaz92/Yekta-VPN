@@ -175,7 +175,12 @@ object WarpIdentityFetcher {
         }
         // Bring SHARD up first — same wait as IdentityProvisioner.ensureShardListener.
         val wasRunning = ShardManager.isRunning
-        val listener = IdentityProvisioner.ensureShardListener(context)
+        var listener: String? = IdentityProvisioner.ensureShardListener(context)
+        if (listener == null) {
+            // One gentle retry — same nT76D transient seen in log 17 (wireguard try1 / mim try2)
+            try { Thread.sleep(1200) } catch (_: InterruptedException) {}
+            listener = IdentityProvisioner.ensureShardListener(context)
+        }
         if (listener == null) {
             Log.w(TAG, "SHARD listener not available for $protocol")
             ConnectionLog.record("Warp Identity: SHARD listener not available for $protocol")

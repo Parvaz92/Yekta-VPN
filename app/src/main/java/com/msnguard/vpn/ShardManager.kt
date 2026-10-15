@@ -431,18 +431,10 @@ object ShardManager {
         lastError = ""
         listenPort = port
 
-        // Expanded across the known-good CDN edges before anything else looks at
-        // it: see [ShardEdges]. The subscription's own address is kept, so this can
-        // only add paths, never remove one that was working.
-        // TEST PINNED: single-node mode — ONLY this URI is raced. Remove after test and restore ShardEdges.expand line.
-        val pinnedUri = "vless://e6df2095-a73c-4043-8693-8d5a03686870@188.114.97.6:443?path=%2Fcart%2Fdocs%2Fwww%2Fproxyip%3D108.160.132.132%3Fed%23Telegram---PLANB_NET---PLANB_NET---PLANB_NET---PLANB_NET&security=tls&alpn=http%2F1.1&encryption=none&insecure=0&host=lucasjow.us.ci&fp=chrome&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&type=ws&allowInsecure=0&sni=lucasjow.us.ci#%40DeltaKroneckerGithub%20%7C%2036a4be"
-        val pool: List<ShardNode> = run {
-            val one = try { com.msnguard.vpn.shard.ShardImport.parseOne(pinnedUri)?.toShardNode() } catch (_: Exception) { null }
-            if (one != null) {
-                ConnectionLog.record("$TAG PINNED single-node - ${one.host}:${one.port} ${one.protocol} ech=${one.echConfigList.isNotEmpty()} fm=${one.finalMask.isNotEmpty()}")
-                listOf(one)
-            } else ShardEdges.expand(context, ShardSubscription.nodes(context))
-        }
+        // Direct sub — no Edge expansion, no PINNED (2026-10-15): use raw IP from each config as-is.
+        // Revert to edge-expanded: replace next line with ShardEdges.expand(context, ShardSubscription.nodes(context)).
+        // PINNED single-node for revert: vless://e6df2095-a73c-4043-8693-8d5a03686870@188.114.97.6:443?path=%2Fcart%2Fdocs%2Fwww%2Fproxyip%3D108.160.132.132%3Fed%23Telegram---PLANB_NET---PLANB_NET---PLANB_NET---PLANB_NET&security=tls&alpn=http%2F1.1&encryption=none&insecure=0&host=lucasjow.us.ci&fp=chrome&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&type=ws&allowInsecure=0&sni=lucasjow.us.ci#%40DeltaKroneckerGithub%20%7C%2036a4be
+        val pool: List<ShardNode> = ShardSubscription.nodes(context)
         if (pool.isEmpty()) {
             lastError = "no nodes available"
             ConnectionLog.record("$TAG pool empty — cache and seed both unusable")
