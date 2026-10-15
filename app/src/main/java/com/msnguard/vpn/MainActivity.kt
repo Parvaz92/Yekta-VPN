@@ -6473,7 +6473,7 @@ class MainActivity : Activity() {
 
         // Vault selection mirrors railSelected (bidirectional sync)
         var vaultSelected: String = railSelected
-        var vaultMethod: String = "ech" // ech | shard
+        var vaultMethod: String = "ech" // ech | shard | plain
         val vaultProtos = listOf("masque" to "MASQUE", "mim" to "MiM", "wireguard" to "WireGuard", "gool" to "WoW")
         val vaultCards = mutableListOf<LinearLayout>()
         val vaultCardProtos = mutableListOf<String>()
@@ -6549,14 +6549,16 @@ class MainActivity : Activity() {
         val methodRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         lateinit var echBtn: TextView
         lateinit var shardBtn: TextView
+        lateinit var plainBtn: TextView
         fun refreshMethodRow() {
-            if (vaultMethod == "ech") {
-                echBtn.background = roundedBackground(selectedSurface, 12, palette.violet); echBtn.setTextColor(palette.violet)
-                shardBtn.background = roundedBackground(SURFACE, 12, DIVIDER); shardBtn.setTextColor(MUTED)
-            } else {
-                shardBtn.background = roundedBackground(selectedSurface, 12, palette.violet); shardBtn.setTextColor(palette.violet)
-                echBtn.background = roundedBackground(SURFACE, 12, DIVIDER); echBtn.setTextColor(MUTED)
-            }
+            val selBg = roundedBackground(selectedSurface, 12, palette.violet)
+            val offBg = roundedBackground(SURFACE, 12, DIVIDER)
+            echBtn.background = if (vaultMethod == "ech") selBg else offBg
+            shardBtn.background = if (vaultMethod == "shard") selBg else offBg
+            plainBtn.background = if (vaultMethod == "plain") selBg else offBg
+            echBtn.setTextColor(if (vaultMethod == "ech") palette.violet else MUTED)
+            shardBtn.setTextColor(if (vaultMethod == "shard") palette.violet else MUTED)
+            plainBtn.setTextColor(if (vaultMethod == "plain") palette.violet else MUTED)
         }
         echBtn = TextView(this).apply {
             text = Strings.t("Quantum ECH"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
@@ -6568,8 +6570,14 @@ class MainActivity : Activity() {
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener { vaultMethod = "shard"; refreshMethodRow() }
         }
+        plainBtn = TextView(this).apply {
+            text = Strings.t("Native Link"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener { vaultMethod = "plain"; refreshMethodRow() }
+        }
         methodRow.addView(echBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
-        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        methodRow.addView(plainBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         vaultBox.addView(methodRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
         refreshMethodRow()
 
@@ -6584,7 +6592,7 @@ class MainActivity : Activity() {
             if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
             val proto = vaultProtocolSelected(vaultSelected)
             val chosenMethod = vaultMethod
-            val methodName = if (chosenMethod == "ech") Strings.t("Quantum ECH") else Strings.t("Shard Relay")
+            val methodName = when (chosenMethod) { "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("Shard Relay"); else -> Strings.t("Quantum ECH") }
             if (hasVaultIdentity(proto)) {
                 toastShort(proto + " \u2713 " + Strings.t("Key received"))
                 term.text = proto + " \u2014 " + Strings.t("Key received") + " (" + methodName + ")"
@@ -6612,8 +6620,11 @@ class MainActivity : Activity() {
             }.also { it.isDaemon = true; it.start() }
             Thread {
                 val ok = try {
-                    if (chosenMethod == "shard") WarpIdentityFetcher.fetchViaShard(ctx, proto)
-                    else WarpIdentityFetcher.fetch(ctx, proto)
+                    when (chosenMethod) {
+                        "shard" -> WarpIdentityFetcher.fetchViaShard(ctx, proto)
+                        "plain" -> WarpIdentityFetcher.fetchDirectPlain(ctx, proto)
+                        else -> WarpIdentityFetcher.fetch(ctx, proto)
+                    }
                 } catch (_: Exception) { false }
                 runOnUiThread {
                     termTail.done = true
