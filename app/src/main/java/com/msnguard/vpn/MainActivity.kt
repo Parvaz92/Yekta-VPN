@@ -6455,9 +6455,13 @@ class MainActivity : Activity() {
 
         // ── Box 1b: Endpoint Scanner — Warp Setting only (isolated, reversible)
         // A standalone selector that decides which CIDRs the engine samples.
+        // Normal = engine defaults + Scan Mode's IP Version (v4/v6/both).
+        // Ptech-ipv4 = 7 v4 /24s only (4 WG ports) + forced AETHER_IP=v4.
+        // Ptech-ipv6 = 2 v6 /48s only (4 WG ports) + forced AETHER_IP=v6,
+        //             but Masque/MiM stay v4 (Ptech-ipv6 acts as Ptech-ipv4).
         // No protocol logic, no SHARD/WoW code, no VPN flow — just the
         // candidate addresses fed to the UDP-verify. Revert: set pref back to
-        // "default" and the engine falls through to its own prefixes.
+        // "normal" and the engine falls through to its own prefixes.
         val scannerBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
@@ -6472,45 +6476,60 @@ class MainActivity : Activity() {
             })
             addView(label("\u25B8 " + Strings.t("Endpoint Scanner"), 11f, primary, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
         })
-        scannerBox.addView(label(Strings.t("Which addresses the scan samples — Ptech's 7 v4 /24s + 2 v6 /48s, or the engine defaults. Applies to WireGuard · WoW · Masque."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
+        scannerBox.addView(label(Strings.t("Normal uses engine CIDRs + Scan Mode IP version (v4/v6/both). Ptech-ipv4 scans only 7 v4 /24s. Ptech-ipv6 scans only 2 v6 /48s (WireGuard/WoW only — Masque stays v4)."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
         var scannerMode = CoreConfig.warpScannerMode(this@MainActivity)
-        lateinit var scannerDefaultBtn: TextView
-        lateinit var scannerPtechBtn: TextView
+        lateinit var scannerNormalBtn: TextView
+        lateinit var scannerPtechV4Btn: TextView
+        lateinit var scannerPtechV6Btn: TextView
         fun refreshScannerRow() {
             val selBg = roundedBackground(selectedSurface, 12, palette.violet)
             val offBg = roundedBackground(SURFACE, 12, DIVIDER)
-            scannerDefaultBtn.background = if (scannerMode == "default") selBg else offBg
-            scannerPtechBtn.background = if (scannerMode == "ptech") selBg else offBg
-            scannerDefaultBtn.setTextColor(if (scannerMode == "default") palette.violet else MUTED)
-            scannerPtechBtn.setTextColor(if (scannerMode == "ptech") palette.violet else MUTED)
+            scannerNormalBtn.background = if (scannerMode == CoreConfig.WARP_SCANNER_MODE_NORMAL) selBg else offBg
+            scannerPtechV4Btn.background = if (scannerMode == CoreConfig.WARP_SCANNER_MODE_PTECH_V4) selBg else offBg
+            scannerPtechV6Btn.background = if (scannerMode == CoreConfig.WARP_SCANNER_MODE_PTECH_V6) selBg else offBg
+            scannerNormalBtn.setTextColor(if (scannerMode == CoreConfig.WARP_SCANNER_MODE_NORMAL) palette.violet else MUTED)
+            scannerPtechV4Btn.setTextColor(if (scannerMode == CoreConfig.WARP_SCANNER_MODE_PTECH_V4) palette.violet else MUTED)
+            scannerPtechV6Btn.setTextColor(if (scannerMode == CoreConfig.WARP_SCANNER_MODE_PTECH_V6) palette.violet else MUTED)
         }
-        scannerDefaultBtn = TextView(this).apply {
-            text = Strings.t("Default"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+        scannerNormalBtn = TextView(this).apply {
+            text = Strings.t("Normal"); textSize = 10.5f; gravity = Gravity.CENTER; setPadding(dp(6), dp(12), dp(6), dp(12))
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener {
                 if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
-                scannerMode = "default"
-                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, "default").commit()
-                ConnectionLog.record("Warp Setting: scanner → Default (engine CIDRs)")
-                refreshScannerRow(); toastShort(Strings.t("Scanner: Default"))
+                scannerMode = CoreConfig.WARP_SCANNER_MODE_NORMAL
+                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, CoreConfig.WARP_SCANNER_MODE_NORMAL).commit()
+                ConnectionLog.record("Warp Setting: scanner → Normal (engine CIDRs)")
+                refreshScannerRow(); toastShort(Strings.t("Scanner: Normal"))
             }
         }
-        scannerPtechBtn = TextView(this).apply {
-            text = Strings.t("Ptech"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+        scannerPtechV4Btn = TextView(this).apply {
+            text = Strings.t("Ptech-ipv4"); textSize = 10.5f; gravity = Gravity.CENTER; setPadding(dp(6), dp(12), dp(6), dp(12))
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener {
                 if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
-                scannerMode = "ptech"
-                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, "ptech").commit()
-                ConnectionLog.record("Warp Setting: scanner → Ptech (7 v4 /24s + 2 v6 /48s, only port 2408 for WG)")
-                refreshScannerRow(); toastShort(Strings.t("Scanner: Ptech"))
+                scannerMode = CoreConfig.WARP_SCANNER_MODE_PTECH_V4
+                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, CoreConfig.WARP_SCANNER_MODE_PTECH_V4).commit()
+                ConnectionLog.record("Warp Setting: scanner → Ptech-ipv4 (7 v4 /24s, 4 ports)")
+                refreshScannerRow(); toastShort(Strings.t("Scanner: Ptech-ipv4"))
+            }
+        }
+        scannerPtechV6Btn = TextView(this).apply {
+            text = Strings.t("Ptech-ipv6"); textSize = 10.5f; gravity = Gravity.CENTER; setPadding(dp(6), dp(12), dp(6), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                scannerMode = CoreConfig.WARP_SCANNER_MODE_PTECH_V6
+                preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, CoreConfig.WARP_SCANNER_MODE_PTECH_V6).commit()
+                ConnectionLog.record("Warp Setting: scanner → Ptech-ipv6 (2 v6 /48s, 4 ports — Masque stays v4)")
+                refreshScannerRow(); toastShort(Strings.t("Scanner: Ptech-ipv6"))
             }
         }
         val scannerRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        scannerRow.addView(scannerDefaultBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
-        scannerRow.addView(scannerPtechBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        scannerRow.addView(scannerNormalBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        scannerRow.addView(scannerPtechV4Btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        scannerRow.addView(scannerPtechV6Btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         scannerBox.addView(scannerRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
-        scannerBox.addView(label(Strings.t("Revert: switch back to Default — no CIDR override is sent, the engine scans its own prefixes."), 10f, MUTED))
+        scannerBox.addView(label(Strings.t("Revert: switch back to Normal — no CIDR override is sent, the engine scans its own prefixes + Scan Mode IP version."), 10f, MUTED))
         content.addView(scannerBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
         refreshScannerRow()
 
