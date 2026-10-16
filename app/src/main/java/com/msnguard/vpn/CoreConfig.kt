@@ -667,6 +667,9 @@ object CoreConfig {
             // Ptech toggle: when user flips back to Default, the previous
             // Ptech CIDRs/ports must not linger in the process env.
             "AETHER_SCAN_CIDRS_V4", "AETHER_SCAN_CIDRS_V6", "AETHER_WG_PORTS", "AETHER_PTECH_SCAN",
+            // Warp Setting register job: must not leak into the next normal connect,
+            // otherwise the engine would just `--register` and exit without a tunnel.
+            "AETHER_REGISTER",
         )
         for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
