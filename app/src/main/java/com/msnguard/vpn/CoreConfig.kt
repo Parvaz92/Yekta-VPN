@@ -461,11 +461,13 @@ object CoreConfig {
 
         // Warp endpoint scanner override — Warp Setting isolated, reversible.
         // Normal sends nothing (engine CIDRs + Scan Mode AETHER_IP). Ptech-ipv4
-        // sends only the 7 v4 /24s and forces AETHER_IP=v4; Ptech-ipv6 sends
-        // only the 2 v6 /48s and forces AETHER_IP=v6 — but for Masque/MiM the
-        // evaluator masks ipv6 back to v4 (Masque always v4 in Iran).
-        // Warp Type's Wow-preset noize_h2 block (below) already narrows to v4
-        // before this runs; for Wow we explicitly flip Ptech-ipv6 to v6 here.
+        // sends only the 7 v4 /24s + explicit empty for V6, and forces AETHER_IP=v4;
+        // Ptech-ipv6 sends only the 2 v6 /48s + explicit empty for V4, and forces
+        // AETHER_IP=v6 for WireGuard/WoW. Masque/MiM are always v4: Ptech-ipv6
+        // collapses to Ptech-ipv4 there. Explicit empty prevents the engine's
+        // ptech_enabled() fallback (wireguard::ptech_enabled -> PTECH_CIDRS) from
+        // leaking the non-selected family into the candidate pool. The empty
+        // makes env_cidrs return Some([]) so wg_prefixes returns [] for that family.
         // REVERT: delete this when/if block → engine falls back to built-ins.
         run {
             val sm = warpScannerMode(context)
@@ -476,8 +478,13 @@ object CoreConfig {
             val effPtechV4 = isPtechV4 || (isPtechV6 && isMasqueEnv)
             val effPtechV6 = isPtechV6 && !isMasqueEnv
             if (effPtechV4 || effPtechV6) {
-                if (effPtechV4) out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
-                else out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
+                if (effPtechV4) {
+                    out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
+                    out["AETHER_SCAN_CIDRS_V6"] = ""
+                } else {
+                    out["AETHER_SCAN_CIDRS_V4"] = ""
+                    out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
+                }
                 out["AETHER_WG_PORTS"] = PTECH_WG_PORTS
                 out["AETHER_PTECH_SCAN"] = "1"
                 // For WireGuard/WoW, Ptech choice overrides Scan Mode's AETHER_IP.

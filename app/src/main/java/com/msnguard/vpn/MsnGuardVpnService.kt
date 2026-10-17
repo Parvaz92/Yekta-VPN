@@ -4946,6 +4946,28 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     effectiveConfig,
                 )
                 val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply { put("AETHER_UPSTREAM", warpExitUpstream!!) } else baseEnv
+                // Warp Setting log — prove which endpoint scanner family actually hit the wire.
+                // Isolated: one ConnectionLog line, no protocol/connect change. For Ptech-ipv6
+                // the engine must show `ip=v6` and candidates from 2606:4700:d0/d1; for Ptech-ipv4
+                // `ip=v4` from the 7×/24s; for Normal `ip` follows Scan Mode (both/v4/v6).
+                run {
+                    val sm = CoreConfig.warpScannerMode(this@MsnGuardVpnService)
+                    val ipEnv = patchedEnv["AETHER_IP"] ?: "both"
+                    val v4 = patchedEnv["AETHER_SCAN_CIDRS_V4"] ?: ""
+                    val v6 = patchedEnv["AETHER_SCAN_CIDRS_V6"] ?: ""
+                    val ports = patchedEnv["AETHER_WG_PORTS"] ?: ""
+                    val label = when (sm) {
+                        CoreConfig.WARP_SCANNER_MODE_PTECH_V4 -> "Ptech-ipv4"
+                        CoreConfig.WARP_SCANNER_MODE_PTECH_V6 -> "Ptech-ipv6"
+                        else -> "Normal"
+                    }
+                    val detail = when (sm) {
+                        CoreConfig.WARP_SCANNER_MODE_PTECH_V4 -> "v4=${v4.take(90)} ports=${ports.ifBlank { "engine" }}"
+                        CoreConfig.WARP_SCANNER_MODE_PTECH_V6 -> "v6=${v6.take(60)} ports=${ports.ifBlank { "engine" }}"
+                        else -> "engine CIDRs"
+                    }
+                    ConnectionLog.record("Warp Setting: scanner=$label ip=$ipEnv $detail")
+                }
                 CoreConfig.applyEnv(patchedEnv)
                 val addresses = NativeCore.prepare(effectiveConfig)
                 if (addresses.organization.isNotBlank()) {
