@@ -196,9 +196,9 @@ object WarpIdentityFetcher {
         out.remove("AETHER_API_ECH"); out.remove("AETHER_ECH"); out.remove("AETHER_ECH_DNS"); out.remove("AETHER_ECH_DOMAIN"); out.remove("AETHER_UPSTREAM")
         // Do not leak Warp Setting scanner choice into identity fetch — it is for
         // the data-plane scan (WireGuard/WoW), not for api.cloudflareclient.com.
-        // Leaving Ptech CIDRs here would narrow the engine's scan even though we
-        // set AETHER_SCAN=turbo below and the job only needs to write aether.toml.
+        // Also strip forced AETHER_IP so registration is neutral.
         out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
+        out.remove("AETHER_IP")
         // Registration-only: engine provisions and exits, does not open a tunnel.
         // Without this it would scan WireGuard peers and need SOCKS. With it the
         // job is --register semantics: write aether.toml and done.
@@ -474,7 +474,9 @@ object WarpIdentityFetcher {
         // Do not leak Warp Setting scanner choice into identity fetch — it is for
         // the data-plane scan, not for api.cloudflareclient.com. Shard path must
         // not narrow the scan while waiting for aether.toml.
+        // Also strip forced AETHER_IP so registration is neutral.
         out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
+        out.remove("AETHER_IP")
         // Registration-only via SHARD upstream: no tunnel/scan, just provision.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
         out["AETHER_LOG_LEVEL"] = "info"
@@ -500,7 +502,17 @@ object WarpIdentityFetcher {
         // Do not leak Warp Setting scanner choice into identity fetch — it is for
         // the data-plane scan, not for api.cloudflareclient.com. ECH job only
         // needs to write aether.toml; narrowing scan CIDRs just slows it.
+        // Also strip the Ptech forced AETHER_IP (v4/v6) so registration is not
+        // polluted by the scanner's override; AETHER_REGISTER path ignores IP
+        // anyway but we keep env clean. Stripping here is Warp Setting isolated.
         out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
+        // Strip forced scanner IP so ECH registration uses neutral IP (engine default).
+        // Ptech's v6 for WireGuard/WoW must not leak into the API call.
+        out.remove("AETHER_IP")
+        // Re-apply neutral IP: Masque/MiM always v4, others use Scan Mode default (both) or engine default.
+        // Keep it simple: leave absent → engine defaults to v4 for registration which is fine;
+        // or set to v4 explicitly to match Fetcher's neutral stance. Registration doesn't scan.
+        // We do not set AETHER_IP here → engine falls back to v4 for register, which is correct.
         // Quantum ECH: force Freedom-like ECH regardless of current exit mode.
         // Use embedded AETHER_API_ECH (no DoH to 1.1.1.1) — same key main
         // connect embeds for Freedom direct, so filtered carriers need no
