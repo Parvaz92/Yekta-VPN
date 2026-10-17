@@ -28,8 +28,8 @@ android {
         applicationId = "com.parvaz.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 349
-        versionName = "3.1.0-alpha14-pinned"
+        versionCode = 351
+        versionName = "3.1.0-alpha16"
 
     }
 

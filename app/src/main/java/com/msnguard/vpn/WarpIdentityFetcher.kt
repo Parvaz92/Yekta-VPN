@@ -199,7 +199,12 @@ object WarpIdentityFetcher {
         // Leaving Ptech CIDRs here would narrow the engine's scan even though we
         // set AETHER_SCAN=turbo below and the job only needs to write aether.toml.
         out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        out["AETHER_SOCKS"] = BIND; out["AETHER_SCAN"] = "turbo"; out["AETHER_QUICK_RECONNECT"] = "0"; out["AETHER_LOG_LEVEL"] = "info"
+        // Registration-only: engine provisions and exits, does not open a tunnel.
+        // Without this it would scan WireGuard peers and need SOCKS. With it the
+        // job is --register semantics: write aether.toml and done.
+        out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
+        out["AETHER_SOCKS"] = BIND; out["AETHER_LOG_LEVEL"] = "info"
+        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
         out.remove("AETHER_TEAM"); out.remove("AETHER_ACCESS_CLIENT_ID"); out.remove("AETHER_ACCESS_CLIENT_SECRET"); out.remove("AETHER_ACCESS_TOKEN"); out.remove("AETHER_ACCESS_EMAIL"); out.remove("AETHER_GATEWAY")
         return out
     }
@@ -470,11 +475,10 @@ object WarpIdentityFetcher {
         // the data-plane scan, not for api.cloudflareclient.com. Shard path must
         // not narrow the scan while waiting for aether.toml.
         out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        // Do not publish a listener — we are a one-shot provision job, not a proxy.
-        // Keep turbo/no-quick-reconnect like ECH path.
-        out["AETHER_SCAN"] = "turbo"
-        out["AETHER_QUICK_RECONNECT"] = "0"
+        // Registration-only via SHARD upstream: no tunnel/scan, just provision.
+        out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
         out["AETHER_LOG_LEVEL"] = "info"
+        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
         out.remove("AETHER_TEAM")
         out.remove("AETHER_ACCESS_CLIENT_ID")
         out.remove("AETHER_ACCESS_CLIENT_SECRET")
@@ -506,10 +510,10 @@ object WarpIdentityFetcher {
         out.remove("AETHER_ECH_DNS")
         out.remove("AETHER_ECH_DOMAIN")
         out.remove("AETHER_UPSTREAM")
-        out["AETHER_SOCKS"] = BIND
-        out["AETHER_SCAN"] = "turbo"
-        out["AETHER_QUICK_RECONNECT"] = "0"
-        out["AETHER_LOG_LEVEL"] = "info"
+        // Registration-only: no tunnel/scan, just provision via ECH.
+        out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
+        out["AETHER_SOCKS"] = BIND; out["AETHER_LOG_LEVEL"] = "info"
+        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
         // Consumer WARP only
         out.remove("AETHER_TEAM")
         out.remove("AETHER_ACCESS_CLIENT_ID")

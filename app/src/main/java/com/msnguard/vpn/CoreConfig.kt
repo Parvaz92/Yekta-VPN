@@ -138,10 +138,21 @@ object CoreConfig {
     // REVERT: comment the block that writes AETHER_PTECH_SCAN (env/jSON below)
     // and this whole pref becomes inert — the default scanner returns.
     const val WARP_SCANNER_MODE_PREF = "warp_scanner_mode"
-    const val WARP_SCANNER_MODE_DEFAULT = "default" // default | ptech
-    fun warpScannerMode(context: Context): String =
-        context.profiled().getString(WARP_SCANNER_MODE_PREF, WARP_SCANNER_MODE_DEFAULT)
-            ?.trim()?.lowercase()?.takeIf { it == "ptech" } ?: WARP_SCANNER_MODE_DEFAULT
+    const val WARP_SCANNER_MODE_DEFAULT = "ptech-ipv4" // normal | ptech-ipv4 | ptech-ipv6 (migrated from default|ptech)
+    const val WARP_SCANNER_MODE_NORMAL = "normal"
+    const val WARP_SCANNER_MODE_PTECH_V4 = "ptech-ipv4"
+    const val WARP_SCANNER_MODE_PTECH_V6 = "ptech-ipv6"
+    fun warpScannerMode(context: Context): String {
+        val raw = context.profiled().getString(WARP_SCANNER_MODE_PREF, WARP_SCANNER_MODE_DEFAULT)
+            ?.trim()?.lowercase().orEmpty()
+        return when (raw) {
+            "ptech-ipv4", "ptech_ipv4", "ptech-v4", "ptech_v4" -> WARP_SCANNER_MODE_PTECH_V4
+            "ptech-ipv6", "ptech_ipv6", "ptech-v6", "ptech_v6" -> WARP_SCANNER_MODE_PTECH_V6
+            "normal", "default", "engine", "" -> WARP_SCANNER_MODE_NORMAL
+            "ptech" -> WARP_SCANNER_MODE_PTECH_V4 // legacy single Ptech → ipv4
+            else -> WARP_SCANNER_MODE_NORMAL
+        }
+    }
     // Ptech surface: the 7 Warp v4 /24s warpendpoint samples + the 2 IPv6
     // ranges install.sh builds (2606:4700:d0/d1). Sent as env so the engine
     // needs zero new args — it just expands CIDRs it is given.
@@ -449,15 +460,32 @@ object CoreConfig {
         }
 
         // Warp endpoint scanner override — Warp Setting isolated, reversible.
-        // When user picks Ptech, the engine keeps its UDP-verify + NOIZE
-        // but samples ONLY the 7 + 2 CIDRs warpendpoint uses. Default mode
-        // sends nothing extra, so the engine's own WG/Masque CIDRs rule.
-        // REVERT: delete this if/put block → engine falls back to built-ins.
-        if (warpScannerMode(context) == "ptech") {
-            out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
-            out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
-            out["AETHER_WG_PORTS"] = PTECH_WG_PORTS
-            out["AETHER_PTECH_SCAN"] = "1"
+        // Normal sends nothing (engine CIDRs + Scan Mode AETHER_IP). Ptech-ipv4
+        // sends only the 7 v4 /24s and forces AETHER_IP=v4; Ptech-ipv6 sends
+        // only the 2 v6 /48s and forces AETHER_IP=v6 — but for Masque/MiM the
+        // evaluator masks ipv6 back to v4 (Masque always v4 in Iran).
+        // Warp Type's Wow-preset noize_h2 block (below) already narrows to v4
+        // before this runs; for Wow we explicitly flip Ptech-ipv6 to v6 here.
+        // REVERT: delete this when/if block → engine falls back to built-ins.
+        run {
+            val sm = warpScannerMode(context)
+            val isPtechV4 = sm == WARP_SCANNER_MODE_PTECH_V4
+            val isPtechV6 = sm == WARP_SCANNER_MODE_PTECH_V6
+            val isMasqueEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL
+            // Masque/MiM always v4 per product decision — Ptech-ipv6 collapses to Ptech-ipv4 there.
+            val effPtechV4 = isPtechV4 || (isPtechV6 && isMasqueEnv)
+            val effPtechV6 = isPtechV6 && !isMasqueEnv
+            if (effPtechV4 || effPtechV6) {
+                if (effPtechV4) out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
+                else out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
+                out["AETHER_WG_PORTS"] = PTECH_WG_PORTS
+                out["AETHER_PTECH_SCAN"] = "1"
+                // For WireGuard/WoW, Ptech choice overrides Scan Mode's AETHER_IP.
+                // Masque/MiM keep the hard "v4" from line 374 — do not touch.
+                if (!isMasqueEnv) {
+                    out["AETHER_IP"] = if (effPtechV6) "v6" else "v4"
+                }
+            }
         }
 
         // Masque SNI (DPI bypass): engine reads AETHER_MASQUE_SNI as the ClientHello SNI for
@@ -667,6 +695,9 @@ object CoreConfig {
             // Ptech toggle: when user flips back to Default, the previous
             // Ptech CIDRs/ports must not linger in the process env.
             "AETHER_SCAN_CIDRS_V4", "AETHER_SCAN_CIDRS_V6", "AETHER_WG_PORTS", "AETHER_PTECH_SCAN",
+            // Warp Setting register job: must not leak into the next normal connect,
+            // otherwise the engine would just `--register` and exit without a tunnel.
+            "AETHER_REGISTER",
         )
         for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
