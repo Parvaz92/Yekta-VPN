@@ -7952,12 +7952,12 @@ class MainActivity : Activity() {
         email.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) { refreshSendEnabled(code.text) }
+            override fun afterTextChanged(s: android.text.Editable?) { refreshSendEnabled(code) }
         })
         password.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) { refreshSendEnabled(code.text) }
+            override fun afterTextChanged(s: android.text.Editable?) { refreshSendEnabled(code) }
         })
         code.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
