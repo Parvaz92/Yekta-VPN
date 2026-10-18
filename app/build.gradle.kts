@@ -84,6 +84,20 @@ android {
             // then keeps an extracted copy alongside the APK.
             useLegacyPackaging = true
         }
+        resources {
+            // Netty jars each ship META-INF/INDEX.LIST + version properties +
+            // license notices — ten identical entries once every module is on
+            // the classpath, which mergeReleaseJavaResource refuses outright
+            // (FoXy transport bring-in, only these resource names).
+            pickFirsts += setOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/io.netty.versions.properties",
+                "META-INF/NOTICE.md",
+                "META-INF/LICENSE.md",
+                "META-INF/NOTICE.txt",
+                "META-INF/LICENSE.txt",
+            )
+        }
     }
 
     if (releaseKeystore != null) {
