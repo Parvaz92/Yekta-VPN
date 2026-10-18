@@ -38,7 +38,74 @@ object WarpIdentityFetcher {
     private const val SECONDARY_MASQUE = "aether-masque-secondary.toml"
     private val ALL_FILES = listOf(PRIMARY_WG, SECONDARY_WG, PRIMARY_MASQUE, SECONDARY_MASQUE)
 
+    // Quantum ECH embedded key — same value CoreConfig embeds for the
+    // Freedom/direct API path. One constant here so fetcher env was never
+    // derived from the tunnel's map. (CHANGED in isolation: see buildEnv doc.)
+    private const val ECH_EMBEDDED =
+        "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+
     fun canRun(): Boolean = !NativeCore.isRunning()
+
+    // Tunnel-carry-over env keys a previous connect may have left set. The
+    // register job must run on a MINIMAL env: any leftover engine knob from
+    // the last tunnel polluted AETHER_REGISTER and made it exit without a
+    // file after any connect. Warp Setting isolated — the connect path sets
+    // these again via CoreConfig.applyEnv on the next start.
+    private val TUNNEL_ENV_KEYS = listOf(
+        "AETHER_REGISTER",            // stale set would re-register wrongly
+        "AETHER_QUICK_RECONNECT", "AETHER_STATS", "AETHER_STATS_SECS",
+        "AETHER_SCAN", "AETHER_IP", "AETHER_NOIZE", "AETHER_PERF_PROFILE",
+        "AETHER_SCAN_CIDRS_V4", "AETHER_SCAN_CIDRS_V6", "AETHER_WG_PORTS", "AETHER_PTECH_SCAN",
+        "AETHER_PEER", "AETHER_WG_PEER", "AETHER_WIW_INNER_PEER", "AETHER_MIM_INNER_PEER",
+        "AETHER_MASQUE_HTTP2", "AETHER_MASQUE_SNI", "AETHER_MASQUE_H2_FRAGMENT", "AETHER_MASQUE_H2_FRAGMENT_SNI",
+        "AETHER_MASQUE_MTU", "AETHER_WG_MTU", "AETHER_HTTP_PROXY", "AETHER_GOOL_MODE",
+        "AETHER_TLS_GROUPS", "AETHER_TLS_CIPHERS", "AETHER_DNS", "AETHER_ROUTE_BLOCK", "AETHER_ROUTE_DIRECT",
+        "AETHER_TEAM", "AETHER_ACCESS_CLIENT_ID", "AETHER_ACCESS_CLIENT_SECRET",
+        "AETHER_ACCESS_TOKEN", "AETHER_ACCESS_EMAIL", "AETHER_ACCESS_GATEWAY",
+        "AETHER_ECH", "AETHER_ECH_DNS", "AETHER_ECH_DOMAIN", "AETHER_API_ECH",
+        "AETHER_UPSTREAM",
+    )
+
+    /**
+     * Why [file] is not a complete identity, or null when it is. Stage-F log
+     * data: names the exact missing field, so a follow-up log shows WHERE the
+     * registration died instead of a bare "failed — previous kept".
+     */
+    private fun whyIncomplete(file: File, masque: Boolean): String? {
+        val text = runCatching { file.readText() }.getOrNull() ?: return "file-not-found"
+        val missing = mutableListOf<String>()
+        if (!hasValue(text, "device_id")) missing.add("device_id")
+        if (!hasValue(text, "wg_private_key")) missing.add("wg_private_key")
+        if (!hasValue(text, "wg_peer_public_key")) missing.add("wg_peer_public_key")
+        if (masque) {
+            if (!hasValue(text, "cert_pem")) missing.add("cert_pem")
+            if (!hasValue(text, "key_pem")) missing.add("key_pem")
+        }
+        return if (missing.isEmpty()) null else "missing=" + missing.joinToString(",")
+    }
+
+    /** One-line state for the stage log: exists? size? what is missing? */
+    private fun targetState(file: File, masque: Boolean): String {
+        if (!file.exists()) return file.name + "=absent"
+        val why = whyIncomplete(file, masque)
+        return file.name + "=" + file.length() + "B" + (if (why != null) " ($why)" else " ok")
+    }
+
+    /** Stage-C: install the minimal env and clear every tunnel carry-over. */
+    private fun sanitizeAndApplyEnv(context: Context, out: Map<String, String>): Int {
+        var cleared = 0
+        for (key in TUNNEL_ENV_KEYS) {
+            if (key !in out) { NativeCore.clearEnv(key); cleared++ }
+        }
+        for ((key, value) in out) NativeCore.setEnv(key, value)
+        val ech = if (out.containsKey("AETHER_API_ECH")) "ech=on" else "ech=off"
+        val up = out["AETHER_UPSTREAM"]?.let { "upstream=shard" } ?: "upstream=none"
+        ConnectionLog.record(
+            "Warp Identity: stage ok — env set (" + out.size + " keys, " + cleared + " tunnel carry-overs cleared; " +
+                "proto=" + out["AETHER_PROTOCOL"] + " register=" + out["AETHER_REGISTER"] + " " + ech + " " + up + ")"
+        )
+        return cleared
+    }
 
     fun fetch(context: Context, protocol: String): Boolean {
         if (NativeCore.isRunning()) {
@@ -56,6 +123,8 @@ object WarpIdentityFetcher {
             return false
         }
 
+        // Stage A — file quiesce: recover stale baks, move aside targets, log exactly what was moved.
+        ConnectionLog.record("Warp Identity: stage A — file quiesce for $protocol")
         recover(dir)
 
         val moved = mutableListOf<File>()
@@ -65,11 +134,15 @@ object WarpIdentityFetcher {
             bak.delete()
             if (!file.renameTo(bak)) {
                 Log.e(TAG, "could not set ${file.name} aside")
-                ConnectionLog.record("Warp Identity: could not set ${file.name} aside")
+                ConnectionLog.record("Warp Identity: stage A failed — could not set ${file.name} aside")
                 restore(moved)
                 return false
             }
             moved += file
+            ConnectionLog.record("Warp Identity: stage A — moved aside " + file.name + " (" + targets.map { targetState(it, masque) }.joinToString(" | ") + ")")
+        }
+        if (moved.isEmpty()) {
+            ConnectionLog.record("Warp Identity: stage A — no prior " + protocol + " file to move (fresh registration)")
         }
 
         var ok = false
@@ -78,9 +151,13 @@ object WarpIdentityFetcher {
             Log.i(TAG, "requesting fresh $protocol identity via ECH (bind $BIND)")
             ConnectionLog.record("Warp Identity: requesting $protocol via ECH…")
             ConnectionLog.record("Warp Identity: registering $protocol…")
+            // Stage C — env sanitize: clear previous tunnel's env carry-over, set minimal register env.
+            ConnectionLog.record("Warp Identity: stage C — sanitizing env (clearing tunnel carry-overs)")
+            sanitizeAndApplyEnv(context, env)
 
-            CoreConfig.applyEnv(env)
-            val startRc = try {
+            // Stage D — engine start
+            ConnectionLog.record("Warp Identity: stage D — starting engine (proxy on $BIND, proto=" + protocol + ")")
+            var startRc = try {
                 NativeCore.startProxy("{}")
             } catch (e: Exception) {
                 Log.w(TAG, "NativeCore start failed: ${e.message}")
@@ -88,37 +165,56 @@ object WarpIdentityFetcher {
             }
             if (startRc != 0 && !NativeCore.isRunning()) {
                 val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
-                Log.w(TAG, "engine did not start: $err")
-                ConnectionLog.record("Warp Identity: engine did not start${if (err.isNotBlank()) " — $err" else ""}")
+                val hint = if (err.isNotBlank()) " — $err" else " (no engine error text — JNI g_last_error cached)"
+                Log.w(TAG, "engine did not start: $err (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
+                ConnectionLog.record("Warp Identity: stage D failed — engine did not start$hint")
+                // Stage F detail: which file was expected and what is there
+                ConnectionLog.record("Warp Identity: stage F — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
                 restore(moved)
                 return false
             }
+            ConnectionLog.record("Warp Identity: stage D ok — engine started (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
 
             val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+            // Stage E — wait for the identity file; every few seconds a WHY line so a
+            // follow-up log shows exactly which field is missing and how much arrived.
+            var lastStageLog = 0L
             while (true) {
                 if (targets.all { complete(it, masque) }) {
                     ok = true
                     break
                 }
-                if (!NativeCore.isRunning()) {
-                    // Job finished (success or failure) — check files one last time.
+                val finished = !NativeCore.isRunning()
+                if (finished || SystemClock.elapsedRealtime() >= deadline) {
+                    if (!finished && SystemClock.elapsedRealtime() >= deadline) {
+                        Log.w(TAG, "Warp identity request timed out after ${TIMEOUT_MS}ms")
+                        ConnectionLog.record("Warp Identity: stage E — timed out after " + (TIMEOUT_MS / 1000) + "s")
+                    }
+                    // Stage F — final verdict with exact per-file state
                     ok = targets.all { complete(it, masque) }
                     if (!ok) {
                         val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
-                        if (err.isNotBlank()) {
-                            Log.w(TAG, "engine finished without identity: $err")
-                            ConnectionLog.record("Warp Identity: $protocol — $err")
-                        }
+                        val engineNote = if (err.isNotBlank()) "engine-error=[$err]" else "engine-error=none (job done ok or reaped silently)"
+                        ConnectionLog.record(
+                            "Warp Identity: stage F — " + (if (finished) "engine exited without identity" else "timed out") +
+                                "; " + targets.joinToString(" | ") { t -> targetState(t, masque) } + "; " + engineNote
+                        )
+                    } else {
+                        ConnectionLog.record("Warp Identity: stage G ok — " + targets.joinToString(" | ") { t -> t.name + "=complete" })
                     }
                     break
                 }
-                if (SystemClock.elapsedRealtime() >= deadline) {
-                    Log.w(TAG, "Warp identity request timed out after ${TIMEOUT_MS}ms")
-                    ConnectionLog.record("Warp Identity: timed out after ${TIMEOUT_MS / 1000}s")
-                    break
+                // Live tick so vault term visibly moves while engine works + a WHY snapshot
+                val now = SystemClock.elapsedRealtime()
+                if (now % 4000 < 500 && lastStageLog != 0L && now - lastStageLog >= 3800) {
+                    ConnectionLog.record("Warp Identity: still working on $protocol… — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
+                    lastStageLog = now
                 }
                 // Live tick so vault term visibly moves while engine works
-                if (SystemClock.elapsedRealtime() % 4000 < 500) ConnectionLog.record("Warp Identity: still working on $protocol…")
+                else if (now % 4000 < 500) {
+                    ConnectionLog.record("Warp Identity: still working on $protocol…")
+                    lastStageLog = now
+                }
                 try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
             }
         } catch (e: Exception) {
@@ -159,23 +255,64 @@ object WarpIdentityFetcher {
         val masque = norm in setOf("masque", "mim", "masque-in-masque", "masque over masque")
         val targets = identityFiles(dir, norm)
         if (targets.isEmpty()) return false
+        ConnectionLog.record("Warp Identity: stage A — file quiesce for $protocol (plain)")
         recover(dir)
         val moved = mutableListOf<java.io.File>()
-        for (file in targets) { if (!file.exists()) continue; val bak = backupOf(file); bak.delete(); if (!file.renameTo(bak)) { android.util.Log.e(TAG, "could not set " + file.name + " aside"); ConnectionLog.record("Warp Identity: could not set " + file.name + " aside"); restore(moved); return false }; moved += file }
+        for (file in targets) {
+            if (!file.exists()) continue
+            val bak = backupOf(file); bak.delete()
+            if (!file.renameTo(bak)) {
+                android.util.Log.e(TAG, "could not set " + file.name + " aside")
+                ConnectionLog.record("Warp Identity: stage A failed — could not set " + file.name + " aside")
+                restore(moved); return false
+            }
+            moved += file
+        }
+        if (moved.isEmpty()) ConnectionLog.record("Warp Identity: stage A — no prior " + protocol + " file to move (fresh registration)")
         var ok = false
         try {
             val env = buildEnvPlain(context, norm)
             android.util.Log.i(TAG, "requesting fresh " + protocol + " identity via Native Link (bind " + BIND + ")")
             ConnectionLog.record("Warp Identity: requesting " + protocol + " via Native Link…")
             ConnectionLog.record("Warp Identity: registering " + protocol + "…")
-            CoreConfig.applyEnv(env)
+            ConnectionLog.record("Warp Identity: stage C — sanitizing env (clearing tunnel carry-overs)")
+            sanitizeAndApplyEnv(context, env)
+            ConnectionLog.record("Warp Identity: stage D — starting engine (proxy on " + BIND + ", proto=" + protocol + ")")
             val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { android.util.Log.w(TAG, "NativeCore start failed: " + e.message); -1 }
-            if (startRc != 0 && !NativeCore.isRunning()) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; android.util.Log.w(TAG, "engine did not start: " + err); ConnectionLog.record("Warp Identity: engine did not start" + (if (err.isNotBlank()) " — " + err else "")); restore(moved); return false }
+            if (startRc != 0 && !NativeCore.isRunning()) {
+                val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                android.util.Log.w(TAG, "engine did not start: " + err)
+                ConnectionLog.record("Warp Identity: stage D failed — engine did not start" + (if (err.isNotBlank()) " — " + err else ""))
+                ConnectionLog.record("Warp Identity: stage F — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
+                restore(moved); return false
+            }
+            ConnectionLog.record("Warp Identity: stage D ok — engine started (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
             val deadline = android.os.SystemClock.elapsedRealtime() + TIMEOUT_MS
+            var lastStageLog = 0L
             while (true) {
                 if (targets.all { complete(it, masque) }) { ok = true; break }
-                if (!NativeCore.isRunning()) { ok = targets.all { complete(it, masque) }; if (!ok) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; if (err.isNotBlank()) { android.util.Log.w(TAG, "engine finished without identity: " + err); ConnectionLog.record("Warp Identity: " + protocol + " — " + err) } }; break }
-                if (android.os.SystemClock.elapsedRealtime() >= deadline) { android.util.Log.w(TAG, "Warp identity request timed out after " + TIMEOUT_MS + "ms"); ConnectionLog.record("Warp Identity: timed out after " + TIMEOUT_MS / 1000 + "s"); break }
+                val finished = !NativeCore.isRunning()
+                if (finished || android.os.SystemClock.elapsedRealtime() >= deadline) {
+                    if (!finished) {
+                        android.util.Log.w(TAG, "Warp identity request timed out after " + TIMEOUT_MS + "ms")
+                        ConnectionLog.record("Warp Identity: stage E — timed out after " + (TIMEOUT_MS / 1000) + "s")
+                    }
+                    ok = targets.all { complete(it, masque) }
+                    if (!ok) {
+                        val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                        val engineNote = if (err.isNotBlank()) "engine-error=[$err]" else "engine-error=none"
+                        ConnectionLog.record(
+                            "Warp Identity: stage F — " + (if (finished) "engine exited without identity" else "timed out") +
+                                "; " + targets.joinToString(" | ") { t -> targetState(t, masque) } + "; " + engineNote
+                        )
+                    } else ConnectionLog.record("Warp Identity: stage G ok — " + targets.joinToString(" | ") { t -> t.name + "=complete" })
+                    break
+                }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now % 4000 < 500) {
+                    ConnectionLog.record("Warp Identity: still working on $protocol… — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
+                    lastStageLog = now
+                }
                 try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
             }
         } catch (e: Exception) { android.util.Log.w(TAG, "Warp identity fetcher crashed: " + e.message); ConnectionLog.record("Warp Identity: crashed — " + e.message) }
@@ -190,22 +327,17 @@ object WarpIdentityFetcher {
 
     private fun buildEnvPlain(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) { "mim", "masque-in-masque", "masque over masque" -> "mim"; "masque" -> "masque"; "gool", "wow", "warp-in-warp" -> "gool"; else -> "wireguard" }
-        val base = CoreConfig.env(context, protocol = protoForEnv)
-        val out = LinkedHashMap(base)
+        // Same minimal construction as buildEnv — registration needs no scan
+        // env from a previous tunnel; a stale AETHER_NOIZE/SCAN/MTU/SNI/TLS
+        // set made the register job exit without a file after any connect.
+        val out = LinkedHashMap<String, String>()
+        out["AETHER_CONFIG"] = File(context.filesDir, "aether.toml").absolutePath
+        out["AETHER_PROTOCOL"] = protoForEnv
+        out["AETHER_SOCKS"] = BIND
+        out["AETHER_LOG_LEVEL"] = "info"
         // Plain route: no ECH at all, no upstream — raw carrier to api.cloudflareclient.com
-        out.remove("AETHER_API_ECH"); out.remove("AETHER_ECH"); out.remove("AETHER_ECH_DNS"); out.remove("AETHER_ECH_DOMAIN"); out.remove("AETHER_UPSTREAM")
-        // Do not leak Warp Setting scanner choice into identity fetch — it is for
-        // the data-plane scan (WireGuard/WoW), not for api.cloudflareclient.com.
-        // Also strip forced AETHER_IP so registration is neutral.
-        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        out.remove("AETHER_IP")
-        // Registration-only: engine provisions and exits, does not open a tunnel.
-        // Without this it would scan WireGuard peers and need SOCKS. With it the
-        // job is --register semantics: write aether.toml and done.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
-        out["AETHER_SOCKS"] = BIND; out["AETHER_LOG_LEVEL"] = "info"
-        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
-        out.remove("AETHER_TEAM"); out.remove("AETHER_ACCESS_CLIENT_ID"); out.remove("AETHER_ACCESS_CLIENT_SECRET"); out.remove("AETHER_ACCESS_TOKEN"); out.remove("AETHER_ACCESS_EMAIL"); out.remove("AETHER_GATEWAY")
+        // Consumer WARP only — no Zero Trust carry-over from a previous connect.
         return out
     }
 
@@ -279,30 +411,42 @@ object WarpIdentityFetcher {
             Log.i(TAG, "requesting fresh $protocol identity via SHARD ($upstream)")
             ConnectionLog.record("Warp Identity: requesting $protocol via Shard…")
             ConnectionLog.record("Warp Identity: SHARD ready — registering $protocol…")
-            CoreConfig.applyEnv(env)
+            ConnectionLog.record("Warp Identity: stage C — sanitizing env (clearing tunnel carry-overs)")
+            sanitizeAndApplyEnv(context, env)
+            ConnectionLog.record("Warp Identity: stage D — starting engine (proxy on $BIND, proto=" + protocol + ", upstream=shard)")
             val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { Log.w(TAG, "NativeCore start failed: ${e.message}"); -1 }
             if (startRc != 0 && !NativeCore.isRunning()) {
                 val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
                 Log.w(TAG, "engine did not start: $err")
-                ConnectionLog.record("Warp Identity: engine did not start${if (err.isNotBlank()) " — $err" else ""}")
+                ConnectionLog.record("Warp Identity: stage D failed — engine did not start" + (if (err.isNotBlank()) " — " + err else ""))
+                ConnectionLog.record("Warp Identity: stage F — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
                 restore(moved)
                 return false
             }
+            ConnectionLog.record("Warp Identity: stage D ok — engine started (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
             val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
             while (true) {
                 if (targets.all { complete(it, masque) }) { ok = true; break }
-                if (!NativeCore.isRunning()) {
+                val finished = !NativeCore.isRunning()
+                if (finished || SystemClock.elapsedRealtime() >= deadline) {
+                    if (!finished) {
+                        Log.w(TAG, "Warp identity request timed out after ${TIMEOUT_MS}ms")
+                        ConnectionLog.record("Warp Identity: stage E — timed out after ${TIMEOUT_MS / 1000}s")
+                    }
                     ok = targets.all { complete(it, masque) }
                     if (!ok) {
                         val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
-                        if (err.isNotBlank()) { Log.w(TAG, "engine finished without identity: $err"); ConnectionLog.record("Warp Identity: $protocol — $err") }
-                    }
+                        val engineNote = if (err.isNotBlank()) "engine-error=[$err]" else "engine-error=none"
+                        ConnectionLog.record(
+                            "Warp Identity: stage F — " + (if (finished) "engine exited without identity" else "timed out") +
+                                "; " + targets.joinToString(" | ") { t -> targetState(t, masque) } + "; " + engineNote
+                        )
+                    } else ConnectionLog.record("Warp Identity: stage G ok — " + targets.joinToString(" | ") { t -> t.name + "=complete" })
                     break
                 }
-                if (SystemClock.elapsedRealtime() >= deadline) {
-                    Log.w(TAG, "Warp identity request timed out after ${TIMEOUT_MS}ms")
-                    ConnectionLog.record("Warp Identity: timed out after ${TIMEOUT_MS / 1000}s")
-                    break
+                val now = SystemClock.elapsedRealtime()
+                if (now % 4000 < 500) {
+                    ConnectionLog.record("Warp Identity: still working on $protocol… — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
                 }
                 try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
             }
@@ -438,14 +582,42 @@ object WarpIdentityFetcher {
             val env = buildEnvForShard(context, norm, upstream)
             android.util.Log.i(TAG, "requesting fresh " + protocol + " identity via SHARD (" + upstream + ")")
             ConnectionLog.record("Warp Identity: SHARD ready — registering " + protocol + "…")
-            CoreConfig.applyEnv(env)
+            ConnectionLog.record("Warp Identity: stage C — sanitizing env (clearing tunnel carry-overs)")
+            sanitizeAndApplyEnv(context, env)
+            ConnectionLog.record("Warp Identity: stage D — starting engine (proxy on " + BIND + ", proto=" + protocol + ", upstream=shard)")
             val startRc = try { NativeCore.startProxy("{}") } catch (e: Exception) { android.util.Log.w(TAG, "NativeCore start failed: " + e.message); -1 }
-            if (startRc != 0 && !NativeCore.isRunning()) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; android.util.Log.w(TAG, "engine did not start: " + err); ConnectionLog.record("Warp Identity: engine did not start" + (if (err.isNotBlank()) " — " + err else "")); restore(moved); return false }
+            if (startRc != 0 && !NativeCore.isRunning()) {
+                val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                android.util.Log.w(TAG, "engine did not start: " + err)
+                ConnectionLog.record("Warp Identity: stage D failed — engine did not start" + (if (err.isNotBlank()) " — " + err else ""))
+                ConnectionLog.record("Warp Identity: stage F — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
+                restore(moved); return false
+            }
+            ConnectionLog.record("Warp Identity: stage D ok — engine started (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
             val deadline = android.os.SystemClock.elapsedRealtime() + TIMEOUT_MS
             while (true) {
                 if (targets.all { complete(it, masque) }) { ok = true; break }
-                if (!NativeCore.isRunning()) { ok = targets.all { complete(it, masque) }; if (!ok) { val err = try { NativeCore.lastError() } catch (_: Exception) { "" }; if (err.isNotBlank()) { android.util.Log.w(TAG, "engine finished without identity: " + err); ConnectionLog.record("Warp Identity: " + protocol + " — " + err) } }; break }
-                if (android.os.SystemClock.elapsedRealtime() >= deadline) { android.util.Log.w(TAG, "Warp identity request timed out after " + TIMEOUT_MS + "ms"); ConnectionLog.record("Warp Identity: timed out after " + TIMEOUT_MS / 1000 + "s"); break }
+                val finished = !NativeCore.isRunning()
+                if (finished || android.os.SystemClock.elapsedRealtime() >= deadline) {
+                    if (!finished) {
+                        android.util.Log.w(TAG, "Warp identity request timed out after " + TIMEOUT_MS + "ms")
+                        ConnectionLog.record("Warp Identity: stage E — timed out after " + TIMEOUT_MS / 1000 + "s")
+                    }
+                    ok = targets.all { complete(it, masque) }
+                    if (!ok) {
+                        val err = try { NativeCore.lastError() } catch (_: Exception) { "" }
+                        val engineNote = if (err.isNotBlank()) "engine-error=[$err]" else "engine-error=none"
+                        ConnectionLog.record(
+                            "Warp Identity: stage F — " + (if (finished) "engine exited without identity" else "timed out") +
+                                "; " + targets.joinToString(" | ") { t -> targetState(t, masque) } + "; " + engineNote
+                        )
+                    } else ConnectionLog.record("Warp Identity: stage G ok — " + targets.joinToString(" | ") { t -> t.name + "=complete" })
+                    break
+                }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now % 4000 < 500) {
+                    ConnectionLog.record("Warp Identity: still working on $protocol… — " + targets.joinToString(" | ") { t -> targetState(t, masque) })
+                }
                 try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
             }
         } catch (e: Exception) { android.util.Log.w(TAG, "Warp identity fetcher crashed: " + e.message); ConnectionLog.record("Warp Identity: crashed — " + e.message) }
@@ -469,27 +641,31 @@ object WarpIdentityFetcher {
             "gool", "wow", "warp-in-warp" -> "gool"
             else -> "wireguard"
         }
-        val base = CoreConfig.env(context, protocol = protoForEnv, socksProxyForCore = upstream)
-        val out = LinkedHashMap(base)
-        // Do not leak Warp Setting scanner choice into identity fetch — it is for
-        // the data-plane scan, not for api.cloudflareclient.com. Shard path must
-        // not narrow the scan while waiting for aether.toml.
-        // Also strip forced AETHER_IP so registration is neutral.
-        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        out.remove("AETHER_IP")
+        // Same minimal construction as buildEnv, plus the SHARD upstream only.
+        // A previous tunnel's env (NOIZE/SCAN/MTU/SNI/TLS) leaked into this job.
+        val out = LinkedHashMap<String, String>()
+        out["AETHER_CONFIG"] = File(context.filesDir, "aether.toml").absolutePath
+        out["AETHER_PROTOCOL"] = protoForEnv
+        out["AETHER_SOCKS"] = BIND
+        out["AETHER_LOG_LEVEL"] = "info"
+        out["AETHER_UPSTREAM"] = upstream
         // Registration-only via SHARD upstream: no tunnel/scan, just provision.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
-        out["AETHER_LOG_LEVEL"] = "info"
-        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
-        out.remove("AETHER_TEAM")
-        out.remove("AETHER_ACCESS_CLIENT_ID")
-        out.remove("AETHER_ACCESS_CLIENT_SECRET")
-        out.remove("AETHER_ACCESS_TOKEN")
-        out.remove("AETHER_ACCESS_EMAIL")
-        out.remove("AETHER_ACCESS_GATEWAY")
+        // Consumer WARP only — no Zero Trust carry-over from a previous connect.
         return out
     }
 
+    /**
+     * Registration env is built MINIMAL, not derived from the last tunnel's
+     * CoreConfig.env(). After a real connect the process env still carries the
+     * tunnel's keys (AETHER_NOIZE, AETHER_SCAN, MTUs, SNI, TLS groups, STATS…)
+     * because CoreConfig.applyEnv only clears a short clearIfAbsent list. Those
+     * leftovers leaked into the AETHER_REGISTER job and the engine exited fast
+     * without writing the sibling identity file — exactly the "works fresh,
+     * fails after any connect" report (test 2). Registration needs no scan, so
+     * a fresh minimal env is both correct and isolated: Warp Setting only,
+     * no connect path touched. REVERT: rebuild these from CoreConfig.env.
+     */
     private fun buildEnv(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) {
             "mim", "masque-in-masque", "masque over masque" -> "mim"
@@ -497,42 +673,17 @@ object WarpIdentityFetcher {
             "gool", "wow", "warp-in-warp" -> "gool"
             else -> "wireguard"
         }
-        val base = CoreConfig.env(context, protocol = protoForEnv)
-        val out = LinkedHashMap(base)
-        // Do not leak Warp Setting scanner choice into identity fetch — it is for
-        // the data-plane scan, not for api.cloudflareclient.com. ECH job only
-        // needs to write aether.toml; narrowing scan CIDRs just slows it.
-        // Also strip the Ptech forced AETHER_IP (v4/v6) so registration is not
-        // polluted by the scanner's override; AETHER_REGISTER path ignores IP
-        // anyway but we keep env clean. Stripping here is Warp Setting isolated.
-        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        // Strip forced scanner IP so ECH registration uses neutral IP (engine default).
-        // Ptech's v6 for WireGuard/WoW must not leak into the API call.
-        out.remove("AETHER_IP")
-        // Re-apply neutral IP: Masque/MiM always v4, others use Scan Mode default (both) or engine default.
-        // Keep it simple: leave absent → engine defaults to v4 for registration which is fine;
-        // or set to v4 explicitly to match Fetcher's neutral stance. Registration doesn't scan.
-        // We do not set AETHER_IP here → engine falls back to v4 for register, which is correct.
-        // Quantum ECH: force Freedom-like ECH regardless of current exit mode.
-        // Use embedded AETHER_API_ECH (no DoH to 1.1.1.1) — same key main
-        // connect embeds for Freedom direct, so filtered carriers need no
-        // extra round-trip. Remove AETHER_ECH/AETHER_UPSTREAM like Freedom.
-        out["AETHER_API_ECH"] = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
-        out.remove("AETHER_ECH")
-        out.remove("AETHER_ECH_DNS")
-        out.remove("AETHER_ECH_DOMAIN")
-        out.remove("AETHER_UPSTREAM")
+        val out = LinkedHashMap<String, String>()
+        out["AETHER_CONFIG"] = File(context.filesDir, "aether.toml").absolutePath
+        out["AETHER_PROTOCOL"] = protoForEnv
+        out["AETHER_SOCKS"] = BIND
+        out["AETHER_LOG_LEVEL"] = "info"
+        // Quantum ECH: embedded key, API-only — same key the main connect uses
+        // for Freedom; registration dials api.cloudflareclient.com over it.
+        out["AETHER_API_ECH"] = ECH_EMBEDDED
         // Registration-only: no tunnel/scan, just provision via ECH.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
-        out["AETHER_SOCKS"] = BIND; out["AETHER_LOG_LEVEL"] = "info"
-        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
-        // Consumer WARP only
-        out.remove("AETHER_TEAM")
-        out.remove("AETHER_ACCESS_CLIENT_ID")
-        out.remove("AETHER_ACCESS_CLIENT_SECRET")
-        out.remove("AETHER_ACCESS_TOKEN")
-        out.remove("AETHER_ACCESS_EMAIL")
-        out.remove("AETHER_GATEWAY")
+        // Consumer WARP only — no Zero Trust carry-over from a previous connect.
         return out
     }
 
