@@ -7850,8 +7850,6 @@ class MainActivity : Activity() {
     private var quotaRow: OrbitSettingsRow? = null
     private var rowServer: OrbitSettingsRow? = null
 
-    /** re-styles the Send Code button whenever email/password text changes. */
-    private var refreshFoxyChip: (() -> Unit)? = null
 
     // ---------------------------------------------------------------- FOXY
 
@@ -7946,13 +7944,13 @@ class MainActivity : Activity() {
             alpha = 0.4f
         }
 
-        var sendReady = password.text.length > 3 && email.text.toString().trim().isNotEmpty()
+        var sendReady = false
 
-        fun styleSend(ready: Boolean) {
-            sendReady = ready
-            sendCodeBtn.setTextColor(if (ready) INK else MUTED)
-            sendCodeBtn.background = roundedBackground(SURFACE_VARIANT, 16, if (ready) 0xFF27C93F.toInt() else DIVIDER)
-            sendCodeBtn.alpha = if (ready) 1f else 0.55f
+        fun refreshSendCodeEnabled() {
+            sendReady = email.text.toString().trim().isNotEmpty() && password.text.length > 3
+            sendCodeBtn.setTextColor(if (sendReady) INK else MUTED)
+            sendCodeBtn.background = roundedBackground(SURFACE_VARIANT, 16, if (sendReady) 0xFF27C93F.toInt() else DIVIDER)
+            sendCodeBtn.alpha = if (sendReady) 1f else 0.55f
         }
         fun styleSignIn(ready: Boolean) {
             signInBtn.setTextColor(if (ready) INK else MUTED)
@@ -7984,12 +7982,12 @@ class MainActivity : Activity() {
         email.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) { refreshFoxyChip?.invoke() }
+            override fun afterTextChanged(s: android.text.Editable?) { refreshSendCodeEnabled() }
         })
         password.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) { refreshFoxyChip?.invoke() }
+            override fun afterTextChanged(s: android.text.Editable?) { refreshSendCodeEnabled() }
         })
 
         // States that survive reopening the page mid-flow:
@@ -8008,7 +8006,7 @@ class MainActivity : Activity() {
         }
 
         // Initial (or post sign-out) look:
-        styleSend(sendReady)
+        refreshSendCodeEnabled()
         if (pending != "active") styleSignIn(false)
 
         accountCard.addView(label("Email", 11f, MUTED).apply { letterSpacing = 0.10f },
@@ -8122,7 +8120,10 @@ class MainActivity : Activity() {
                     chip.text = "SIGN-IN FAILED: " + (error ?: "unknown")
                     chip.setTextColor(0xFFFF5F56.toInt())
                     sendBtn.text = Strings.t("Send Code")
-                    styleSendGlobal()
+                    styleFoxyButton(
+                        sendBtn,
+                        emailField.text.toString().trim().isNotEmpty() && passwordField.text.length > 3,
+                    )
                     return@runOnUiThread
                 }
                 if (needsCode) {
@@ -8133,8 +8134,8 @@ class MainActivity : Activity() {
                     codeField.hint = "Paste the code from your email"
                     codeField.requestFocus()
                     sendBtn.text = Strings.t("Resend Code")
-                    styleSendGlobal()
-                    styleSignInGlobal(true, signInBtn)
+                    styleFoxyButton(sendBtn, true)
+                    styleFoxyButton(signInBtn, true)
                     ConnectionLog.record("Foxy: verification code sent to " + email)
                 } else {
                     // login returned tokens directly (no code needed)
@@ -8143,7 +8144,7 @@ class MainActivity : Activity() {
                     chip.background = roundedBackground(0xFFE7E2FF.toInt(), 11, 0xFFC9BFFF.toInt())
                     sendBtn.text = Strings.t("Sign Out")
                     signInBtn.text = Strings.t("Signed In ✓")
-                    styleSignInGlobal(false, signInBtn)
+                    styleFoxyButton(signInBtn, false)
                     fetchFoxyQuota(quotaRow)
                 }
             }
@@ -8178,7 +8179,7 @@ class MainActivity : Activity() {
                     chip.text = "CODE FAILED: " + (error ?: "unknown")
                     chip.setTextColor(0xFFFF5F56.toInt())
                     signInBtn.text = Strings.t("Sign In")
-                    styleSignInGlobal(true, signInBtn)
+                    styleFoxyButton(signInBtn, true)
                     return@runOnUiThread
                 }
                 chip.text = "ACCOUNT: signed in"
@@ -8189,7 +8190,7 @@ class MainActivity : Activity() {
                 codeField.hint = "Signed in"
                 codeField.alpha = 0.4f
                 signInBtn.text = Strings.t("Signed In ✓")
-                styleSignInGlobal(false, signInBtn)
+                styleFoxyButton(signInBtn, false)
                 toastShort(Strings.t("Foxy account verified"))
                 ConnectionLog.record("Foxy: verified — tokens minted")
                 fetchFoxyQuota(quotaRow)
@@ -8197,8 +8198,8 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun styleSendGlobal() { refreshFoxyChip?.invoke() }
-    private fun styleSignInGlobal(ready: Boolean, btn: TextView) {
+    /** One place for the theme+neon look, shared by every Foxy button. */
+    private fun styleFoxyButton(btn: TextView, ready: Boolean) {
         btn.setTextColor(if (ready) INK else MUTED)
         btn.background = roundedBackground(SURFACE_VARIANT, 16, if (ready) 0xFF27C93F.toInt() else DIVIDER)
         btn.alpha = if (ready) 1f else 0.55f
