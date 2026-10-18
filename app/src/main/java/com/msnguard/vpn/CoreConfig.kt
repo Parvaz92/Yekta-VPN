@@ -460,37 +460,45 @@ object CoreConfig {
         }
 
         // Warp endpoint scanner override — Warp Setting isolated, reversible.
-        // Normal sends nothing (engine CIDRs + Scan Mode AETHER_IP). Ptech-ipv4
-        // sends only the 7 v4 /24s + explicit empty for V6, and forces AETHER_IP=v4;
-        // Ptech-ipv6 sends only the 2 v6 /48s + explicit empty for V4, and forces
-        // AETHER_IP=v6 for WireGuard/WoW. Masque/MiM are always v4: Ptech-ipv6
-        // collapses to Ptech-ipv4 there. Explicit empty prevents the engine's
-        // ptech_enabled() fallback (wireguard::ptech_enabled -> PTECH_CIDRS) from
-        // leaking the non-selected family into the candidate pool. The empty
-        // makes env_cidrs return Some([]) so wg_prefixes returns [] for that family.
-        // REVERT: delete this when/if block → engine falls back to built-ins.
+        // Normal sends nothing (engine CIDRs + Scan Mode AETHER_IP).
+        // Ptech-ipv4 replicates the pre-split single-Ptech env verbatim
+        // (pre-split commit dd12b55): PTECH v4 7×/24 AND v6 2×/48 together,
+        // the 4 WG ports, PTECH_SCAN=1, and NO AETHER_IP override — the
+        // engine scans dual-stack over the combined pool exactly like the
+        // old version ('ip=dual-stack candidates=3261'). v4-only proved
+        // unusable on carriers that filter v4 UDP to WARP ranges (alpha21
+        // log: 2541 v4 candidates, zero handshakes in both profiles, while
+        // v6-only validated in seconds). REVERT: back to v4-only + "".
+        // Ptech-ipv6 unchanged: only the 2 v6 /48s + explicit empty for V4,
+        // forced AETHER_IP=v6 for WireGuard/WoW. Masque/MiM are always v4:
+        // Ptech-ipv6 collapses to Ptech-ipv4 there. Explicit empty prevents
+        // the engine's ptech_enabled() fallback (wireguard::ptech_enabled ->
+        // PTECH_CIDRS) from leaking the non-selected family into the pool.
+        // REVERT: delete this whole block → engine falls back to built-ins.
         run {
             val sm = warpScannerMode(context)
             val isPtechV4 = sm == WARP_SCANNER_MODE_PTECH_V4
             val isPtechV6 = sm == WARP_SCANNER_MODE_PTECH_V6
             val isMasqueEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL
             // Masque/MiM always v4 per product decision — Ptech-ipv6 collapses to Ptech-ipv4 there.
-            val effPtechV4 = isPtechV4 || (isPtechV6 && isMasqueEnv)
             val effPtechV6 = isPtechV6 && !isMasqueEnv
-            if (effPtechV4 || effPtechV6) {
-                if (effPtechV4) {
-                    out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
-                    out["AETHER_SCAN_CIDRS_V6"] = ""
-                } else {
-                    out["AETHER_SCAN_CIDRS_V4"] = ""
-                    out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
-                }
+            if (isPtechV4) {
+                out["AETHER_SCAN_CIDRS_V4"] = PTECH_PREFIXES_V4
+                out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
+                out["AETHER_WG_PORTS"] = PTECH_WG_PORTS
+                out["AETHER_PTECH_SCAN"] = "1"
+                // No AETHER_IP here — dual-stack over the Ptech pool, exactly
+                // the pre-split behaviour (Scan Mode value survives, engine
+                // picks per-family candidates itself).
+            } else if (effPtechV6) {
+                out["AETHER_SCAN_CIDRS_V4"] = ""
+                out["AETHER_SCAN_CIDRS_V6"] = PTECH_PREFIXES_V6
                 out["AETHER_WG_PORTS"] = PTECH_WG_PORTS
                 out["AETHER_PTECH_SCAN"] = "1"
                 // For WireGuard/WoW, Ptech choice overrides Scan Mode's AETHER_IP.
                 // Masque/MiM keep the hard "v4" from line 374 — do not touch.
                 if (!isMasqueEnv) {
-                    out["AETHER_IP"] = if (effPtechV6) "v6" else "v4"
+                    out["AETHER_IP"] = "v6"
                 }
             }
         }
