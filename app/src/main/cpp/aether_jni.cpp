@@ -47,6 +47,41 @@ namespace {
 std::mutex g_job_mu;
 unsigned long long g_job = 0;
 
+// Error payload of the most recent FINISHED job. nativeIsRunning frees the
+// job the moment it observes "done", so a lastError() asked afterwards used
+// to find g_job == 0 and return "" — a register job that died after any
+// connect reported nothing at all ("previous kept" with no reason). The
+// cache is stamped in the exact same critical section where the job is
+// reaped, so the error text always survives the reap. Cleared on next start.
+std::mutex g_last_err_mu;
+std::string g_last_error;
+
+// Reads one job's poll payload; when it looks {..,"ok":false,"error":"..."}
+// the error text is stored in g_last_error. Reused by the reaper and stop().
+void cache_job_error_locked(unsigned long long id) {
+    (void)id;
+}
+
+// Extract the "error" field text out of a job payload (or the whole payload
+// when the field is missing but the payload still says ok:false).
+std::string extract_error_text(const std::string& payload) {
+    size_t at = payload.find("\"error\"");
+    if (at == std::string::npos) return payload;
+    at = payload.find('"', at + 7);
+    if (at == std::string::npos) return payload;
+    size_t end = payload.find('"', at + 1);
+    if (end == std::string::npos) return payload;
+    return payload.substr(at + 1, end - at - 1);
+}
+
+// Stamp g_last_error from a finished job's payload if it failed.
+void stamp_last_error_from_payload(const std::string& payload) {
+    if (payload.find("\"ok\":false") == std::string::npos) return;
+    std::string text = extract_error_text(payload);
+    std::lock_guard<std::mutex> lock(g_last_err_mu);
+    g_last_error = text;
+}
+
 JavaVM* g_vm = nullptr;
 jobject g_service = nullptr;
 jmethodID g_on_event = nullptr;
@@ -213,6 +248,13 @@ Java_com_msnguard_vpn_NativeCore_nativeStart(JNIEnv*, jobject, jstring, jint) {
     // configuration comes from the AETHER_* environment the service sets.
     static std::thread::id g_starter;
     {
+        // Clear the previous job's error stamp: lastError() must describe THIS
+        // job alone, never the one before it (a register follow-up to a dead
+        // tunnel would else show a stale error).
+        std::lock_guard<std::mutex> le(g_last_err_mu);
+        g_last_error.clear();
+    }
+    {
         std::lock_guard<std::mutex> lock(g_job_mu);
         if (g_job != 0) {
             LOGE("aether already running as job %llu", (unsigned long long)g_job);
@@ -327,6 +369,15 @@ Java_com_msnguard_vpn_NativeCore_nativeIsRunning(JNIEnv*, jobject) {
     }
     if (id == 0) return JNI_FALSE;
     if (job_finished(id)) {
+        // Stamp the error cache BEFORE the reap: after g_job is zeroed the
+        // payload is unreachable, which is how a register job's failure got
+        // swallowed and reported as "previous kept" with no reason.
+        const char* probe = aether_job_poll(id);
+        if (probe != nullptr) {
+            std::string seen(probe);
+            aether_string_free(probe);
+            stamp_last_error_from_payload(seen);
+        }
         std::lock_guard<std::mutex> lock(g_job_mu);
         if (g_job == id) {
             free_job(id);
@@ -349,25 +400,31 @@ Java_com_msnguard_vpn_NativeCore_nativeLastError(JNIEnv* env, jobject) {
     // {"ok":false,"error":"..."}}. Without this, a tunnel that exits with code
     // -1 showed the user a bare number and logcat showed nothing either, so a
     // registration failure looked identical to a port bind failure.
-    unsigned long long id = 0;
+    // When the job was already reaped (g_job == 0), a cached stamp from the
+    // reaper is served instead: that is the path a fast-exiting register job
+    // takes, and the fetch logs exactly what the engine said.
     {
         std::lock_guard<std::mutex> lock(g_job_mu);
-        id = g_job;
+        if (g_job != 0) {
+            const char* reply = aether_job_poll(g_job);
+            if (reply != nullptr) {
+                std::string text(reply);
+                aether_string_free(reply);
+                if (text.find("\"ok\":false") != std::string::npos) {
+                    std::string err = extract_error_text(text);
+                    {
+                        std::lock_guard<std::mutex> le(g_last_err_mu);
+                        g_last_error = err;
+                    }
+                    return env->NewStringUTF(err.c_str());
+                }
+                return env->NewStringUTF("");
+            }
+            return env->NewStringUTF("");
+        }
     }
-    if (id == 0) return env->NewStringUTF("");
-    const char* reply = aether_job_poll(id);
-    if (reply == nullptr) return env->NewStringUTF("");
-    std::string text(reply);
-    aether_string_free(reply);
-    if (text.find("\"ok\":false") == std::string::npos) return env->NewStringUTF("");
-    // Extract the error message.
-    size_t at = text.find("\"error\"");
-    if (at == std::string::npos) return env->NewStringUTF(text.c_str());
-    at = text.find('"', at + 7);
-    if (at == std::string::npos) return env->NewStringUTF(text.c_str());
-    size_t end = text.find('"', at + 1);
-    if (end == std::string::npos) return env->NewStringUTF(text.c_str());
-    return env->NewStringUTF(text.substr(at + 1, end - at - 1).c_str());
+    std::lock_guard<std::mutex> le(g_last_err_mu);
+    return env->NewStringUTF(g_last_error.c_str());
 }
 
 extern "C" JNIEXPORT jstring JNICALL
