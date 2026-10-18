@@ -1,7 +1,6 @@
 package com.msnguard.vpn.foxy
 
 import android.os.Build
-import com.msnguard.vpn.BuildConfig
 
 import com.msnguard.vpn.foxy.FoxySettings
 import io.netty.bootstrap.Bootstrap
@@ -300,7 +299,7 @@ class H2UpstreamSession(
                         )
 
                         .autoAckPingFrame(false)
-                    if (BuildConfig.DEBUG) {
+                    if (false) {
 
                         frameCodecBuilder.frameLogger(Http2FrameLogger(LogLevel.DEBUG))
                     }

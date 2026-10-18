@@ -34,7 +34,7 @@ object FoxyTunnel {
 
     private const val TAG = "FoxyTunnel"
 
-    @Volatile private var socks: FoxyLocalSocksServer? = null
+    @Volatile private var socks: LocalSocks5Server? = null
     @Volatile private var session: UpstreamSession? = null
     @Volatile private var proxyPass: ProxyPass? = null
 
@@ -42,9 +42,7 @@ object FoxyTunnel {
 
     /** Bytes moved through the tunnel since start (for the service's stats poll). */
     @Volatile var txBytes: Long = 0L
-        private set
     @Volatile var rxBytes: Long = 0L
-        private set
 
     fun tokenStore(context: Context) = FxoTokenStore(context)
     fun authRepo(context: Context) = FxaAuthRepository(tokenStore(context))
@@ -69,8 +67,8 @@ object FoxyTunnel {
     suspend fun login(context: Context, email: String, password: String): String =
         withContext(Dispatchers.IO) {
             val repo = authRepo(context)
-            val needed = runCatching { repo.startLogin(email.trim(), password) }.getOrThrow()
-            if (needed == true) "needs-code" else "signed-in"
+            val needed = repo.startLogin(email.trim(), password).getOrDefault(false)
+            if (needed) "needs-code" else "signed-in"
         }
 
     /** Verify the emailed code and finish the login. */

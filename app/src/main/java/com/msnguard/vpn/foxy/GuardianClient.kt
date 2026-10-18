@@ -102,12 +102,12 @@ class GuardianClient(
             if (method == "POST") builder.post(ByteArray(0).toRequestBody(null))
             return builder.build()
         }
-        var response = client.newCall(buildRequest()).execute()
+        var response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
         var attempts = 1
         while (response.code == 406 && attempts < GUARDIAN_MAX_CHALLENGE_ATTEMPTS) {
             response.close()
             challengeSolver.solveAndInstall()
-            response = client.newCall(buildRequest()).execute()
+            response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
         return response

@@ -265,12 +265,12 @@ class FxaAuthRepository(
             return builder.build()
         }
 
-        var response: Response = client.newCall(buildRequest()).execute()
+        var response: Response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
         var attempts = 1
         while (response.code == 406 && attempts < FXA_MAX_CHALLENGE_ATTEMPTS) {
             response.close()
             challengeSolver.solveAndInstall()
-            response = client.newCall(buildRequest()).execute()
+            response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
 
