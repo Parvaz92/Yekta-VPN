@@ -6366,14 +6366,17 @@ class MainActivity : Activity() {
             exitField.setText(raw)
             exitField.hint = "vless://uuid@host:port?security=reality#name"
             if (isCustom) {
-                exitNodeBtn.background = roundedBackground(connectedContainer, 12, connected)
-                exitNodeBtn.setTextColor(connected)
+                // Same selected-state palette as the Endpoint Scanner chips below
+                // (selectedSurface fill + violet border + violet text) — user
+                // request: Exit Route selected state must not stay green.
+                exitNodeBtn.background = roundedBackground(selectedSurface, 12, palette.violet)
+                exitNodeBtn.setTextColor(palette.violet)
                 exitDirectBtn.background = roundedBackground(SURFACE, 12, DIVIDER)
                 exitDirectBtn.setTextColor(MUTED)
                 exitCollapse.visibility = View.VISIBLE
             } else {
-                exitDirectBtn.background = roundedBackground(connectedContainer, 12, connected)
-                exitDirectBtn.setTextColor(connected)
+                exitDirectBtn.background = roundedBackground(selectedSurface, 12, palette.violet)
+                exitDirectBtn.setTextColor(palette.violet)
                 exitNodeBtn.background = roundedBackground(SURFACE, 12, DIVIDER)
                 exitNodeBtn.setTextColor(MUTED)
                 exitCollapse.visibility = View.GONE
@@ -6456,7 +6459,8 @@ class MainActivity : Activity() {
         // ── Box 1b: Endpoint Scanner — Warp Setting only (isolated, reversible)
         // A standalone selector that decides which CIDRs the engine samples.
         // Normal = engine defaults + Scan Mode's IP Version (v4/v6/both).
-        // Ptech-ipv4 = 7 v4 /24s only (4 WG ports) + forced AETHER_IP=v4.
+        // Ptech-ipv4 = full Ptech pool (7 v4 /24s + 2 v6 /48s), like pre-split
+        //             Ptech (alpha22, no AETHER_IP override).
         // Ptech-ipv6 = 2 v6 /48s only (4 WG ports) + forced AETHER_IP=v6,
         //             but Masque/MiM stay v4 (Ptech-ipv6 acts as Ptech-ipv4).
         // No protocol logic, no SHARD/WoW code, no VPN flow — just the
@@ -6476,7 +6480,7 @@ class MainActivity : Activity() {
             })
             addView(label("\u25B8 " + Strings.t("Endpoint Scanner"), 11f, primary, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
         })
-        scannerBox.addView(label(Strings.t("Normal uses engine CIDRs + Scan Mode IP version (v4/v6/both). Ptech-ipv4 scans only 7 v4 /24s. Ptech-ipv6 scans only 2 v6 /48s (WireGuard/WoW only — Masque stays v4)."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
+        scannerBox.addView(label(Strings.t("Normal uses engine CIDRs + Scan Mode IP version (v4/v6/both). Ptech-ipv4 scans the full Ptech pool (7 v4 /24s + 2 v6 /48s) like pre-split Ptech. Ptech-ipv6 scans only 2 v6 /48s (WireGuard/WoW only — Masque stays v4)."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
         var scannerMode = CoreConfig.warpScannerMode(this@MainActivity)
         lateinit var scannerNormalBtn: TextView
         lateinit var scannerPtechV4Btn: TextView
@@ -6509,7 +6513,7 @@ class MainActivity : Activity() {
                 if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
                 scannerMode = CoreConfig.WARP_SCANNER_MODE_PTECH_V4
                 preferences().edit().putString(CoreConfig.WARP_SCANNER_MODE_PREF, CoreConfig.WARP_SCANNER_MODE_PTECH_V4).commit()
-                ConnectionLog.record("Warp Setting: scanner → Ptech-ipv4 (7 v4 /24s, 4 ports)")
+                ConnectionLog.record("Warp Setting: scanner → Ptech-ipv4 (7 v4 /24s + 2 v6 /48s, 4 ports)")
                 refreshScannerRow(); toastShort(Strings.t("Scanner: Ptech-ipv4"))
             }
         }
@@ -6542,9 +6546,9 @@ class MainActivity : Activity() {
         val vaultHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         vaultHeader.addView(LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF1BDE9A.toInt()); setPadding(0, 0, dp(4), 0) })
-            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF7C5CFF.toInt()); setPadding(0, 0, dp(4), 0) })
-            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF3AD0FF.toInt()) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFF27C93F.toInt()); setPadding(0, 0, dp(4), 0) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFF5F56.toInt()); setPadding(0, 0, dp(4), 0) })
+            addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFFBD2E.toInt()) })
         })
         vaultHeader.addView(label("\u25B8 " + Strings.t("Identity Vault"), 11f, connected, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
         vaultHeader.addView(label("ECH  \u00B7  SHARD", 10f, MUTED).apply { gravity = Gravity.END; setPadding(dp(6), 0, 0, 0) }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
