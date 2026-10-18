@@ -11,6 +11,15 @@ object Strings {
 
 
     private val table = mapOf(
+        "Foxy Account & Setting" to Triple("Foxy Account & Setting", "حساب و تنطیمات فاکسی", "Foxy Account & Setting"),
+        "Foxy Account" to Triple("Foxy Account", "حساب فاکسی", "Foxy Account"),
+        "Sign in to your account" to Triple("Sign in to your account", "ورود به حسابت", "Sign in to your account"),
+        "Code sent — verify" to Triple("Code sent — verify", "کد ارسال شد — تئیید کن", "Code sent — verify"),
+        "Signed in" to Triple("Signed in", "وارد شده", "Signed in"),
+        "Monthly quota" to Triple("Monthly quota", "حجم ماهانه", "Monthly quota"),
+        "Shows after sign-in" to Triple("Shows after sign-in", "بعد از ورود دیده می‌شود", "Shows after sign-in"),
+        "Unlimited" to Triple("Unlimited", "نامحدود", "Unlimited"),
+        "Open Settings → Foxy and sign in first" to Triple("Open Settings → Foxy and sign in first", "اول تنطیمات → Foxy و وارد شو", "Open Settings → Foxy and sign in first"),
         " (%s of %s)" to Triple(" (%s of %s)", " (%s از %s)", " (第 %s 个, 共 %s 个)"),
         "%s %s" to Triple("%s %s", "%s %s", "%s 个"),
         "%s %s — may fall back to another country" to Triple("%s %s — may fall back to another country", "%s %s — ممکن است به کشور دیگری منتقل شود", "%s 个出口节点 — 可能降级至其他国家"),

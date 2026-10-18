@@ -28,8 +28,8 @@ android {
         applicationId = "com.parvaz.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 359
-        versionName = "3.1.0-alpha24"
+        versionCode = 361
+        versionName = "3.1.0-alpha26"
 
     }
 
@@ -84,6 +84,20 @@ android {
             // then keeps an extracted copy alongside the APK.
             useLegacyPackaging = true
         }
+        resources {
+            // Netty jars each ship META-INF/INDEX.LIST + version properties +
+            // license notices — ten identical entries once every module is on
+            // the classpath, which mergeReleaseJavaResource refuses outright
+            // (FoXy transport bring-in, only these resource names).
+            pickFirsts += setOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/io.netty.versions.properties",
+                "META-INF/NOTICE.md",
+                "META-INF/LICENSE.md",
+                "META-INF/NOTICE.txt",
+                "META-INF/LICENSE.txt",
+            )
+        }
     }
 
     if (releaseKeystore != null) {
@@ -123,6 +137,17 @@ android {
 
     dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
+    // Foxy transport (isolated package; nothing existing references these):
+    // Firefox-account auth + control plane (OkHttp + EncryptedSharedPreferences),
+    // H2 CONNECT upstream (netti modules), ALPN h2 on API 26-28 (conscrypt).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("io.netty:netty-handler:4.1.115.Final")
+    implementation("io.netty:netty-codec-http2:4.1.115.Final")
+    implementation("io.netty:netty-transport:4.1.115.Final")
+    implementation("io.netty:netty-handler-proxy:4.1.115.Final")
+    implementation("org.conscrypt:conscrypt-android:2.5.2")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
