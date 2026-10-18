@@ -3283,6 +3283,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
+            // FOXY — one row like Warp Setting; the dedicated page owns the
+            // Firefox sign-in (email + password → emailed code → signed-in).
+            body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
             // Share over LAN, directly under the port it publishes.
             //
             // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
@@ -3558,96 +3564,6 @@ class MainActivity : Activity() {
         // thing worth surfacing is whether the list is current and a way to
         // refresh it by hand when someone is standing in front of a fresh block.
         //
-        // FOXY — Firefox-account VPN. This section owns the whole sign-in flow:
-        // email + password → Mozilla emails a verification code → the code box
-        // finishes the login. Tokens live in EncryptedSharedPreferences and only
-        // the status is ever shown; the password is sent neither to a log nor to
-        // any screen memory. Style mirrors the Endpoint Scanner / Exit Route
-        // cards above so the Settings page reads as one family.
-
-        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY") { body ->
-            val statusChip = TextView(this@MainActivity).apply {
-                textSize = 12f
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                setPadding(dp(14), dp(8), dp(14), dp(8))
-            }
-            statusChip.background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
-            fun setStatus(text: String, color: Int) {
-                statusChip.text = text
-                statusChip.setTextColor(color)
-            }
-            setStatus(
-                if (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this@MainActivity) == "active")
-                    "ACCOUNT: ready" else "ACCOUNT: not signed in",
-                if (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this@MainActivity) == "active")
-                    palette.violet else MUTED,
-            )
-            body.addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 16, stroke = DIVIDER)
-                setPadding(dp(14), dp(12), dp(14), dp(14))
-                addView(statusChip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
-
-            val card = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
-                setPadding(dp(16), dp(14), dp(16), dp(16))
-            }
-
-            val email = settingsField("", "you@mozilla.com")
-            val password = settingsField("", "Firefox password", secure = true)
-            val code = settingsField("", "Verification code from your email")
-            listOf(email, password, code).forEach { field ->
-                card.addView(field, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { if (card.childCount > 0) topMargin = dp(10) })
-            }
-
-            val loginBtn = createSettingsButton(
-                "Sign in",
-                backgroundOverride = palette.violet,
-                textColorOverride = 0xFFE6E0FF.toInt(),
-            ) { onFoxyLoginClicked(email, password, code, statusChip) }
-            card.addView(loginBtn, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
-            ).apply { topMargin = dp(14) })
-
-            val verifyBtn = createSettingsButton(
-                "Verify code",
-                backgroundOverride = palette.violet,
-                textColorOverride = 0xFFE6E0FF.toInt(),
-            ) { onFoxyVerifyClicked(code, statusChip) }
-            card.addView(verifyBtn, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
-            ).apply { topMargin = dp(10) })
-
-            // A delicate status line — the same violet accent as the scanner chips.
-            val statusLine = label("", 12f, MUTED)
-            card.addView(statusLine, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(10) })
-
-            val signOutLink = label("Sign out", 12f, MUTED).apply {
-                setPadding(dp(4), dp(10), dp(4), 0)
-                isClickable = true
-                setOnClickListener {
-                    com.msnguard.vpn.foxy.FoxyTunnel.signOut(this@MainActivity)
-                    setStatus("ACCOUNT: not signed in", MUTED)
-                    toastShort(Strings.t("Signed out of Foxy"))
-                }
-            }
-            card.addView(signOutLink)
-
-            body.addView(card, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(26) })
-
         // No "Over WARP" row here, unlike Psiphon and Tor. It was considered and
         // rejected: SHARD's nodes are reached over TLS on 443 through Cloudflare,
         // which is what the chain exists to achieve for Psiphon, and wrapping
@@ -7786,6 +7702,7 @@ class MainActivity : Activity() {
             donatePage != null -> closeDonateScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             warpSettingPage != null -> closeWarpSettingScreen()
+            foxySettingPage != null -> closeFoxySettingScreen()
             mtuPage != null -> closeMtuScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()
@@ -7922,7 +7839,184 @@ class MainActivity : Activity() {
             .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config))
     }
 
+    /** The dedicated Foxy settings page, swapped in over the main content. */
+    private var foxySettingPage: View? = null
+
+    /** Send Code / Sign In buttons on the Foxy page — re-styled in place. */
+    private lateinit var sendCodeBtn: TextView
+    private lateinit var signInBtn: TextView
+
+    /** Monthly-quota row on the Foxy page; lives until the page closes. */
+    private var quotaRow: OrbitSettingsRow? = null
+
     // ---------------------------------------------------------------- FOXY
+
+    /** Real state from the token store — only truth out of the FxA session. */
+    private fun foxyAccountSummary(): String = when (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this)) {
+        "active" -> Strings.t("Signed in")
+        "pending" -> Strings.t("Code sent — verify")
+        else -> Strings.t("Sign in to your account")
+    }
+
+    private fun foxyChipText(): String = when (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this)) {
+        "active" -> "ACCOUNT: signed in"
+        else -> "ACCOUNT: not signed in"
+    }
+
+    /** Dotted-card button on the Foxy page — theme surface + neon green border. */
+    private fun foxyNeonButton(title: String, enabled: Boolean, onClick: () -> Unit): TextView =
+        createSettingsButton(title) { onClick() }.apply {
+            val accent = 0xFF27C93F.toInt()
+            setTextColor(if (enabled) INK else MUTED)
+            background = roundedBackground(SURFACE_VARIANT, 16, if (enabled) accent else DIVIDER)
+            isClickable = enabled
+            isFocusable = enabled
+            alpha = if (enabled) 1f else 0.55f
+        }
+
+    /** The dedicated page — same language as openWarpSettingScreen(). */
+    private fun openFoxySettingScreen() {
+        foxySettingPage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS); isClickable = true }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { closeFoxySettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("Foxy Account & Setting"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
+        })
+
+        // ── FOXY ACCOUNT card ──
+        val accountCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        accountCard.addView(label("\u25B8 " + Strings.t("Foxy Account"), 11f, primary, TypefaceStyle.MEDIUM)
+            .apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
+
+        val chip = label(foxyChipText(), 11f, MUTED).apply {
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = roundedBackground(SURFACE, 11, DIVIDER)
+        }
+        accountCard.addView(chip, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
+        val email = settingsField("", "you@mozilla.com")
+        val password = settingsField("", "Firefox password", secure = true)
+        val code = settingsField("", "Paste the code from your email").apply {
+            isEnabled = false
+            alpha = 0.4f
+        }
+
+        accountCard.addView(label("EMAIL", 10f, MUTED),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14) })
+        accountCard.addView(email)
+
+        accountCard.addView(label("PASSWORD", 10f, MUTED),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) })
+        accountCard.addView(password)
+
+        fun refreshSendEnabled(codeField: android.widget.EditText) {
+            val ready = email.text.toString().trim().isNotEmpty() && password.text.length > 3
+            val accent = 0xFF27C93F.toInt()
+            signInBtn.setTextColor(if (codeField.text.toString().trim().length >= 5) INK else MUTED)
+            sendCodeBtn.setTextColor(if (ready) INK else MUTED)
+            sendCodeBtn.background = roundedBackground(SURFACE_VARIANT, 16, if (ready) accent else DIVIDER)
+            sendCodeBtn.isClickable = ready
+            sendCodeBtn.isFocusable = ready
+            sendCodeBtn.alpha = if (ready) 1f else 0.55f
+        }
+
+        val accent = 0xFF27C93F.toInt()
+        sendCodeBtn = foxyNeonButton("Send Code", false) {
+            onFoxyLoginClicked(email, password, code, chip) {
+                signInBtn.isClickable = true
+                signInBtn.isFocusable = true
+                signInBtn.alpha = 1f
+                signInBtn.background = roundedBackground(SURFACE_VARIANT, 16, 0xFF27C93F.toInt())
+                signInBtn.setOnClickListener {
+                    onFoxyVerifyClicked(code, chip) { fetchFoxyQuota(quotaRow) }
+                }
+            }
+        }
+        signInBtn = foxyNeonButton("Sign In", false) { }
+        email.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { refreshSendEnabled(code.text) }
+        })
+        password.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { refreshSendEnabled(code.text) }
+        })
+        code.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                signInBtn.setTextColor(if (code.text.toString().trim().length >= 5) INK else MUTED)
+            }
+        })
+
+        val buttonHeight = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(50),
+        )
+        accountCard.addView(sendCodeBtn, buttonHeight.apply { topMargin = dp(16) })
+
+        accountCard.addView(label("VERIFICATION CODE", 10f, MUTED),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14) })
+        accountCard.addView(code)
+
+        accountCard.addView(signInBtn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(50),
+        ).apply { topMargin = dp(12) })
+
+        accountCard.addView(label(
+            Strings.t("Mozilla emails a verification code after Send Code — paste it and press Sign In. The password is only used to prove your identity; it is never stored."),
+            11f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+
+        content.addView(accountCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+
+        // ── CONNECTION card — status / quota, real Guardian /fpn/status values ──
+        quotaRow = OrbitSettingsRow(this, palette, Strings.t("Monthly quota"), Strings.t("Shows after sign-in")) { }
+        if (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this) == "active") {
+            // already signed in — resolve the counter right here
+            fetchFoxyQuota(quotaRow)
+        }
+        content.addView(quotaRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+
+        scroll.addView(content, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        page.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24)); insets
+        }
+        foxySettingPage = page; pageHost.addView(page); page.requestApplyInsets(); animatePageOpen(page)
+        staggerListItems(content)
+    }
+
+    private fun closeFoxySettingScreen() { foxySettingPage?.let { animatePageClose(it) { foxySettingPage = null } }; openSettingsScreen() }
 
     /**
      * Sign-in flow, step 1: email + password → Mozilla emails a verification
@@ -7935,6 +8029,7 @@ class MainActivity : Activity() {
         passwordField: EditText,
         codeField: EditText,
         statusChip: TextView,
+        onCodeSent: () -> Unit = {},
     ) {
         val email = emailField.text.toString().trim()
         val password = passwordField.text.toString()
@@ -7955,7 +8050,11 @@ class MainActivity : Activity() {
                         "needs-code" -> {
                             statusChip.text = "CODE SENT — CHECK YOUR EMAIL"
                             statusChip.setTextColor(palette.violet)
+                            codeField.isEnabled = true
+                            codeField.hint = "Paste the code from your email"
+                            codeField.alpha = 1f
                             codeField.requestFocus()
+                            onCodeSent()
                             ConnectionLog.record("Foxy: verification code sent to $email")
                         }
                         else -> {
@@ -7975,6 +8074,7 @@ class MainActivity : Activity() {
     private fun onFoxyVerifyClicked(
         codeField: EditText,
         statusChip: TextView,
+        onVerified: () -> Unit = {},
     ) {
         val code = codeField.text.toString().trim()
         if (code.isEmpty()) {
@@ -7990,13 +8090,48 @@ class MainActivity : Activity() {
                 }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
-                    statusChip.text = "ACCOUNT: ready"
+                    statusChip.text = "ACCOUNT: signed in"
                     statusChip.setTextColor(0xFF27C93F.toInt())
+                    codeField.isEnabled = false
+                    codeField.text.clear()
+                    codeField.hint = "Signed in"
+                    codeField.alpha = 0.4f
                     toastShort(Strings.t("Foxy account verified"))
+                    onVerified()
                 }
             } catch (e: Exception) {
                 FoxyUiResult(statusChip, "CODE FAILED: ${e.message ?: "unknown"}")
             }
+        }.start()
+    }
+
+    /*
+     * Real post-sign-in quota probe: /api/v1/fpn/status with the just-minted
+     * access token. Fails silently — the row simply keeps its "after sign-in"
+     * placeholder if the Guardian endpoint is unreachable from here.
+     */
+    private fun fetchFoxyQuota(row: OrbitSettingsRow?) {
+        val ref = row ?: return
+        Thread {
+            try {
+                val auth = kotlinx.coroutines.runBlocking {
+                    com.msnguard.vpn.foxy.FoxyTunnel.ensureAccessToken(this@MainActivity)
+                }
+                val entitlement = kotlinx.coroutines.runBlocking {
+                    com.msnguard.vpn.foxy.GuardianClient().fetchUserInfo(
+                        com.msnguard.vpn.foxy.GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken,
+                    )
+                }
+                val remaining = entitlement.quotaRemaining
+                val quotaText = when {
+                    remaining == null -> Strings.t("Unlimited")
+                    else -> "%.1f GB remaining".format(remaining.shr(20).toFloat() / 1024f)
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    ref.setValue(quotaText)
+                }
+            } catch (_: Exception) { }
         }.start()
     }
 
