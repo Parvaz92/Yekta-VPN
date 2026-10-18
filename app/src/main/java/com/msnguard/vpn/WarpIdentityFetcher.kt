@@ -38,6 +38,12 @@ object WarpIdentityFetcher {
     private const val SECONDARY_MASQUE = "aether-masque-secondary.toml"
     private val ALL_FILES = listOf(PRIMARY_WG, SECONDARY_WG, PRIMARY_MASQUE, SECONDARY_MASQUE)
 
+    // Quantum ECH embedded key — same value CoreConfig embeds for the
+    // Freedom/direct API path. One constant here so fetcher env was never
+    // derived from the tunnel's map. (CHANGED in isolation: see buildEnv doc.)
+    private const val ECH_EMBEDDED =
+        "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+
     fun canRun(): Boolean = !NativeCore.isRunning()
 
     fun fetch(context: Context, protocol: String): Boolean {
@@ -190,22 +196,17 @@ object WarpIdentityFetcher {
 
     private fun buildEnvPlain(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) { "mim", "masque-in-masque", "masque over masque" -> "mim"; "masque" -> "masque"; "gool", "wow", "warp-in-warp" -> "gool"; else -> "wireguard" }
-        val base = CoreConfig.env(context, protocol = protoForEnv)
-        val out = LinkedHashMap(base)
+        // Same minimal construction as buildEnv — registration needs no scan
+        // env from a previous tunnel; a stale AETHER_NOIZE/SCAN/MTU/SNI/TLS
+        // set made the register job exit without a file after any connect.
+        val out = LinkedHashMap<String, String>()
+        out["AETHER_CONFIG"] = File(context.filesDir, "aether.toml").absolutePath
+        out["AETHER_PROTOCOL"] = protoForEnv
+        out["AETHER_SOCKS"] = BIND
+        out["AETHER_LOG_LEVEL"] = "info"
         // Plain route: no ECH at all, no upstream — raw carrier to api.cloudflareclient.com
-        out.remove("AETHER_API_ECH"); out.remove("AETHER_ECH"); out.remove("AETHER_ECH_DNS"); out.remove("AETHER_ECH_DOMAIN"); out.remove("AETHER_UPSTREAM")
-        // Do not leak Warp Setting scanner choice into identity fetch — it is for
-        // the data-plane scan (WireGuard/WoW), not for api.cloudflareclient.com.
-        // Also strip forced AETHER_IP so registration is neutral.
-        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        out.remove("AETHER_IP")
-        // Registration-only: engine provisions and exits, does not open a tunnel.
-        // Without this it would scan WireGuard peers and need SOCKS. With it the
-        // job is --register semantics: write aether.toml and done.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
-        out["AETHER_SOCKS"] = BIND; out["AETHER_LOG_LEVEL"] = "info"
-        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
-        out.remove("AETHER_TEAM"); out.remove("AETHER_ACCESS_CLIENT_ID"); out.remove("AETHER_ACCESS_CLIENT_SECRET"); out.remove("AETHER_ACCESS_TOKEN"); out.remove("AETHER_ACCESS_EMAIL"); out.remove("AETHER_GATEWAY")
+        // Consumer WARP only — no Zero Trust carry-over from a previous connect.
         return out
     }
 
@@ -469,27 +470,31 @@ object WarpIdentityFetcher {
             "gool", "wow", "warp-in-warp" -> "gool"
             else -> "wireguard"
         }
-        val base = CoreConfig.env(context, protocol = protoForEnv, socksProxyForCore = upstream)
-        val out = LinkedHashMap(base)
-        // Do not leak Warp Setting scanner choice into identity fetch — it is for
-        // the data-plane scan, not for api.cloudflareclient.com. Shard path must
-        // not narrow the scan while waiting for aether.toml.
-        // Also strip forced AETHER_IP so registration is neutral.
-        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        out.remove("AETHER_IP")
+        // Same minimal construction as buildEnv, plus the SHARD upstream only.
+        // A previous tunnel's env (NOIZE/SCAN/MTU/SNI/TLS) leaked into this job.
+        val out = LinkedHashMap<String, String>()
+        out["AETHER_CONFIG"] = File(context.filesDir, "aether.toml").absolutePath
+        out["AETHER_PROTOCOL"] = protoForEnv
+        out["AETHER_SOCKS"] = BIND
+        out["AETHER_LOG_LEVEL"] = "info"
+        out["AETHER_UPSTREAM"] = upstream
         // Registration-only via SHARD upstream: no tunnel/scan, just provision.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
-        out["AETHER_LOG_LEVEL"] = "info"
-        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
-        out.remove("AETHER_TEAM")
-        out.remove("AETHER_ACCESS_CLIENT_ID")
-        out.remove("AETHER_ACCESS_CLIENT_SECRET")
-        out.remove("AETHER_ACCESS_TOKEN")
-        out.remove("AETHER_ACCESS_EMAIL")
-        out.remove("AETHER_ACCESS_GATEWAY")
+        // Consumer WARP only — no Zero Trust carry-over from a previous connect.
         return out
     }
 
+    /**
+     * Registration env is built MINIMAL, not derived from the last tunnel's
+     * CoreConfig.env(). After a real connect the process env still carries the
+     * tunnel's keys (AETHER_NOIZE, AETHER_SCAN, MTUs, SNI, TLS groups, STATS…)
+     * because CoreConfig.applyEnv only clears a short clearIfAbsent list. Those
+     * leftovers leaked into the AETHER_REGISTER job and the engine exited fast
+     * without writing the sibling identity file — exactly the "works fresh,
+     * fails after any connect" report (test 2). Registration needs no scan, so
+     * a fresh minimal env is both correct and isolated: Warp Setting only,
+     * no connect path touched. REVERT: rebuild these from CoreConfig.env.
+     */
     private fun buildEnv(context: Context, norm: String): Map<String, String> {
         val protoForEnv = when (norm) {
             "mim", "masque-in-masque", "masque over masque" -> "mim"
@@ -497,42 +502,17 @@ object WarpIdentityFetcher {
             "gool", "wow", "warp-in-warp" -> "gool"
             else -> "wireguard"
         }
-        val base = CoreConfig.env(context, protocol = protoForEnv)
-        val out = LinkedHashMap(base)
-        // Do not leak Warp Setting scanner choice into identity fetch — it is for
-        // the data-plane scan, not for api.cloudflareclient.com. ECH job only
-        // needs to write aether.toml; narrowing scan CIDRs just slows it.
-        // Also strip the Ptech forced AETHER_IP (v4/v6) so registration is not
-        // polluted by the scanner's override; AETHER_REGISTER path ignores IP
-        // anyway but we keep env clean. Stripping here is Warp Setting isolated.
-        out.remove("AETHER_SCAN_CIDRS_V4"); out.remove("AETHER_SCAN_CIDRS_V6"); out.remove("AETHER_WG_PORTS"); out.remove("AETHER_PTECH_SCAN")
-        // Strip forced scanner IP so ECH registration uses neutral IP (engine default).
-        // Ptech's v6 for WireGuard/WoW must not leak into the API call.
-        out.remove("AETHER_IP")
-        // Re-apply neutral IP: Masque/MiM always v4, others use Scan Mode default (both) or engine default.
-        // Keep it simple: leave absent → engine defaults to v4 for registration which is fine;
-        // or set to v4 explicitly to match Fetcher's neutral stance. Registration doesn't scan.
-        // We do not set AETHER_IP here → engine falls back to v4 for register, which is correct.
-        // Quantum ECH: force Freedom-like ECH regardless of current exit mode.
-        // Use embedded AETHER_API_ECH (no DoH to 1.1.1.1) — same key main
-        // connect embeds for Freedom direct, so filtered carriers need no
-        // extra round-trip. Remove AETHER_ECH/AETHER_UPSTREAM like Freedom.
-        out["AETHER_API_ECH"] = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
-        out.remove("AETHER_ECH")
-        out.remove("AETHER_ECH_DNS")
-        out.remove("AETHER_ECH_DOMAIN")
-        out.remove("AETHER_UPSTREAM")
+        val out = LinkedHashMap<String, String>()
+        out["AETHER_CONFIG"] = File(context.filesDir, "aether.toml").absolutePath
+        out["AETHER_PROTOCOL"] = protoForEnv
+        out["AETHER_SOCKS"] = BIND
+        out["AETHER_LOG_LEVEL"] = "info"
+        // Quantum ECH: embedded key, API-only — same key the main connect uses
+        // for Freedom; registration dials api.cloudflareclient.com over it.
+        out["AETHER_API_ECH"] = ECH_EMBEDDED
         // Registration-only: no tunnel/scan, just provision via ECH.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
-        out["AETHER_SOCKS"] = BIND; out["AETHER_LOG_LEVEL"] = "info"
-        out.remove("AETHER_SCAN"); out.remove("AETHER_QUICK_RECONNECT")
-        // Consumer WARP only
-        out.remove("AETHER_TEAM")
-        out.remove("AETHER_ACCESS_CLIENT_ID")
-        out.remove("AETHER_ACCESS_CLIENT_SECRET")
-        out.remove("AETHER_ACCESS_TOKEN")
-        out.remove("AETHER_ACCESS_EMAIL")
-        out.remove("AETHER_GATEWAY")
+        // Consumer WARP only — no Zero Trust carry-over from a previous connect.
         return out
     }
 
