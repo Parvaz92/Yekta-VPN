@@ -34,6 +34,7 @@ object MtuConfig {
     const val KEY_PSIPHON = "mtu_psiphon"
     const val KEY_TOR = "mtu_tor"
     const val KEY_SHARD = "mtu_shard"
+    const val KEY_FOXY = "mtu_foxy"
 
     // Defaults shown as "1304 (default)" etc.
     const val DEFAULT_MASQUE = 1304
@@ -48,6 +49,8 @@ object MtuConfig {
     // separate MTU. The WebSocket UDP ceiling (500) is a per-datagram limit
     // inside ShardSocksFront, not a TUN MTU.
     const val DEFAULT_SHARD = 1500
+    // Foxy rides an HTTP/2 CONNECT tunnel — TCP framing like Psiphon/Tor.
+    const val DEFAULT_FOXY = 1400
 
     /** All methods in the order the screen lists them. */
     enum class Method(
@@ -60,6 +63,7 @@ object MtuConfig {
         WOW(KEY_WOW, DEFAULT_WOW, "WOW"),
         PSIPHON(KEY_PSIPHON, DEFAULT_PSIPHON, "Psiphon"),
         TOR(KEY_TOR, DEFAULT_TOR, "Tor"),
+        FOXY(KEY_FOXY, DEFAULT_FOXY, "Foxy"),
         SHARD(KEY_SHARD, DEFAULT_SHARD, "SHARD"),
     }
 

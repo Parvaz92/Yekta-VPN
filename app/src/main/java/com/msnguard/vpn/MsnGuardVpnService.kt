@@ -3044,6 +3044,87 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * — the nodes are reached over TLS on 443 through Cloudflare, which is what the
      * chain exists to achieve for Psiphon.
      */
+    /**
+     * FOXY — HTTP/2 CONNECT to the Fastly edge with a Firefox-account pass.
+     * App-layer tunnel only: no Rust core, no aether env. The existing TunEngine
+     * (Hev/Zeptun/Badvpn) bridges the TUN into the local SOCKS listener started
+     * by FoxyTunnel, exactly like every other whole-device path. Isolated add.
+     */
+    private fun startFoxyTunnel() {
+        worker.execute {
+            try {
+                ControlPlane_HookProtect()
+                val address = Tun2SocksManager.selectPrivateAddress()
+                ConnectionLog.record("Foxy: creating TUN")
+                val foxyMtu = MtuConfig.get(this, MtuConfig.Method.FOXY)
+                ConnectionLog.record("MTU: $foxyMtu for FOXY")
+                tun = Builder()
+                    .setSession("MSN-GUARD")
+                    .setMtu(foxyMtu)
+                    .addAddress(address.ipAddress, address.prefixLength)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute(address.subnet, address.prefixLength)
+                    .addDnsServer(address.router)
+                    .applyLanAccess(tun = address)
+                    .applyIranBypass()
+                    .applySplitTunneling()
+                    .establish() ?: error("Android could not establish the VPN interface")
+                vpnModeActive.set(true)
+
+                sendStatus(STATUS_CONNECTING, Strings.t("Connecting to Foxy…"), 20)
+                // The Foxy bring-up is suspending code (OkHttp/netty); the worker
+                // is a plain executor thread, so a blocking bridge is safe here.
+                kotlinx.coroutines.runBlocking {
+                    com.msnguard.vpn.foxy.FoxyTunnel.start(this@MsnGuardVpnService)
+                }
+                sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
+                activeSocksPort = com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
+                if (!TunEngineManager.start(this, tun!!, com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT, mtu = foxyMtu)) {
+                    error("Could not start device routing")
+                }
+                currentVpnIp = ""
+                sendStatus(STATUS_CONNECTED, Strings.t("Foxy connected"))
+                ConnectionLog.record("Foxy: connected — device tunnel up on port 1830")
+                repostNotification()
+                startFoxyTrafficPolling()
+                startWatchdog()
+            } catch (e: Exception) {
+                ConnectionLog.record("Foxy start failed: ${e.message}")
+                com.msnguard.vpn.foxy.FoxyTunnel.stop()
+                tun?.close(); tun = null
+                vpnModeActive.set(false)
+                failAndStop(e.message ?: "Foxy start failed")
+            }
+        }
+    }
+
+    /**
+     * Protect the control/data sockets the Foxy transport opens ourselves
+     * (OkHttp + netty) from this VPN's own TUN — the engine-only NativeCore
+     * protector the aether uses does not reach these sockets.
+     */
+    private fun ControlPlane_HookProtect() {
+        com.msnguard.vpn.foxy.FoxyControlPlaneHttp.socketProtector = { socket ->
+            try { protect(socket) } catch (_: Throwable) { false }
+        }
+    }
+
+    /** Feeds FoxyTunnel's counters into the traffic notification pipeline. */
+    private fun startFoxyTrafficPolling() {
+        torTrafficTask?.cancel(false)
+        torTrafficTask = ladderScheduler.scheduleAtFixedRate({
+            try {
+                if (!com.msnguard.vpn.foxy.FoxyTunnel.isRunning) return@scheduleAtFixedRate
+                if (!shouldSampleTraffic()) return@scheduleAtFixedRate
+                updateTrafficNotification(
+                    com.msnguard.vpn.foxy.FoxyTunnel.txBytes,
+                    com.msnguard.vpn.foxy.FoxyTunnel.rxBytes,
+                )
+            } catch (_: Exception) {
+            }
+        }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
     private fun startShardTunnel() {
         worker.execute {
             try {
@@ -4655,6 +4736,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // SHARD before TOR and PSIPHON for the same reason those two come before
         // the core: the Rust core is never started on this path, so it must not
         // fall through to NativeCore.attach().
+        if (currentProtocol.contains("FOXY")) {
+            startFoxyTunnel()
+            return
+        }
+
         if (currentProtocol.contains("SHARD")) {
             startShardTunnel()
             return
@@ -5284,6 +5370,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         TunEngineManager.stop(this)
         stopTrafficPolling()
         stopWarpTrafficPolling()
+        // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
+        // every disconnect path — they are not owned by NativeCore/TunEngine.
+        com.msnguard.vpn.foxy.FoxyTunnel.stop()
         TorManager.stop()
         stopPsiphonTunnel()
         NativeCore.stop()

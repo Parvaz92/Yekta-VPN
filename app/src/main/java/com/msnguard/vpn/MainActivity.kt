@@ -3558,6 +3558,96 @@ class MainActivity : Activity() {
         // thing worth surfacing is whether the list is current and a way to
         // refresh it by hand when someone is standing in front of a fresh block.
         //
+        // FOXY — Firefox-account VPN. This section owns the whole sign-in flow:
+        // email + password → Mozilla emails a verification code → the code box
+        // finishes the login. Tokens live in EncryptedSharedPreferences and only
+        // the status is ever shown; the password is sent neither to a log nor to
+        // any screen memory. Style mirrors the Endpoint Scanner / Exit Route
+        // cards above so the Settings page reads as one family.
+
+        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY") { body ->
+            val statusChip = TextView(this@MainActivity).apply {
+                textSize = 12f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(dp(14), dp(8), dp(14), dp(8))
+            }
+            statusChip.background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
+            fun setStatus(text: String, color: Int) {
+                statusChip.text = text
+                statusChip.setTextColor(color)
+            }
+            setStatus(
+                if (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this@MainActivity) == "active")
+                    "ACCOUNT: ready" else "ACCOUNT: not signed in",
+                if (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this@MainActivity) == "active")
+                    palette.violet else MUTED,
+            )
+            body.addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 16, stroke = DIVIDER)
+                setPadding(dp(14), dp(12), dp(14), dp(14))
+                addView(statusChip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+
+            val card = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+                setPadding(dp(16), dp(14), dp(16), dp(16))
+            }
+
+            val email = settingsField("", "you@mozilla.com")
+            val password = settingsField("", "Firefox password", secure = true)
+            val code = settingsField("", "Verification code from your email")
+            listOf(email, password, code).forEach { field ->
+                card.addView(field, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { if (card.childCount > 0) topMargin = dp(10) })
+            }
+
+            val loginBtn = createSettingsButton(
+                "Sign in",
+                backgroundOverride = palette.violet,
+                textColorOverride = 0xFFE6E0FF.toInt(),
+            ) { onFoxyLoginClicked(email, password, code, statusChip) }
+            card.addView(loginBtn, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
+            ).apply { topMargin = dp(14) })
+
+            val verifyBtn = createSettingsButton(
+                "Verify code",
+                backgroundOverride = palette.violet,
+                textColorOverride = 0xFFE6E0FF.toInt(),
+            ) { onFoxyVerifyClicked(code, statusChip) }
+            card.addView(verifyBtn, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
+            ).apply { topMargin = dp(10) })
+
+            // A delicate status line — the same violet accent as the scanner chips.
+            val statusLine = label("", 12f, MUTED)
+            card.addView(statusLine, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+
+            val signOutLink = label("Sign out", 12f, MUTED).apply {
+                setPadding(dp(4), dp(10), dp(4), 0)
+                isClickable = true
+                setOnClickListener {
+                    com.msnguard.vpn.foxy.FoxyTunnel.signOut(this@MainActivity)
+                    setStatus("ACCOUNT: not signed in", MUTED)
+                    toastShort(Strings.t("Signed out of Foxy"))
+                }
+            }
+            card.addView(signOutLink)
+
+            body.addView(card, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+
         // No "Over WARP" row here, unlike Psiphon and Tor. It was considered and
         // rejected: SHARD's nodes are reached over TLS on 443 through Cloudflare,
         // which is what the chain exists to achieve for Psiphon, and wrapping
@@ -7797,6 +7887,16 @@ class MainActivity : Activity() {
     }
 
     private fun connect(config: String) {
+        // FOXY gate: the dedicated Settings page owns the Firefox sign-in. With
+        // no stored session the service would only fail later with a bare
+        // "Not signed in" — catch it here where the button lives.
+        if (config.contains("\"protocol\":\"foxy\"") &&
+            com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this) == null
+        ) {
+            toastShort(Strings.t("Open Settings → Foxy and sign in first"))
+            showDisconnected()
+            return
+        }
         // Clear our mirrors of the core's per-tunnel byte counters before the new
         // tunnel starts. The service broadcasts a zero sample too, but the
         // verification baseline must not depend on that broadcast having been
@@ -7822,7 +7922,93 @@ class MainActivity : Activity() {
             .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config))
     }
 
-    // ---------------------------------------------------------------- Auto Scan
+    // ---------------------------------------------------------------- FOXY
+
+    /**
+     * Sign-in flow, step 1: email + password → Mozilla emails a verification
+     * code. Blocks on a worker thread; the state chip is the only UI the
+     * result touches. The password is neither logged nor persisted — it is
+     * sent only as the FxA proof (authPW hash), exactly like the browser does.
+     */
+    private fun onFoxyLoginClicked(
+        emailField: EditText,
+        passwordField: EditText,
+        codeField: EditText,
+        statusChip: TextView,
+    ) {
+        val email = emailField.text.toString().trim()
+        val password = passwordField.text.toString()
+        if (email.isEmpty() || password.isEmpty()) {
+            toastShort(Strings.t("Enter your Firefox email and password first"))
+            return
+        }
+        statusChip.text = "SIGNING IN…"
+        statusChip.setTextColor(palette.violet)
+        Thread {
+            try {
+                val state = kotlinx.coroutines.runBlocking {
+                    com.msnguard.vpn.foxy.FoxyTunnel.login(this@MainActivity, email, password)
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    when (state) {
+                        "needs-code" -> {
+                            statusChip.text = "CODE SENT — CHECK YOUR EMAIL"
+                            statusChip.setTextColor(palette.violet)
+                            codeField.requestFocus()
+                            ConnectionLog.record("Foxy: verification code sent to $email")
+                        }
+                        else -> {
+                            statusChip.text = "ACCOUNT: ready"
+                            statusChip.setTextColor(0xFF27C93F.toInt())
+                            toastShort(Strings.t("Foxy account ready"))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                FoxyUiResult(statusChip, "SIGN-IN FAILED: ${e.message ?: "unknown"}")
+            }
+        }.start()
+    }
+
+    /** Sign-in flow, step 2: verify the emailed code and mint session tokens. */
+    private fun onFoxyVerifyClicked(
+        codeField: EditText,
+        statusChip: TextView,
+    ) {
+        val code = codeField.text.toString().trim()
+        if (code.isEmpty()) {
+            toastShort(Strings.t("Paste the verification code from your email"))
+            return
+        }
+        statusChip.text = "VERIFYING…"
+        statusChip.setTextColor(palette.violet)
+        Thread {
+            try {
+                kotlinx.coroutines.runBlocking {
+                    com.msnguard.vpn.foxy.FoxyTunnel.verifyCode(this@MainActivity, code)
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    statusChip.text = "ACCOUNT: ready"
+                    statusChip.setTextColor(0xFF27C93F.toInt())
+                    toastShort(Strings.t("Foxy account verified"))
+                }
+            } catch (e: Exception) {
+                FoxyUiResult(statusChip, "CODE FAILED: ${e.message ?: "unknown"}")
+            }
+        }.start()
+    }
+
+    /** Same-thread UI result writer for the Foxy state chip. */
+    private fun FoxyUiResult(statusChip: TextView, message: String) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            statusChip.text = message
+            statusChip.setTextColor(0xFFFF5F56.toInt())
+        }
+    }
+
 
     /**
      * Whether this connect should start the one-time transport search.
@@ -9118,6 +9304,17 @@ class MainActivity : Activity() {
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),
+
+        /**
+         * Firefox-account VPN reached through an HTTP/2 CONNECT edge.
+         *
+         * Like SHARD the Rust core is never started for it: the service branches
+         * on the name before touching NativeCore. Its sign-in lives on its own
+         * Settings page (email + password + emailed verification code) and the
+         * data path is an app-local SOCKS listener fed into the existing
+         * TunEngine — Warp Setting, Identity Vault and Auto Scan do not apply.
+         */
+        FOXY("Foxy", "foxy", "Firefox-account VPN via Fastly HTTP/2", true),
 
         /**
          * Public proxy nodes, picked automatically.
