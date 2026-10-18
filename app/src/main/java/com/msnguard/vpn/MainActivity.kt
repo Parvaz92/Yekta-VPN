@@ -8119,7 +8119,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (error != null) {
-                    chip.text = "SIGN-IN FAILED: \${error ?: "unknown"}"
+                    chip.text = "SIGN-IN FAILED: " + (error ?: "unknown")
                     chip.setTextColor(0xFFFF5F56.toInt())
                     sendBtn.text = Strings.t("Send Code")
                     styleSendGlobal()
@@ -8135,7 +8135,7 @@ class MainActivity : Activity() {
                     sendBtn.text = Strings.t("Resend Code")
                     styleSendGlobal()
                     styleSignInGlobal(true, signInBtn)
-                    ConnectionLog.record("Foxy: verification code sent to \$email")
+                    ConnectionLog.record("Foxy: verification code sent to " + email)
                 } else {
                     // login returned tokens directly (no code needed)
                     chip.text = "ACCOUNT: signed in"
@@ -8175,7 +8175,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (error != null) {
-                    chip.text = "CODE FAILED: \${error ?: "unknown"}"
+                    chip.text = "CODE FAILED: " + (error ?: "unknown")
                     chip.setTextColor(0xFFFF5F56.toInt())
                     signInBtn.text = Strings.t("Sign In")
                     styleSignInGlobal(true, signInBtn)
