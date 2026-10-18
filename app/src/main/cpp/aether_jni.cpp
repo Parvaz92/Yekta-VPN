@@ -143,6 +143,17 @@ Java_com_msnguard_vpn_NativeCore_nativeSetSocketProtector(JNIEnv*, jobject) {
             std::lock_guard<std::mutex> lock(g_service_mutex);
             if (g_service != nullptr && g_protect != nullptr) {
                 result = env->CallIntMethod(g_service, g_protect, fd);
+            } else {
+                // No VPN service attached (before every first connect, or after
+                // nativeDetach on disconnect): there is no TUN this socket
+                // could loop back into, so a plain socket is exactly right —
+                // the same engine behaviour as pre-connect where no protector
+                // was registered at all (SOCKET_PROTECTOR None → Ok).
+                // Previously this branch returned 0, which platform.rs reads
+                // as "protection failed" and killed the register job with
+                // 'Android VPN socket protection failed' — every Warp
+                // Setting identity fetch after ANY connect died here.
+                result = 1;
             }
         }
         if (env->ExceptionCheck()) {
