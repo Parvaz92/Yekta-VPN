@@ -7848,7 +7848,6 @@ class MainActivity : Activity() {
 
     /** Monthly-quota & server rows on the Foxy page; live until it closes. */
     private var quotaRow: OrbitSettingsRow? = null
-    private var rowServer: OrbitSettingsRow? = null
 
 
     // ---------------------------------------------------------------- FOXY
@@ -7879,10 +7878,30 @@ class MainActivity : Activity() {
         bar.addView(dot(0xFF27C93F.toInt()))
         bar.addView(dot(0xFFFF5F56.toInt()))
         bar.addView(dot(0xFFFFBD2E.toInt()))
-        bar.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1).apply { weight = 0f; leftMargin = dp(4) } })
-        bar.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(dp(4), 1) })
-        bar.addView(label("\u25B8 " + title, 12f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.06f })
+        bar.addView(label("\u25B8 " + title, 12f, primary, TypefaceStyle.MEDIUM).apply {
+            letterSpacing = 0.06f
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(4) }
+        })
         return bar
+    }
+
+    /** Mock-style info row: label left, value right — no chevron, inert. */
+    private fun foxyInfoRow(title: String, value: String, valueColor: Int): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 14, stroke = DIVIDER)
+        }
+        row.addView(label(title, 14f, INK, TypefaceStyle.BOLD), LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+        ))
+        row.addView(label(value, 14f, valueColor), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        return row
     }
 
     /** Theme+neon button whose listener is ALWAYS attached — the click itself
@@ -7937,12 +7956,16 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
 
-        val email = settingsField("", "you@mozilla.com")
-        val password = settingsField("", "Firefox password", secure = true)
-        val code = settingsField("", "Paste the code from your email").apply {
+        // Note 2: no ghost text inside the fields — whitespace only.
+        val email = settingsField("")
+        val password = settingsField("", secure = true)  // note 3: typed as •
+        val code = settingsField("").apply {
             isEnabled = false
             alpha = 0.4f
         }
+
+        // Rediscover the account the user already signed in with (note 4).
+        FoxyTunnel.tokenStore(this).savedEmail?.let { if (it.isNotBlank()) email.setText(it) }
 
         var sendReady = false
 
@@ -8053,14 +8076,16 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(14), dp(16), dp(14))
         }
         connCard.addView(foxySectionHead(Strings.t("Connection")))
-        connCard.addView(OrbitSettingsRow(this, palette, Strings.t("Status"),
-            if (TunnelStatus.isActive()) Strings.t("Connected") else Strings.t("Disconnected")) { },
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
-        rowServer = OrbitSettingsRow(this, palette, Strings.t("Server"), Strings.t("Automatic (recommended)")) { }
-        connCard.addView(rowServer)
-        quotaRow = OrbitSettingsRow(this, palette, Strings.t("Monthly quota"), Strings.t("Shows after sign-in")) { }
+        // Plain label/value rows (mock: no chevrons, not tappable). Status reads
+        // the LIVE tunnel state, quota updates after sign-in.
+        val foxyStatus = TunnelStatus.isActive()
+        val statusRow = foxyInfoRow(Strings.t("Status"),
+            if (foxyStatus) Strings.t("Connected") else Strings.t("Disconnected"),
+            if (foxyStatus) 0xFF27C93F.toInt() else MUTED)
+        connCard.addView(statusRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        quotaRow = foxyInfoRow(Strings.t("Monthly quota"), Strings.t("Shows after sign-in"), MUTED)
         connCard.addView(quotaRow)
         content.addView(connCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -8083,6 +8108,7 @@ class MainActivity : Activity() {
     /** Logs out of the Foxy account and rebuilds the screen. */
     private fun onFoxySignOutClicked(chip: TextView, sendBtn: TextView, signInBtnLocal: TextView, codeField: EditText) {
         com.msnguard.vpn.foxy.FoxyTunnel.signOut(this)
+        com.msnguard.vpn.foxy.FoxyTunnel.tokenStore(this).savedEmail = null
         chip.text = "ACCOUNT: not signed in"
         chip.setTextColor(MUTED)
         chip.background = roundedBackground(SURFACE, 11, DIVIDER)
@@ -8113,6 +8139,8 @@ class MainActivity : Activity() {
         chip.text = "SIGNING IN…"
         chip.setTextColor(palette.violet)
         chip.background = roundedBackground(SURFACE, 11, DIVIDER)
+        ConnectionLog.record("Foxy: FxA login POST /account/login — " +
+            "waiting up to 30 s (OkHttp callTimeout)")
         Thread {
             var error: String? = null
             var needsCode = false
@@ -8121,8 +8149,11 @@ class MainActivity : Activity() {
                     com.msnguard.vpn.foxy.FoxyTunnel.login(this@MainActivity, email, password)
                 }
                 needsCode = state == "needs-code"
+                ConnectionLog.record("Foxy: FxA login returned " +
+                    if (needsCode) "202 needs-code" else "200 token-mint complete")
             } catch (e: Exception) {
                 error = e.message
+                ConnectionLog.record("Foxy: FxA login FAILED — " + (e.message ?: "unknown"))
             }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -8203,6 +8234,9 @@ class MainActivity : Activity() {
                 styleFoxyButton(signInBtn, false)
                 toastShort(Strings.t("Foxy account verified"))
                 ConnectionLog.record("Foxy: verified — tokens minted")
+                // keep the email on disk for the next visit (note 4) — password never stored
+                com.msnguard.vpn.foxy.FoxyTunnel.tokenStore(this@MainActivity)
+                    .savedEmail = emailField.text.toString().trim()
                 fetchFoxyQuota(quotaRow)
             }
         }.start()
