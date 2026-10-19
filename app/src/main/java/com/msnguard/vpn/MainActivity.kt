@@ -8021,6 +8021,16 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(12) })
         accountCard.addView(password)
 
+        accountCard.addView(sendCodeBtn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(50),
+        ).apply { topMargin = dp(14) })
+
+        accountCard.addView(label("Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14) })
+        accountCard.addView(code)
+
         accountCard.addView(signInBtn, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(50),
         ).apply { topMargin = dp(12) })
