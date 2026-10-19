@@ -31,8 +31,18 @@ object FoxyLog {
     private val _entries = MutableStateFlow<List<LogEntry>>(emptyList())
     val entries: StateFlow<List<LogEntry>> = _entries
 
-    private val lastPublishAt = AtomicLong(0L)
+    private val lastPublishAt = AtomicLong(0)
     private val flushScheduled = AtomicBoolean(false)
+
+    /**
+     * Optional mirror into the app's ConnectionLog while the Foxy tunnel owns
+     * the device. Without it the WARN/ERROR detail (GOAWAY, upstream session
+     * dead, auth refusals) stayed in logcat and the user's log showed nothing
+     * between "connected" and the tunnel being treated as dead. Wired in
+     * FoxyTunnel.start and cleared in FoxyTunnel.stop so other transports
+     * never inherit Foxy's mirror.
+     */
+    @Volatile var mirror: ((String, LogLevel, String) -> Unit)? = null
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "FoxyLog-flush").apply { isDaemon = true }
@@ -47,16 +57,21 @@ object FoxyLog {
     fun i(tag: String, message: String) {
         Log.i(tag, message)
         log(LogLevel.INFO, tag, message)
+        mirror?.invoke(tag, LogLevel.INFO, message)
     }
 
     fun w(tag: String, message: String, error: Throwable? = null) {
         if (error != null) Log.w(tag, message, error) else Log.w(tag, message)
-        log(LogLevel.WARN, tag, if (error != null) "$message: ${error.message}" else message)
+        val text = if (error != null) "$message: ${error.message}" else message
+        log(LogLevel.WARN, tag, text)
+        mirror?.invoke(tag, LogLevel.WARN, text)
     }
 
     fun e(tag: String, message: String, error: Throwable? = null) {
         if (error != null) Log.e(tag, message, error) else Log.e(tag, message)
-        log(LogLevel.ERROR, tag, if (error != null) "$message: ${error.message}" else message)
+        val text = if (error != null) "$message: ${error.message}" else message
+        log(LogLevel.ERROR, tag, text)
+        mirror?.invoke(tag, LogLevel.ERROR, text)
     }
 
     private val currentSize = java.util.concurrent.atomic.AtomicInteger(0)
