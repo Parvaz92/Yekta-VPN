@@ -7846,6 +7846,9 @@ class MainActivity : Activity() {
     private lateinit var sendCodeBtn: TextView
     private lateinit var signInBtn: TextView
 
+    /** Email the user is currently signing in with (for persistence after verify). */
+    private var pendingFoxyEmail: String? = null
+
     /** Monthly-quota & server rows on the Foxy page; live until it closes. */
     private var quotaRow: LinearLayout? = null
 
@@ -7895,7 +7898,7 @@ class MainActivity : Activity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
             background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 14, stroke = DIVIDER)
         }
-        row.addView(label(title, 14f, INK, TypefaceStyle.NORMAL), LinearLayout.LayoutParams(
+        row.addView(label(title, 14f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
         ))
         val valueLabel = label(value, 14f, valueColor)
@@ -8131,7 +8134,7 @@ class MainActivity : Activity() {
         chip: TextView,
         sendBtn: TextView,
         signInBtn: TextView,
-        quotaRow: OrbitSettingsRow?,
+        quotaRow: LinearLayout?,
     ) {
         val email = emailField.text.toString().trim()
         val password = passwordField.text.toString()
@@ -8141,6 +8144,7 @@ class MainActivity : Activity() {
         chip.text = "SIGNING IN…"
         chip.setTextColor(palette.violet)
         chip.background = roundedBackground(SURFACE, 11, DIVIDER)
+        pendingFoxyEmail = email
         ConnectionLog.record("Foxy: FxA login POST /account/login — " +
             "waiting up to 30 s (OkHttp callTimeout)")
         Thread {
@@ -8199,7 +8203,7 @@ class MainActivity : Activity() {
         codeField: EditText,
         chip: TextView,
         signInBtn: TextView,
-        quotaRow: OrbitSettingsRow?,
+        quotaRow: LinearLayout?,
     ) {
         val code = codeField.text.toString().trim()
         signInBtn.text = Strings.t("Verifying…")
@@ -8238,7 +8242,7 @@ class MainActivity : Activity() {
                 ConnectionLog.record("Foxy: verified — tokens minted")
                 // keep the email on disk for the next visit (note 4) — password never stored
                 com.msnguard.vpn.foxy.FoxyTunnel.tokenStore(this@MainActivity)
-                    .savedEmail = emailField.text.toString().trim()
+                    .savedEmail = pendingFoxyEmail?.trim()
                 fetchFoxyQuota(quotaRow)
             }
         }.start()
