@@ -5373,6 +5373,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
         // every disconnect path — they are not owned by NativeCore/TunEngine.
         com.msnguard.vpn.foxy.FoxyTunnel.stop()
+        // The protector hook is Foxy-only: while another method (SHARD, WG, …)
+        // serves the device, the Foxy control plane must ride the tunnel like
+        // every other app socket — protecting it here would strand the FxA
+        // sign-in requests on the raw (filtered) network instead.
+        com.msnguard.vpn.foxy.FoxyControlPlaneHttp.socketProtector = null
         TorManager.stop()
         stopPsiphonTunnel()
         NativeCore.stop()
