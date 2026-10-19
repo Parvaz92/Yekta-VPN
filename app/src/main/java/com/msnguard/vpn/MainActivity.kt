@@ -1064,6 +1064,14 @@ class MainActivity : Activity() {
         if (TorManager.isTorActive) TOR_VERIFY_TIMEOUT_MS else VERIFY_TIMEOUT_MS
 
     /**
+     * Why the last failed sweep produced nothing. The gate's fail branch
+     * appends it to the log so a dead tunnel names the real refusal
+     * ("Connection refused", "TLS handshake failed", …) instead of just a
+     * probe count.
+     */
+    @Volatile private var lastProbeFailure: String? = null
+
+    /**
      * Probe every health-check endpoint in turn, returning the first success.
      *
      * Returns null only when all of them failed, which is the one case that
@@ -1071,6 +1079,7 @@ class MainActivity : Activity() {
      */
     private fun pingAnyEndpoint(): Pair<String, Float>? {
         val timeout = pingTimeoutMs()
+        var firstError: String? = null
         for (url in PING_URLS) {
             val attempt = runCatching {
                 val startedAt = System.nanoTime()
@@ -1087,8 +1096,14 @@ class MainActivity : Activity() {
                     connection.disconnect()
                 }
             }
-            attempt.getOrNull()?.let { return it }
+            attempt.getOrNull()?.let { lastProbeFailure = null; return it }
+            if (firstError == null) {
+                val host = url.substringAfter("//").substringBefore("/")
+                val cause = attempt.exceptionOrNull()
+                firstError = host + " — " + (cause?.message ?: "no response")
+            }
         }
+        lastProbeFailure = firstError
         return null
     }
 
@@ -1270,7 +1285,8 @@ class MainActivity : Activity() {
                     }
                 } else {
                     ConnectionLog.record(
-                        "No reachability after $attempts probe(s) — treating the tunnel as dead"
+                        "No reachability after $attempts probe(s) — treating the tunnel as dead" +
+                            (lastProbeFailure?.let { " ; probe: " + it } ?: "")
                     )
                     failFakeConnection()
                 }
@@ -9589,6 +9605,11 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
+        } else if (TunnelStatus.isActive() && com.msnguard.vpn.foxy.FoxyTunnel.isRunning) {
+            // FOXY's listener is its own 1830 — the aether default below is a
+            // closed socket on this transport, so every reachability probe was
+            // refused instantly and the gate read a working tunnel as dead.
+            com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
         } else if (TunnelStatus.isActive() && ShardSocksFront.isRunning) {
             // The front-end, not xray's own 1824. Both would work for a CONNECT, but
             // this is also the port whose byte counters feed the tiles, so probing it

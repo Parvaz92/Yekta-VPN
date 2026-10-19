@@ -100,6 +100,12 @@ object FoxyTunnel {
         if (isRunning) return@withContext
         FoxyTunnel.rxBytes = 0L
         FoxyTunnel.txBytes = 0L
+        // While Foxy owns the device, mirror its WARN/ERROR/INFO into the
+        // user-visible connection log — the failure reasons otherwise die in
+        // logcat and the log goes dark between "connected" and teardown.
+        FoxyLog.mirror = { tag, _, msg ->
+            ConnectionLog.record("Foxy: [" + tag + "] " + msg.take(160))
+        }
         ConnectionLog.record("Foxy: starting — refreshing FxA session…")
         val auth = ensureAccessToken(context)
 
@@ -184,6 +190,7 @@ object FoxyTunnel {
     fun stop() {
         runCatching { socks?.stop().also { socks = null } }
         runCatching { session?.close().also { session = null } }
+        FoxyLog.mirror = null
         ConnectionLog.record("Foxy: stopped")
     }
 
