@@ -6,12 +6,16 @@ object FoxySettings {
 
     /** Persisted location choice for the Foxy dial (null = Automatic). */
     const val COUNTRY_PREF_KEY = "foxy_selected_country"
+    private const val COUNTRY_PREFS_FILE = "foxy_settings"
+
+    private fun prefs(ctx: android.content.Context): android.content.SharedPreferences =
+        ctx.getSharedPreferences(COUNTRY_PREFS_FILE, android.content.Context.MODE_PRIVATE)
 
     fun selectedCountryCode(ctx: android.content.Context): String? =
-        ctx.profiled().getString(COUNTRY_PREF_KEY, null)?.trim()?.takeIf { it.isNotBlank() }
+        prefs(ctx).getString(COUNTRY_PREF_KEY, null)?.trim()?.takeIf { it.isNotBlank() }
 
     fun saveSelectedCountryCode(ctx: android.content.Context, code: String?) {
-        ctx.profiled().edit()
+        prefs(ctx).edit()
             .putString(COUNTRY_PREF_KEY, code?.trim()?.takeIf { it.isNotBlank() })
             .apply()
     }
