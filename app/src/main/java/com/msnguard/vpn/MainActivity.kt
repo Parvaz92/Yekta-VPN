@@ -7881,11 +7881,12 @@ class MainActivity : Activity() {
         bar.addView(dot(0xFF27C93F.toInt()))
         bar.addView(dot(0xFFFF5F56.toInt()))
         bar.addView(dot(0xFFFFBD2E.toInt()))
-        bar.addView(label("\u25B8 " + title, 12f, primary, TypefaceStyle.MEDIUM).apply {
-            letterSpacing = 0.06f
+        bar.addView(label("\u25B8 " + title.uppercase(), 12f, palette.violet, TypefaceStyle.MEDIUM).apply {
+            // mock typography: wide tracking, uppercase title (sample spec)
+            letterSpacing = 0.14f
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(4) }
+            ).apply { leftMargin = dp(6) }
         })
         return bar
     }
@@ -7912,12 +7913,17 @@ class MainActivity : Activity() {
     /** Theme+neon button whose listener is ALWAYS attached — the click itself
      *  guards readiness, so a "disabled" look can never mute a tap. */
     private fun foxyActionButton(title: String, ready: Boolean): TextView =
-        createSettingsButton(title) { }.apply {
-            setTextColor(if (ready) INK else MUTED)
-            background = roundedBackground(SURFACE_VARIANT, 16, if (ready) 0xFF27C93F.toInt() else DIVIDER)
+        TextView(this).apply {
+            text = title
+            textSize = 14.5f
+            gravity = Gravity.CENTER
+            setTextColor(if (ready) INK else 0xFF9494A0.toInt())
+            // mock geometry: ~43dp tall, radius 10, dark fill + faint gray border
+            background = roundedBackground(SURFACE, 10, DIVIDER)
             alpha = if (ready) 1f else 0.55f
             isClickable = true
             isFocusable = true
+            setPadding(dp(14), 0, dp(14), 0)
         }
 
     /** The dedicated page — a faithful build of the approved mockup. */
@@ -7945,12 +7951,13 @@ class MainActivity : Activity() {
         }
         accountCard.addView(foxySectionHead(Strings.t("Foxy Account")))
 
-        val chip = label("ACCOUNT: not signed in", 11f, MUTED, TypefaceStyle.MEDIUM).apply {
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = roundedBackground(SURFACE, 11, DIVIDER)
+        val chip = label("ACCOUNT: not signed in", 11f, 0xFFC7C7D1.toInt(), TypefaceStyle.MEDIUM).apply {
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            letterSpacing = 0.10f
+            background = roundedBackground(Color.TRANSPARENT, 14, 0xFF3A3A46.toInt())
         }
         when (pending) {
-            "pending" -> { chip.text = "WAITING: check your email for the code"; chip.setTextColor(palette.violet) }
+            "pending" -> { chip.text = "WAITING: check your email for the code"; chip.setTextColor(palette.violet); chip.background = roundedBackground(Color.TRANSPARENT, 14, 0xFF3A3A46.toInt()) }
             "active" -> {
                 chip.text = "ACCOUNT: signed in"
                 chip.setTextColor(0xFF6B5BD6.toInt())
@@ -7962,11 +7969,26 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(12) })
 
         // Note 2: no ghost text inside the fields — whitespace only.
-        val email = settingsField("", "")
-        val password = settingsField("", "", secure = true)  // note 3: typed as •
+        val email = settingsField("", "").apply {
+            setSingleLine(true)
+            hint = "you@mozilla.com"
+            background = roundedBackground(SURFACE, 10, DIVIDER)
+            setOnFocusChangeListener { v, focused ->
+                v.background = roundedBackground(
+                    SURFACE, 10, if (focused) palette.violet else DIVIDER,
+                )
+            }
+        }
+        val password = settingsField("", "", secure = true).apply {
+            setSingleLine(true)
+            hint = "Firefox password"
+            background = roundedBackground(SURFACE, 10, DIVIDER)
+        }  // note 3: typed as •
         val code = settingsField("", "").apply {
             isEnabled = false
             alpha = 0.4f
+            setSingleLine(true)
+            background = roundedBackground(SURFACE, 10, DIVIDER)
         }
 
         // Rediscover the account the user already signed in with (note 4).
@@ -7976,14 +7998,10 @@ class MainActivity : Activity() {
 
         fun refreshSendCodeEnabled() {
             sendReady = email.text.toString().trim().isNotEmpty() && password.text.length > 3
-            sendCodeBtn.setTextColor(if (sendReady) INK else MUTED)
-            sendCodeBtn.background = roundedBackground(SURFACE_VARIANT, 16, if (sendReady) 0xFF27C93F.toInt() else DIVIDER)
-            sendCodeBtn.alpha = if (sendReady) 1f else 0.55f
+            styleFoxyButton(sendCodeBtn, sendReady)
         }
         fun styleSignIn(ready: Boolean) {
-            signInBtn.setTextColor(if (ready) INK else MUTED)
-            signInBtn.background = roundedBackground(SURFACE_VARIANT, 16, if (ready) 0xFF27C93F.toInt() else DIVIDER)
-            signInBtn.alpha = if (ready) 1f else 0.55f
+            styleFoxyButton(signInBtn, ready)
         }
 
         sendCodeBtn = foxyActionButton("Send Code", false)
@@ -8050,7 +8068,7 @@ class MainActivity : Activity() {
         accountCard.addView(password)
 
         accountCard.addView(sendCodeBtn, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(50),
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
         ).apply { topMargin = dp(14) })
 
         accountCard.addView(label("Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
@@ -8060,7 +8078,7 @@ class MainActivity : Activity() {
         accountCard.addView(code)
 
         accountCard.addView(signInBtn, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(50),
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
         ).apply { topMargin = dp(12) })
 
         val hint = label("", 11f, MUTED).apply { setPadding(dp(2), dp(12), dp(2), 0) }
@@ -8069,6 +8087,15 @@ class MainActivity : Activity() {
             else -> Strings.t("Mozilla emails a verification code after Send Code — paste it and press Sign In. The password is only used to prove your identity; it is never stored.")
         }
         accountCard.addView(hint)
+
+        // mock footer: green dot + "Traffic exits via the Fastly edge — HTTP/2 CONNECT"
+        val fastlyLine = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(2), dp(12), 0, 0) }
+        fastlyLine.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { rightMargin = dp(7) }
+            background = roundedBackground(0xFF22C55E.toInt(), 4, 0xFF22C55E.toInt())
+        })
+        fastlyLine.addView(label(Strings.t("Traffic exits via the Fastly edge — HTTP/2 CONNECT"), 11f, 0xFF9A9AA6.toInt()))
+        accountCard.addView(fastlyLine)
 
         content.addView(accountCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -8250,8 +8277,8 @@ class MainActivity : Activity() {
 
     /** One place for the theme+neon look, shared by every Foxy button. */
     private fun styleFoxyButton(btn: TextView, ready: Boolean) {
-        btn.setTextColor(if (ready) INK else MUTED)
-        btn.background = roundedBackground(SURFACE_VARIANT, 16, if (ready) 0xFF27C93F.toInt() else DIVIDER)
+        btn.setTextColor(if (ready) INK else 0xFF9494A0.toInt())
+        btn.background = roundedBackground(SURFACE, 10, if (ready) 0xFF27C93F.toInt() else DIVIDER)
         btn.alpha = if (ready) 1f else 0.55f
     }
 
