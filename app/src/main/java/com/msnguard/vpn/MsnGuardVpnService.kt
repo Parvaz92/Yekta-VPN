@@ -3064,7 +3064,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .addAddress(address.ipAddress, address.prefixLength)
                     .addRoute("0.0.0.0", 0)
                     .addRoute(address.subnet, address.prefixLength)
-                    .addDnsServer(address.router)
+                    // The reference FoxyVPN publishes the synthetic mapdns address
+                    // as the interface's ONLY resolver (its establishTun: dnsServer
+                    // = HevSocks5TunnelConfig.MAPDNS_ADDRESS). The engine answers
+                    // DNS locally from its fake-IP table and hands HOSTNAMES to
+                    // the SOCKS CONNECT, so no DNS query ever crosses the tunnel
+                    // and no DoH client sits in the data path. address.router
+                    // (the old tun2socks pattern) forced every query through
+                    // udpgw → UDP-associate → DoH-over-tunnel — a path the
+                    // reference does not have and whose failure mode was the
+                    // alpha37 log: five DoH endpoints dead, the gate probe
+                    // closing, tunnel treated as dead after 18s.
+                    .addDnsServer(java.net.InetAddress.getByName(HevEngine.MAP_DNS_ADDRESS))
                     .applyLanAccess(tun = address)
                     .applyIranBypass()
                     .applySplitTunneling()
@@ -3078,30 +3089,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     com.msnguard.vpn.foxy.FoxyTunnel.start(this@MsnGuardVpnService)
                 }
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
-                // BadVPN's tun2socks reaches its udpgw rendezvous (127.0.0.1:7300)
-                // by issuing a SOCKS CONNECT to it through whatever SOCKS address
-                // it was pointed at. With no front in the path that dial lands on
-                // Foxy's own listener, where `isLocalNetworkDestination` refuses
-                // the loopback — so UDP and (with it) DNS die, and the reachability
-                // gate reads the tunnel as dead after its probe budget. The WARP
-                // path already solves this exact problem with WarpUdpgwFront
-                // (start → tun2socks on 1827 → the front answers the rendezvous
-                // itself and relays every other CONNECT verbatim to the real
-                // listener); reuse it here with Foxy's 1830 as its upstream.
-                // Zeptun/Hev use their own mapdns and never touch udpgw, so they
-                // keep dialing Foxy's listener directly.
-                val legacyFrontUp = TunEnginePref.get(this) == TunEnginePref.LEGACY &&
-                    WarpUdpgwFront.start(com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT)
-                if (TunEnginePref.get(this) == TunEnginePref.LEGACY && !legacyFrontUp) {
-                    // The rendezvous would be refused again — a UDP-free tunnel is
-                    // exactly the false connection this branch must not produce.
-                    error("Could not start the Foxy UDP front-end")
-                }
-                val socksForEngine = if (legacyFrontUp) WarpUdpgwFront.LISTEN_PORT
-                    else com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
-                activeSocksPort = socksForEngine
-                if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = foxyMtu)) {
-                    error("Could not start device routing")
+                // Reference parity: FoxyVPN runs ONE tun2socks engine —
+                // hev-socks5-tunnel — with mapdns always on (DNS provider
+                // "Default" = mapdnsActive = dohUrl == null, which FoxyTunnel
+                // already starts with). BadVPN has no mapdns, so the transport
+                // forced onto it kept needing the udpgw-front + DoH contraption
+                // the reference does not have at all. The engine preference
+                // therefore does not apply to this transport: Hev is fixed for
+                // FOXY, and a Failed Hev start fails the dial loudly instead of
+                // silently falling back to a UDP-less engine.
+                ConnectionLog.record(
+                    "Foxy: tun2socks engine = Hev (mapdns ${HevEngine.MAP_DNS_ADDRESS}) — " +
+                        "fixed for this transport, the TUN engine setting does not apply"
+                )
+                activeSocksPort = com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
+                if (!HevEngine.start(tun!!, com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT, foxyMtu, dnsOnly = false)) {
+                    // A fallback to Zeptun/badvpn here would revive either a
+                    // 198.18.x resolver the engine cannot answer or the dead
+                    // DoH relay — exactly the false connection to avoid.
+                    error("Could not start the Hev tun2socks engine")
                 }
                 currentVpnIp = ""
                 sendStatus(STATUS_CONNECTED, Strings.t("Foxy connected"))
