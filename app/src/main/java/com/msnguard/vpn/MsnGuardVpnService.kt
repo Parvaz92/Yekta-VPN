@@ -3078,8 +3078,29 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     com.msnguard.vpn.foxy.FoxyTunnel.start(this@MsnGuardVpnService)
                 }
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
-                activeSocksPort = com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
-                if (!TunEngineManager.start(this, tun!!, com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT, mtu = foxyMtu)) {
+                // BadVPN's tun2socks reaches its udpgw rendezvous (127.0.0.1:7300)
+                // by issuing a SOCKS CONNECT to it through whatever SOCKS address
+                // it was pointed at. With no front in the path that dial lands on
+                // Foxy's own listener, where `isLocalNetworkDestination` refuses
+                // the loopback — so UDP and (with it) DNS die, and the reachability
+                // gate reads the tunnel as dead after its probe budget. The WARP
+                // path already solves this exact problem with WarpUdpgwFront
+                // (start → tun2socks on 1827 → the front answers the rendezvous
+                // itself and relays every other CONNECT verbatim to the real
+                // listener); reuse it here with Foxy's 1830 as its upstream.
+                // Zeptun/Hev use their own mapdns and never touch udpgw, so they
+                // keep dialing Foxy's listener directly.
+                val legacyFrontUp = TunEnginePref.get(this) == TunEnginePref.LEGACY &&
+                    WarpUdpgwFront.start(com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT)
+                if (TunEnginePref.get(this) == TunEnginePref.LEGACY && !legacyFrontUp) {
+                    // The rendezvous would be refused again — a UDP-free tunnel is
+                    // exactly the false connection this branch must not produce.
+                    error("Could not start the Foxy UDP front-end")
+                }
+                val socksForEngine = if (legacyFrontUp) WarpUdpgwFront.LISTEN_PORT
+                    else com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
+                activeSocksPort = socksForEngine
+                if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = foxyMtu)) {
                     error("Could not start device routing")
                 }
                 currentVpnIp = ""

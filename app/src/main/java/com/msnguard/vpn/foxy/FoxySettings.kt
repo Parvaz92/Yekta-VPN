@@ -4,6 +4,18 @@ package com.msnguard.vpn.foxy
 object FoxySettings {
     enum class TlsSplitMode { OFF, FIRST_BYTE, SNI }
 
+    /** Persisted location choice for the Foxy dial (null = Automatic). */
+    const val COUNTRY_PREF_KEY = "foxy_selected_country"
+
+    fun selectedCountryCode(ctx: android.content.Context): String? =
+        ctx.profiled().getString(COUNTRY_PREF_KEY, null)?.trim()?.takeIf { it.isNotBlank() }
+
+    fun saveSelectedCountryCode(ctx: android.content.Context, code: String?) {
+        ctx.profiled().edit()
+            .putString(COUNTRY_PREF_KEY, code?.trim()?.takeIf { it.isNotBlank() })
+            .apply()
+    }
+
     // Defaults; wired to prefs later if the user needs them.
     fun tlsSplitMode(): TlsSplitMode = TlsSplitMode.OFF
     fun upstreamProxyEnabled(): Boolean = false

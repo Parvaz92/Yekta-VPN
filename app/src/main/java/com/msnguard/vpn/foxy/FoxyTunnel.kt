@@ -119,11 +119,28 @@ object FoxyTunnel {
         proxyPass = pass
         ConnectionLog.record("Foxy: pass acquired (lifetime noted)")
 
-        val candidates = ServerListClient(context)
+        val countries = ServerListClient(context)
             .fetchCountries()
-            .let { ServerListClient.candidatesForCountry(it, it.firstOrNull()?.code ?: "") }
-        if (candidates.isEmpty()) error("Foxy: no reachable server found — try again later")
-        ConnectionLog.record("Foxy: ${candidates.size} server candidate(s) in cache")
+        // Location choice from the Foxy page's Server picker (null = Automatic,
+        // which keeps the historic first-country behaviour). A saved code that
+        // the refreshed server list no longer carries must NOT silently fall
+        // back to another country — the user asked for that exit, so fail loudly.
+        val chosen = FoxySettings.selectedCountryCode(context)
+            ?.takeIf { code -> countries.any { it.code.equals(code, ignoreCase = true) } }
+        val candidates = ServerListClient.candidatesForCountry(
+            countries,
+            chosen ?: countries.firstOrNull()?.code ?: "",
+        )
+        if (candidates.isEmpty()) {
+            if (chosen != null) {
+                error("Foxy: no candidate in the selected country ($chosen) — pick a different server on the Foxy page")
+            }
+            error("Foxy: no reachable server found — try again later")
+        }
+        ConnectionLog.record(
+            "Foxy: ${candidates.size} server candidate(s) in " +
+                (chosen ?: countries.firstOrNull()?.code ?: "?"),
+        )
 
         // The first candidate in the Mozilla list is often one the networked
         // device cannot reach at all (the user's log: tn hit `No reachability

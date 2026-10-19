@@ -2,6 +2,7 @@ package com.msnguard.vpn
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.BroadcastReceiver
 import android.content.ClipData
@@ -8108,6 +8109,20 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(14), dp(16), dp(14))
         }
         connCard.addView(foxySectionHead(Strings.t("Connection")))
+        // Server row: the real location picker (the KNOWN GAP from the alpha
+        // mockup — a decorative row shipped instead of a working chooser). It
+        // is only usable once at least one country is cached/fetchable; until
+        // then it reads "Automatic (recommended)" and the tap reports why.
+        val serverRow = foxyInfoRow(Strings.t("Server"),
+            com.msnguard.vpn.foxy.FoxySettings.selectedCountryCode(this)?.let { code ->
+                foxyCachedCountries().firstOrNull { it.code.equals(code, true) }?.name ?: code
+            } ?: Strings.t("Automatic (recommended)"),
+            INK)
+        serverRow.isClickable = true
+        serverRow.setOnClickListener { onFoxyServerRowClicked(serverRow) }
+        connCard.addView(serverRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         // Plain label/value rows (mock: no chevrons, not tappable). Status reads
         // the LIVE tunnel state, quota updates after sign-in.
         val foxyStatus = TunnelStatus.isActive()
@@ -8152,6 +8167,58 @@ class MainActivity : Activity() {
     }
 
     private fun closeFoxySettingScreen() { foxySettingPage?.let { animatePageClose(it) { foxySettingPage = null } }; openSettingsScreen() }
+
+    /** The Foxy page's Server row: open a real country chooser over the
+     *  cached RemoteSettings list, falling back to a live fetch. */
+    private fun foxyCachedCountries() = com.msnguard.vpn.foxy
+        .ServerListClient(this).loadCachedCountries()
+
+    private fun onFoxyServerRowClicked(serverRow: android.view.View) {
+        val cached = foxyCachedCountries()
+        Thread {
+            var countries = cached
+            if (countries.isEmpty()) {
+                try {
+                    countries = kotlinx.coroutines.runBlocking {
+                        com.msnguard.vpn.foxy.ServerListClient(this@MainActivity).fetchCountries()
+                    }
+                } catch (e: Exception) {
+                    ConnectionLog.record("Foxy: server list fetch failed — " + (e.message ?: "unknown"))
+                }
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (countries.isEmpty()) {
+                    toastShort(Strings.t("Server list unavailable — check your connection"))
+                    return@runOnUiThread
+                }
+                val selected = com.msnguard.vpn.foxy.FoxySettings.selectedCountryCode(this)
+                val names = arrayOf(Strings.t("Automatic (recommended)")) +
+                    countries.map { it.name }.toTypedArray()
+                val checked = if (selected == null) 0 else
+                    1 + countries.indexOfFirst { it.code.equals(selected, true) }.coerceAtLeast(-1)
+                AlertDialog.Builder(this)
+                    .setTitle(Strings.t("Server"))
+                    .setSingleChoiceItems(names, checked) { dialog, which ->
+                        if (which == 0) {
+                            com.msnguard.vpn.foxy.FoxySettings.saveSelectedCountryCode(this, null)
+                            ConnectionLog.record("Foxy: location set to Automatic")
+                        } else {
+                            val country = countries[which - 1]
+                            com.msnguard.vpn.foxy.FoxySettings.saveSelectedCountryCode(this, country.code)
+                            ConnectionLog.record("Foxy: location set to " + country.name + " (" + country.code + ")")
+                        }
+                        (serverRow.findViewById<TextView>(android.R.id.text2) // not used; kept null-safe
+                            ?: (serverRow.tag as? TextView)).apply {
+                            this?.text = if (which == 0) Strings.t("Automatic (recommended)") else countries[which - 1].name
+                        }
+                        dialog.dismiss()
+                    }
+                    .setNegativeButton(Strings.t("Cancel"), null)
+                    .show()
+            }
+        }.start()
+    }
 
     /** Sign-in flow, step 1 — real FxA /account/login on a worker thread. */
     private fun onFoxySendCodeClicked(
