@@ -7847,7 +7847,7 @@ class MainActivity : Activity() {
     private lateinit var signInBtn: TextView
 
     /** Monthly-quota & server rows on the Foxy page; live until it closes. */
-    private var quotaRow: OrbitSettingsRow? = null
+    private var quotaRow: LinearLayout? = null
 
 
     // ---------------------------------------------------------------- FOXY
@@ -7895,10 +7895,12 @@ class MainActivity : Activity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
             background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 14, stroke = DIVIDER)
         }
-        row.addView(label(title, 14f, INK, TypefaceStyle.BOLD), LinearLayout.LayoutParams(
+        row.addView(label(title, 14f, INK, TypefaceStyle.NORMAL), LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
         ))
-        row.addView(label(value, 14f, valueColor), LinearLayout.LayoutParams(
+        val valueLabel = label(value, 14f, valueColor)
+        row.tag = valueLabel  // fetchFoxyQuota updates this in place
+        row.addView(valueLabel, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
         return row
@@ -7957,15 +7959,15 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(12) })
 
         // Note 2: no ghost text inside the fields — whitespace only.
-        val email = settingsField("")
-        val password = settingsField("", secure = true)  // note 3: typed as •
-        val code = settingsField("").apply {
+        val email = settingsField("", "")
+        val password = settingsField("", "", secure = true)  // note 3: typed as •
+        val code = settingsField("", "").apply {
             isEnabled = false
             alpha = 0.4f
         }
 
         // Rediscover the account the user already signed in with (note 4).
-        FoxyTunnel.tokenStore(this).savedEmail?.let { if (it.isNotBlank()) email.setText(it) }
+        com.msnguard.vpn.foxy.FoxyTunnel.tokenStore(this).savedEmail?.let { if (it.isNotBlank()) email.setText(it) }
 
         var sendReady = false
 
@@ -8249,7 +8251,7 @@ class MainActivity : Activity() {
         btn.alpha = if (ready) 1f else 0.55f
     }
 
-    private fun fetchFoxyQuota(row: OrbitSettingsRow?) {
+    private fun fetchFoxyQuota(row: LinearLayout?) {
         val ref = row ?: return
         Thread {
             try {
@@ -8268,7 +8270,7 @@ class MainActivity : Activity() {
                 }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
-                    ref.setValue(quotaText)
+                    (ref.tag as? TextView)?.text = quotaText
                 }
             } catch (_: Exception) { }
         }.start()
