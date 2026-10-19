@@ -125,8 +125,11 @@ object FoxyTunnel {
         if (candidates.isEmpty()) error("Foxy: no reachable server found — try again later")
         ConnectionLog.record("Foxy: ${candidates.size} server candidate(s) in cache")
 
+        // The first candidate in the Mozilla list is often one the networked
+        // device cannot reach at all (the user's log: tn hit `No reachability
+        // after 15 pb(s)`), so walk the list until a session actually binds.
         var lastErr: Exception? = null
-        for (cand in candidates.take(3)) {
+        for (cand in candidates) {
             try {
                 val edge = EdgeAddressResolver.resolve(cand.host, listOf("1.1.1.1", "8.8.8.8"))
                 ConnectionLog.record("Foxy: dialing ${cand.host}:${cand.port}")

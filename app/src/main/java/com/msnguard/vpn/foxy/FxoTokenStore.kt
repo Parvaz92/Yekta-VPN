@@ -59,6 +59,21 @@ class FxoTokenStore(context: Context) {
             }
         }
 
+    /**
+     * The email the user signed in with — kept so reopening the Foxy page shows
+     * the filled-in form. The password is deliberately never persisted (it is
+     * only the FxA proof at login time); nothing else needs it afterwards.
+     */
+    var savedEmail: String?
+        get() = prefs.getString(KEY_SAVED_EMAIL, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            if (value.isNullOrBlank()) {
+                prefs.edit().remove(KEY_SAVED_EMAIL).apply()
+            } else {
+                prefs.edit().putString(KEY_SAVED_EMAIL, value).apply()
+            }
+        }
+
     fun clear() {
         prefs.edit().clear().apply()
     }
@@ -68,6 +83,7 @@ class FxoTokenStore(context: Context) {
         private const val KEY_REFRESH_TOKEN = "refresh_token"
         private const val KEY_EXPIRES_AT = "expires_at"
         private const val KEY_PENDING_SESSION_TOKEN = "pending_session_token"
+        private const val KEY_SAVED_EMAIL = "saved_email"
 
         private const val CLOCK_SKEW_TOLERANCE_SECONDS = 60L
     }
