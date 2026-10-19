@@ -62,12 +62,14 @@ object FoxyTunnel {
 
     /**
      * Start a login attempt. Returns "needs-code" (202 — email sent), "signed-in"
-     * (FxA did not require a code and tokens are already stored), or throws.
+     * (FxA did not require a code and tokens are already stored), or THROWS with
+     * the real FxA failure. A swallowed Result here previously mapped every
+     * wrong-password / unreachable-server error to "signed in" — never do that.
      */
     suspend fun login(context: Context, email: String, password: String): String =
         withContext(Dispatchers.IO) {
             val repo = authRepo(context)
-            val needed = repo.startLogin(email.trim(), password).getOrDefault(false)
+            val needed = repo.startLogin(email.trim(), password).getOrThrow()
             if (needed) "needs-code" else "signed-in"
         }
 
