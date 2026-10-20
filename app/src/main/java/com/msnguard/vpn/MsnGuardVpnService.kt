@@ -3075,7 +3075,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // reference does not have and whose failure mode was the
                     // alpha37 log: five DoH endpoints dead, the gate probe
                     // closing, tunnel treated as dead after 18s.
-                    .addDnsServer(java.net.InetAddress.getByName(HevEngine.MAP_DNS_ADDRESS))
+                    .addDnsServer(java.net.InetAddress.getByName(com.msnguard.vpn.foxy.FoxyHevConfig.MAPDNS_ADDRESS))
                     .applyLanAccess(tun = address)
                     .applyIranBypass()
                     .applySplitTunneling()
@@ -3096,14 +3096,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // forced onto it kept needing the udpgw-front + DoH contraption
                 // the reference does not have at all. The engine preference
                 // therefore does not apply to this transport: Hev is fixed for
-                // FOXY, and a Failed Hev start fails the dial loudly instead of
+                // FOXY, and a failed Hev start fails the dial loudly instead of
                 // silently falling back to a UDP-less engine.
+                //
+                // FOXY runs its OWN Hev engine (FoxyHevEngine), not the shared
+                // one: its config file, values (the reference's 300 s TCP
+                // read-write timeout, 20 s connect timeout, the reference's
+                // buffer sizes) and TUN-fd ownership live under
+                // filesDir/foxy/ foxy- — the shared engine's YAML, timeouts and
+                // fd lifecycle for WARP/MASQUE/Psiphon/Shard/Tor are untouched,
+                // and HevNativeLease keeps either side from tearing down the
+                // other's native thread.
                 ConnectionLog.record(
-                    "Foxy: tun2socks engine = Hev (mapdns ${HevEngine.MAP_DNS_ADDRESS}) — " +
+                    "Foxy: tun2socks engine = Hev (own isolated instance, mapdns " +
+                        com.msnguard.vpn.foxy.FoxyHevConfig.MAPDNS_ADDRESS + ") — " +
                         "fixed for this transport, the TUN engine setting does not apply"
                 )
                 activeSocksPort = com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
-                if (!HevEngine.start(tun!!, com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT, foxyMtu, dnsOnly = false)) {
+                if (!com.msnguard.vpn.foxy.FoxyHevEngine.start(tun!!, com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT, foxyMtu, this)) {
                     // A fallback to Zeptun/badvpn here would revive either a
                     // 198.18.x resolver the engine cannot answer or the dead
                     // DoH relay — exactly the false connection to avoid.
@@ -3118,6 +3128,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             } catch (e: Exception) {
                 ConnectionLog.record("Foxy start failed: ${e.message}")
                 com.msnguard.vpn.foxy.FoxyTunnel.stop()
+                // FOXY's own engine may have bound the native Hev thread before
+                // the failure — stop it explicitly; the lease guard inside the
+                // shared engine's stop means nothing else will do it here.
+                com.msnguard.vpn.foxy.FoxyHevEngine.stop()
                 tun?.close(); tun = null
                 vpnModeActive.set(false)
                 failAndStop(e.message ?: "Foxy start failed")
@@ -5400,6 +5414,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
         // every disconnect path — they are not owned by NativeCore/TunEngine.
         com.msnguard.vpn.foxy.FoxyTunnel.stop()
+        // And so must FOXY's own Hev engine: the lease guard inside
+        // TunEngineManager's shared HevEngine.stop() deliberately leaves the
+        // FOXY-owned native thread alive, so this call is what actually stops
+        // it (pthread_join) and closes the TUN fd for this transport.
+        com.msnguard.vpn.foxy.FoxyHevEngine.stop()
         // The protector hook is Foxy-only: while another method (SHARD, WG, …)
         // serves the device, the Foxy control plane must ride the tunnel like
         // every other app socket — protecting it here would strand the FxA

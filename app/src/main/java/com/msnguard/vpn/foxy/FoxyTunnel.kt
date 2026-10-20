@@ -1,10 +1,22 @@
 package com.msnguard.vpn.foxy
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.msnguard.vpn.ConnectionLog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Foxy transport manager — the app-layer engine behind MSN's FOXY method.
@@ -34,9 +46,31 @@ object FoxyTunnel {
 
     private const val TAG = "FoxyTunnel"
 
+    /** Redial loop cadence — the reference FoxyVpnService polls every 2 s. */
+    private const val WATCHDOG_INTERVAL_MS = 2_000L
+
+    /** The reference caps one upstream dial at CONNECT_TIMEOUT_MS = 20 s. */
+    private const val REDIAL_CONNECT_TIMEOUT_MS = 20_000L
+
+    /** The reference backs failed redials off (2 s base, capped). */
+    private const val REDIAL_BACKOFF_BASE_MS = 2_000L
+    private const val REDIAL_BACKOFF_CAP_MS = 12_000L
+
     @Volatile private var socks: LocalSocks5Server? = null
     @Volatile private var session: UpstreamSession? = null
     @Volatile private var proxyPass: ProxyPass? = null
+
+    /** Candidate list the redial loops walk; refetched only on the next start. */
+    @Volatile private var dialCandidates: List<ProxyCandidate>? = null
+
+    /** Context for redial-time pass minting. Cleared on stop. */
+    @Volatile private var appContext: Context? = null
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var watchdog: Job? = null
+
+    /** One redial at a time; the unhealthy callback and the watchdog share it. */
+    private val redialing = AtomicBoolean(false)
 
     val isRunning: Boolean get() = socks != null
 
@@ -106,22 +140,14 @@ object FoxyTunnel {
         FoxyLog.mirror = { tag, _, msg ->
             ConnectionLog.record("Foxy: [" + tag + "] " + msg.take(160))
         }
+        appContext = context.applicationContext
+        // Reference parity: the bundled GlobalSign roots must be loaded BEFORE
+        // the first TLS handshake touches UpstreamTrust (it builds its
+        // trustManagerFactory on first use and caches it). Without this the
+        // pool was "124 system root(s) + 0 bundled root(s)".
+        UpstreamTrust.init(context)
         ConnectionLog.record("Foxy: starting — refreshing FxA session…")
-        val auth = ensureAccessToken(context)
-
-        ConnectionLog.record("Foxy: fetching connection pass…")
-        val guardian = GuardianClient()
-        val pass = runCatching {
-            guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
-        }.recoverCatching { first ->
-            if (first is TokenInvalidError) {
-                ConnectionLog.record("Foxy: activating connection pass once…")
-                runCatching { guardian.activateGuardian(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken) }
-                guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
-            } else {
-                throw first
-            }
-        }.getOrThrow()
+        val pass = mintPass(context)
         proxyPass = pass
         ConnectionLog.record("Foxy: pass acquired (lifetime noted)")
 
@@ -147,12 +173,89 @@ object FoxyTunnel {
             "Foxy: ${candidates.size} server candidate(s) in " +
                 (chosen ?: countries.firstOrNull()?.code ?: "?"),
         )
+        // The redial loops walk this same list later.
+        dialCandidates = candidates
 
-        // The first candidate in the Mozilla list is often one the networked
-        // device cannot reach at all (the user's log: tn hit `No reachability
-        // after 15 pb(s)`), so walk the list until a session actually binds.
+        try {
+            // The reference's dialUpstream: walk the list until one candidate
+            // actually connects (the first candidate is often one this ISP
+            // cannot reach at all), and carry the last failure upward when
+            // none does.
+            val s = dialUpstream(pass)
+            session = s
+
+            val srv = LocalSocks5Server(
+                bindAddress = "127.0.0.1",
+                port = SOCKS_PORT,
+                rejectFakeDnsAddresses = true,
+                dohUrl = null,
+                sessionProvider = { session },
+            ) {
+                onUpstreamUnhealthy()
+            }
+            srv.start()
+            socks = srv
+            startWatchdog()
+            ConnectionLog.record("Foxy: tunnel up — SOCKS on 127.0.0.1:$SOCKS_PORT")
+        } catch (e: Exception) {
+            stop()
+            throw e
+        }
+    }
+
+    fun stop() {
+        // Cancel the watchdog and any in-flight redial FIRST: they must not
+        // hand out a session after the SOCKS listener is gone (their
+        // `socks == null` tombstone checks close anything just produced).
+        runCatching { scope.cancelChildren() }
+        watchdog = null
+        dialCandidates = null
+        appContext = null
+        runCatching { socks?.stop().also { socks = null } }
+        runCatching { session?.close().also { session = null } }
+        FoxyLog.mirror = null
+        ConnectionLog.record("Foxy: stopped")
+    }
+
+    /** Log-location helper for the in-panel vault path (unused external state). */
+    fun stateDir(context: Context): File = context.filesDir
+
+    // ---------------------------------------------------------------------
+    // Redial machinery — the reference FoxyVpnService answers a dead or
+    // unauthenticated upstream session with a real reconnect; logging the
+    // callback and doing nothing quietly left a zombie tunnel behind.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Fresh connection pass for dial and redial — the same flow the
+     * reference's mintProxyPass runs: renew the FxA session when stale, and
+     * activate the entitlement once when the pass comes back invalid.
+     */
+    private suspend fun mintPass(context: Context): ProxyPass {
+        val auth = ensureAccessToken(context)
+        val guardian = GuardianClient()
+        return runCatching {
+            guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
+        }.recoverCatching { first ->
+            if (first is TokenInvalidError) {
+                ConnectionLog.record("Foxy: activating connection pass once…")
+                runCatching { guardian.activateGuardian(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken) }
+                guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
+            } else {
+                throw first
+            }
+        }.getOrThrow()
+    }
+
+    /**
+     * Dial the upstream exactly like the reference's dialUpstream: walk the
+     * candidate list, resolve each edge address, connect over H2 with the
+     * freshly minted pass. Throws the LAST failure when every candidate failed.
+     */
+    private suspend fun dialUpstream(pass: ProxyPass): UpstreamSession {
+        val list = dialCandidates ?: error("Foxy: no dial candidates")
         var lastErr: Exception? = null
-        for (cand in candidates) {
+        for (cand in list) {
             try {
                 val edge = EdgeAddressResolver.resolve(cand.host, listOf("1.1.1.1", "8.8.8.8"))
                 ConnectionLog.record("Foxy: dialing ${cand.host}:${cand.port}")
@@ -163,37 +266,109 @@ object FoxyTunnel {
                     edgeAddress = edge,
                 )
                 s.connect()
-                session = s
-
-                val srv = LocalSocks5Server(
-                    bindAddress = "127.0.0.1",
-                    port = SOCKS_PORT,
-                    rejectFakeDnsAddresses = true,
-                    dohUrl = null,
-                    sessionProvider = { session },
-                ) {
-                    ConnectionLog.record("Foxy: upstream unhealthy — reconnecting")
-                }
-                srv.start()
-                socks = srv
-                ConnectionLog.record("Foxy: tunnel up — SOCKS on 127.0.0.1:$SOCKS_PORT")
-                return@withContext
+                return s
+            } catch (idc: CancellationException) {
+                throw idc
             } catch (e: Exception) {
                 lastErr = e
                 ConnectionLog.record("Foxy: dial to ${cand.host} failed — ${e.message ?: "unknown"}")
             }
         }
-        stop()
         throw lastErr ?: IllegalStateException("Foxy: could not reach any server")
     }
 
-    fun stop() {
-        runCatching { socks?.stop().also { socks = null } }
-        runCatching { session?.close().also { session = null } }
-        FoxyLog.mirror = null
-        ConnectionLog.record("Foxy: stopped")
+    /**
+     * The SOCKS server's health tracker decided the session is the likelier
+     * cause of failures than any one destination (or the edge rejected the
+     * pass). The reference answers that with a real redial.
+     */
+    private fun onUpstreamUnhealthy() {
+        if (socks == null) return
+        ConnectionLog.record("Foxy: upstream session unhealthy — redialing")
+        scope.launch { redial("unhealthy flows") }
     }
 
-    /** Log-location helper for the in-panel vault path (unused external state). */
-    fun stateDir(context: Context): File = context.filesDir
+    /**
+     * One reconnect attempt: fresh pass, dial a new session, swap it in.
+     * Returns true when a live session is in place (including "a redial was
+     * already running"). [LocalSocks5Server] reads [session] through its
+     * sessionProvider, so new flows pick the fresh session up instantly.
+     */
+    private suspend fun redial(why: String): Boolean {
+        if (!redialing.compareAndSet(false, true)) return true
+        try {
+            val context = appContext ?: return false
+            if (socks == null) return false
+            ConnectionLog.record("Foxy: redial ($why) — fetching a fresh pass…")
+            val pass = mintPass(context)
+            val fresh = withTimeoutOrNull(REDIAL_CONNECT_TIMEOUT_MS) { dialUpstream(pass) }
+            if (fresh == null) {
+                ConnectionLog.record("Foxy: redial ($why) timed out or failed — the watchdog retries")
+                return false
+            }
+            // Torn down while the dial was in flight — do not leak the fresh session.
+            if (socks == null) {
+                runCatching { fresh.close() }
+                return false
+            }
+            runCatching { session?.close() }
+            session = fresh
+            ConnectionLog.record("Foxy: upstream redialled")
+            return true
+        } catch (idc: CancellationException) {
+            throw idc
+        } catch (e: Exception) {
+            ConnectionLog.record("Foxy: redial ($why) failed — ${e.message ?: "error"}")
+            return false
+        } finally {
+            redialing.set(false)
+        }
+    }
+
+    /**
+     * Mirror of the reference FoxyVpnService's upstream watchdog (2 s interval,
+     * 20 s dial timeout, capped backoff, hold-while-offline): while the SOCKS
+     * listener is up, keep an upstream session live — swap a fresh one in
+     * whenever the edge session dies, so the TUN path never loses the
+     * transport underneath the user.
+     */
+    private fun startWatchdog() {
+        watchdog?.cancel()
+        watchdog = scope.launch {
+            var failures = 0
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                if (socks == null) return@launch
+                val context = appContext ?: return@launch
+                val current = session
+                if (current != null && current.isConnected) {
+                    if (failures != 0) ConnectionLog.record("Foxy: upstream session healthy again")
+                    failures = 0
+                    continue
+                }
+                // Same as the reference: wait silently for connectivity
+                // instead of burning dials on a dead link.
+                if (!hasUsableNetwork(context)) continue
+                if (failures == 0) ConnectionLog.record("Foxy: upstream session down — redialing…")
+                if (redial("watchdog")) {
+                    failures = 0
+                } else {
+                    failures++
+                    val backoff = (REDIAL_BACKOFF_BASE_MS shl failures.coerceAtMost(5))
+                        .coerceAtLeast(REDIAL_BACKOFF_BASE_MS)
+                        .coerceAtMost(REDIAL_BACKOFF_CAP_MS)
+                    delay(backoff)
+                }
+            }
+        }
+    }
+
+    /** The reference's hasUsableNetwork — Android already holds this permission. */
+    private fun hasUsableNetwork(context: Context): Boolean = runCatching {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return@runCatching false
+        val net = cm.activeNetwork ?: return@runCatching false
+        val caps = cm.getNetworkCapabilities(net) ?: return@runCatching false
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }.getOrDefault(false)
 }
