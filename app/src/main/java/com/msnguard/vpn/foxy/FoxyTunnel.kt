@@ -230,21 +230,54 @@ object FoxyTunnel {
      * Fresh connection pass for dial and redial — the same flow the
      * reference's mintProxyPass runs: renew the FxA session when stale, and
      * activate the entitlement once when the pass comes back invalid.
+     *
+     * alpha39 device log: "Foxy start failed: connection failure" ~1 s after
+     * "refreshing FxA session…" with NO step visible between — the control
+     * plane's failure reason died inside the thrown exception. Every step now
+     * records its own outcome (message + full cause chain), because the whole
+     * request stack (OkHttp → socket factory → TLS) wraps the real reason
+     * (refused/reset/DNS/alert) in layers that e.message alone loses.
      */
     private suspend fun mintPass(context: Context): ProxyPass {
-        val auth = ensureAccessToken(context)
+        val auth = try {
+            ensureAccessToken(context)
+        } catch (idc: CancellationException) {
+            throw idc
+        } catch (e: Exception) {
+            ConnectionLog.record("Foxy: FxA session refresh failed — " + causeChain(e))
+            throw e
+        }
+        ConnectionLog.record("Foxy: fetching connection pass…")
         val guardian = GuardianClient()
-        return runCatching {
+        return try {
             guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
-        }.recoverCatching { first ->
+        } catch (idc: CancellationException) {
+            throw idc
+        } catch (first: Exception) {
+            ConnectionLog.record("Foxy: pass fetch failed — " + causeChain(first))
             if (first is TokenInvalidError) {
-                ConnectionLog.record("Foxy: activating connection pass once…")
-                runCatching { guardian.activateGuardian(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken) }
-                guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
+                try {
+                    ConnectionLog.record("Foxy: activating connection pass once…")
+                    guardian.activateGuardian(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
+                    guardian.fetchProxyPass(GUARDIAN_ENDPOINT_DEFAULT, auth.accessToken)
+                } catch (idc: CancellationException) {
+                    throw idc
+                } catch (e: Exception) {
+                    ConnectionLog.record("Foxy: pass retry after activation failed — " + causeChain(e))
+                    throw e
+                }
             } else {
                 throw first
             }
-        }.getOrThrow()
+        }
+    }
+
+    /** The nested causes are where the real reason hides (OkHttp wraps a lot). */
+    private fun causeChain(e: Throwable, depth: Int = 0): String {
+        val line = (e::class.simpleName ?: "Exception") + ": " + (e.message ?: "-")
+        if (depth >= 3) return line
+        val cause = e.cause ?: return line
+        return "$line <- " + causeChain(cause, depth + 1)
     }
 
     /**

@@ -3126,7 +3126,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 startFoxyTrafficPolling()
                 startWatchdog()
             } catch (e: Exception) {
-                ConnectionLog.record("Foxy start failed: ${e.message}")
+                ConnectionLog.record(
+                    "Foxy start failed: ${e.message ?: e::class.simpleName ?: "error"}" +
+                        " — " + (e.cause?.let { "${it::class.simpleName}: ${it.message}" } ?: "no nested cause"),
+                )
                 com.msnguard.vpn.foxy.FoxyTunnel.stop()
                 // FOXY's own engine may have bound the native Hev thread before
                 // the failure — stop it explicitly; the lease guard inside the
