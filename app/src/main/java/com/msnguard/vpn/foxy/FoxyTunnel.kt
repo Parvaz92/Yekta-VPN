@@ -207,7 +207,7 @@ object FoxyTunnel {
         // Cancel the watchdog and any in-flight redial FIRST: they must not
         // hand out a session after the SOCKS listener is gone (their
         // `socks == null` tombstone checks close anything just produced).
-        runCatching { scope.cancelChildren() }
+        runCatching { scope.coroutineContext[Job]?.cancelChildren() }
         watchdog = null
         dialCandidates = null
         appContext = null
