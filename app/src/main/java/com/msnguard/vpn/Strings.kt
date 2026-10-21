@@ -802,10 +802,12 @@ object Strings {
         "1.1.1.1, 10.202.10.202:53" to Triple("1.1.1.1, 10.202.10.202:53", "1.1.1.1, 10.202.10.202:53", "1.1.1.1, 10.202.10.202:53"),
         "tls://dns.google, tls://1.1.1.1" to Triple("tls://dns.google, tls://1.1.1.1", "tls://dns.google, tls://1.1.1.1", "tls://dns.google, tls://1.1.1.1"),
         "https://cloudflare-dns.com/dns-query, doh:dns.quad9.net" to Triple("https://cloudflare-dns.com/dns-query, doh:dns.quad9.net", "https://cloudflare-dns.com/dns-query, doh:dns.quad9.net", "https://cloudflare-dns.com/dns-query, doh:dns.quad9.net"),
+        "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. Tried before the built-in list." to Triple(
             "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. Tried before the built-in list.",
             "آدرس‌های IP یا CIDR اختیاری لبه‌های CDN، جدا شده با کاما، فاصله یا خط جدید. قبل از لیست داخلی امتحان می‌شوند.",
             "可选的额外 CDN 边缘 IP 或 CIDR，以逗号、空格或换行分隔。优先于内置列表尝试。",
         ),
+        "Optional extra SNI hostnames separated by commas, spaces, or new lines. No-SNI variants are also tested." to Triple(
             "Optional extra SNI hostnames separated by commas, spaces, or new lines. No-SNI variants are also tested.",
             "نام دامنه‌های اختیاری SNI، جدا شده با کاما، فاصله یا خط جدید. حالت‌های بدون SNI هم امتحان می‌شوند.",
             "可选的额外 SNI 主机名，以逗号、空格或换行分隔。也会尝试无 SNI 的变体。",
