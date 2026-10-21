@@ -8001,7 +8001,7 @@ class MainActivity : Activity() {
             setSingleLine(true)
             hint = "you@mozilla.com"
             // user brief (05:41): double the height of the email/password/code boxes
-            minimumHeight = dp(88)
+            minimumHeight = dp(44)
             background = roundedBackground(foxyFieldFill, 10, DIVIDER)
             setOnFocusChangeListener { v, focused ->
                 v.background = roundedBackground(
@@ -8012,14 +8012,14 @@ class MainActivity : Activity() {
         val password = settingsField("", "", secure = true).apply {
             setSingleLine(true)
             hint = "Firefox password"
-            minimumHeight = dp(88)
+            minimumHeight = dp(44)
             background = roundedBackground(foxyFieldFill, 10, DIVIDER)
         }  // note 3: typed as •
         val code = settingsField("", "").apply {
             isEnabled = false
             alpha = 0.4f
             setSingleLine(true)
-            minimumHeight = dp(88)
+            minimumHeight = dp(44)
             background = roundedBackground(foxyFieldFill, 10, DIVIDER)
         }
 
@@ -8091,7 +8091,7 @@ class MainActivity : Activity() {
             styleSignIn(false)
         }
 
-        accountCard.addView(label("\u2709  Email", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDCE7  Email", 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
@@ -8107,7 +8107,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
         ).apply { topMargin = dp(14) })
 
-        accountCard.addView(label("#  Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDD22  Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(14) })
