@@ -4256,11 +4256,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * reorder can be detected: an index alone cannot say which transport it
      * meant once the order changes.
      */
-    private const val CHAIN_OUTER_TRANSPORT_PREF = "chain_outer_transport"
-    private const val CHAIN_OUTER_TRANSPORT_TOR_PREF = "chain_outer_transport_tor"
+    private val CHAIN_OUTER_TRANSPORT_PREF = "chain_outer_transport"
+    private val CHAIN_OUTER_TRANSPORT_TOR_PREF = "chain_outer_transport_tor"
 
     /** Size of the ladder before the alpha46 reorder (masque, wireguard, gool). */
-    private const val OLD_LADDER_SIZE = 3
+    private val OLD_LADDER_SIZE = 3
 
     /** The pre-alpha46 ladder order, for remapping a stored index once. */
     private val OLD_LADDER = listOf("masque", "wireguard", "gool")
