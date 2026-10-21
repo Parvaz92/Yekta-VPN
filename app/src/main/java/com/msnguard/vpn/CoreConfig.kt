@@ -426,13 +426,26 @@ object CoreConfig {
         // comes back — the number changes and nothing on the wire does.
         // Only sent when the user actually picked something, so an untouched
         // install keeps the engine's own defaults exactly.
-        if (MtuConfig.isCustom(context, MtuConfig.Method.MASQUE)) {
+        // Automatic Scan: the connect-time winner reaches the engine with the
+        // same gate as a manual value — MtuConfig.get returns the one-connect
+        // session scan when armed, so the TUN and the engine netstack keep
+        // taking THE SAME number (scan without the gate would leave a scanned
+        // TUN feeding the engine's built-in default: the exact mismatch the
+        // screen's own comment warns about). No scan this connect → gate is
+        // still just isCustom, identical to before.
+        if (MtuConfig.isCustom(context, MtuConfig.Method.MASQUE) ||
+            MtuAutoScan.sessionValue(MtuConfig.Method.MASQUE) != null
+        ) {
             out["AETHER_MASQUE_MTU"] = MtuConfig.get(context, MtuConfig.Method.MASQUE).toString()
         }
-        if (MtuConfig.isCustom(context, MtuConfig.Method.WIREGUARD)) {
+        if (MtuConfig.isCustom(context, MtuConfig.Method.WIREGUARD) ||
+            MtuAutoScan.sessionValue(MtuConfig.Method.WIREGUARD) != null
+        ) {
             out["AETHER_WG_MTU"] = MtuConfig.get(context, MtuConfig.Method.WIREGUARD).toString()
         }
-        if (MtuConfig.isCustom(context, MtuConfig.Method.WOW)) {
+        if (MtuConfig.isCustom(context, MtuConfig.Method.WOW) ||
+            MtuAutoScan.sessionValue(MtuConfig.Method.WOW) != null
+        ) {
             // WoW's outer leg is WireGuard and its inner hop rides inside a
             // masque tunnel, so both knobs apply; the masque one is capped by
             // mim_inner_budget so an inner that no longer fits is refused with
