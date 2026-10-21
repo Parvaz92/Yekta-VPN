@@ -115,7 +115,8 @@ object WarpExitManager {
     private fun parseExitNode(raw: String): ShardNode? {
         val line = raw.trim().lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: return null
         val profile = (if (line.startsWith("vmess://", ignoreCase = true))
-            VmessFmt.parse(line) else com.msnguard.vpn.shard.ShardImport.parseOne(line)) ?: return null
+            com.msnguard.vpn.shard.VmessFmt.parse(line)
+            else com.msnguard.vpn.shard.ShardImport.parseOne(line)) ?: return null
         val node = profile.toShardNode()
         if (node.address.contains("[") || node.address.contains("]")) return null
         if (node.port !in 1..65535) return null
