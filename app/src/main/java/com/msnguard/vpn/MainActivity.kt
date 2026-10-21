@@ -9126,7 +9126,7 @@ class MainActivity : Activity() {
         preferences().edit().putBoolean(chainPrefKey(protocol), armed).apply()
         val inner = if (protocol == Protocol.TOR) "Tor" else "Psiphon"
         if (armed) {
-            ConnectionLog.record("$inner-over-WARP armed: outer MASQUE, $inner inside it")
+            ConnectionLog.record("$inner-over-WARP armed: outer WireGuard by default, $inner inside it")
         } else {
             ConnectionLog.record("$inner-over-WARP disarmed")
         }
@@ -9894,7 +9894,7 @@ class MainActivity : Activity() {
         AUTO(
             CoreConfig.CHAIN_OUTER_AUTO,
             "Auto",
-            "Try MASQUE, then WireGuard, then WoW — remembers what works",
+            "Try WireGuard, then MASQUE, then WoW — remembers what works",
         ),
         MASQUE("masque", "MASQUE", "HTTP/3, falling back to HTTP/2 with TLS fragmentation"),
         WIREGUARD("wireguard", "WireGuard", "Single WARP tunnel; blocked on some carriers"),

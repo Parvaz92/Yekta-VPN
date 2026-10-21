@@ -4249,6 +4249,37 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * concurrently (its RUNNING compare_exchange returns "already running"), so the
      * next rung would fail instantly if the previous one were still unwinding.
      */
+    /**
+     * Transport NAME of the last successful auto rung (per inner tunnel).
+     *
+     * Written alongside [CoreConfig.CHAIN_OUTER_PREF] (its index) so a ladder
+     * reorder can be detected: an index alone cannot say which transport it
+     * meant once the order changes.
+     */
+    private const val CHAIN_OUTER_TRANSPORT_PREF = "chain_outer_transport"
+    private const val CHAIN_OUTER_TRANSPORT_TOR_PREF = "chain_outer_transport_tor"
+
+    /** Size of the ladder before the alpha46 reorder (masque, wireguard, gool). */
+    private const val OLD_LADDER_SIZE = 3
+
+    /** The pre-alpha46 ladder order, for remapping a stored index once. */
+    private val OLD_LADDER = listOf("masque", "wireguard", "gool")
+
+    /**
+     * Map an index written under the old ladder onto the new order.
+     *
+     * The remap is by NAME: old index → old name → new index. A stored 0 that
+     * meant MASQUE lands on the new MASQUE index (1), a stored 2 that meant
+     * WoW stays 2 — the transport itself is preserved, only its position moves.
+     */
+    private fun remapLegacyIndex(oldIndex: Int): Int {
+        if (oldIndex !in OLD_LADDER.indices) return -1
+        return CoreConfig.CHAIN_OUTER_LADDER.indexOf(OLD_LADDER[oldIndex])
+    }
+
+    private fun chainOuterTransportPref(inner: String): String =
+        if (inner == "Tor") CHAIN_OUTER_TRANSPORT_TOR_PREF else CHAIN_OUTER_TRANSPORT_PREF
+
     private fun raiseOuterLeg(inner: String = "Psiphon"): String? {
         // Auto gives the whole ladder; a pinned transport gives just that one, with
         // no fallback — a pin exists to stop the app spending a minute on transports
@@ -4263,7 +4294,26 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // -1, not 0: absent must be distinguishable from "rung 0 worked", or a fresh
         // install would look like it had already proven MASQUE and the plain-history
         // hint below would never be consulted.
-        val chainMemory = prefs.getInt(CoreConfig.CHAIN_OUTER_PREF, -1)
+        // The ladder was reordered in alpha46 (WireGuard now leads). A stored
+        // index from the old order points at a DIFFERENT rung — a legacy 0
+        // would start the walk on WireGuard and believe it had proven MASQUE.
+        // Re-anchor: keep only indices whose remembered transport actually is
+        // that index in the NEW order (chain_outer_transport stores the name).
+        val legacyChainMemory = prefs.getInt(CoreConfig.CHAIN_OUTER_PREF, -1)
+        val chainTransportName = prefs.getString(CHAIN_OUTER_TRANSPORT_PREF, null)
+        val chainMemory = if (
+            chainTransportName == null && legacyChainMemory in 0 until OLD_LADDER_SIZE
+        ) {
+            // No name recorded yet: this is a value written before alpha46 —
+            // remap it through the old ladder's order rather than guessing.
+            remapLegacyIndex(legacyChainMemory)
+        } else {
+            legacyChainMemory
+        }
+        // A recorded NAME that disagrees with the index means the ladder moved
+        // under it again — trust the name and re-anchor the index.
+        val namedIndex = chainTransportName?.let { CoreConfig.CHAIN_OUTER_LADDER.indexOf(it) }
+            ?.takeIf { it >= 0 } ?: chainMemory
         val plainHint = prefs.getString(CoreConfig.PLAIN_WORKING_TRANSPORT_PREF, null)
             ?.let { ladder.indexOf(it) }
             ?.takeIf { it >= 0 }
@@ -4271,7 +4321,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // when the full ladder is what we are walking.
         val start = when {
             !auto -> 0
-            chainMemory in ladder.indices -> chainMemory
+            namedIndex in ladder.indices -> namedIndex
             plainHint != null -> plainHint
             else -> {
                 // No history at all — the user just asked WireGuard to go first on
@@ -4286,7 +4336,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ConnectionLog.record(
                 "Chain: outer transport pinned to ${CoreConfig.chainOuterLabel(ladder[0])}"
             )
-        } else if (chainMemory !in ladder.indices && plainHint != null) {
+        } else if (namedIndex !in ladder.indices && plainHint != null) {
             // Say which evidence was used. Without this the reordering is invisible
             // and a support log cannot distinguish it from the static order.
             ConnectionLog.record(
@@ -4386,7 +4436,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // and the index would refer to the wrong transport later.
                 if (auto) {
                     profiled().edit()
-                        .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
+                        .putInt(CoreConfig.CHAIN_OUTER_PREF, index)
+                        .putString(chainOuterTransportPref(inner), protocol)
+                        .apply()
                 }
                 chainOuterCommitted = true
                 ConnectionLog.record("Chain: $label is carrying the outer leg")

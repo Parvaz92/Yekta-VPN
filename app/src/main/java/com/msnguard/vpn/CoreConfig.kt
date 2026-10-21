@@ -737,22 +737,20 @@ object CoreConfig {
     /**
      * The outer transports tried, in order, until one carries Psiphon.
      *
-     * Ordered by measured likelihood of working on an Iranian carrier, cheapest
-     * first:
+     * Ordered by user request (alpha46): WireGuard leads the DEFAULT auto
+     * ladder — the cheapest, fastest rung and the one the user wants tried
+     * first; `masque` follows (HTTP/3 over UDP/443, then HTTP/2 over TCP/443
+     * with TLS fragmentation, gateway cache + last-known-good endpoint); and
+     * `gool` last: WARP-on-WARP stacks two tunnels under the inner tunnel —
+     * the slowest rung, only worth reaching when the single-layer ones are
+     * blocked.
      *
-     *  - `masque` leads because it has two transports of its own (HTTP/3 over
-     *    UDP/443, then HTTP/2 over TCP/443 with TLS fragmentation) and a gateway
-     *    cache plus a last-known-good endpoint, so a repeat connect is fast.
-     *  - `wireguard` next: it is blocked outright on some carriers (Hamrah-e-Aval
-     *    has never carried it) but connects immediately on others.
-     *  - `gool` last. It is WARP-on-WARP, so it stacks two tunnels under Psiphon
-     *    for three in total — the slowest rung, and only worth reaching when the
-     *    single-layer ones are blocked.
-     *
-     * The rung that works is remembered per device, so this ordering only decides
-     * the very first attempt.
+     * The rung that works is remembered per device (CHAIN_OUTER_PREF), so
+     * this ordering only decides the very first attempt; a pinned
+     * transport (chain_outer_mode) is unaffected — that is still the user's
+     * manual choice and bypasses the ladder entirely.
      */
-    val CHAIN_OUTER_LADDER = listOf("masque", "wireguard", "gool")
+    val CHAIN_OUTER_LADDER = listOf("wireguard", "masque", "gool")
 
     /**
      * Which transport the user pinned for the chain's outer leg, or "auto".
