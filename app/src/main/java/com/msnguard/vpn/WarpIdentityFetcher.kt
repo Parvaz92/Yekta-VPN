@@ -109,7 +109,32 @@ object WarpIdentityFetcher {
         return cleared
     }
 
+    /*
+     * Cooperative cancel — Provisioning is the only long-running user-facing
+     * op that had no off ramp. The UI's second tap calls [cancel]; the bump
+     * below makes every RUNNING fetch see generation drift and unwind through
+     * its EXISTING failure path, which is already proven safe: finally
+     * { NativeCore.stop() + restore(previous identity files) } — the exact
+     * same cleanup a timeout takes. No new teardown logic anywhere.
+     */
+    private val requestGen = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var cancelRequested = false
+
+    /** Cancel the in-flight identity fetch. Called from the (only) UI button. */
+    fun cancel(reason: String = "user tapped PROVISIONING while a fetch was running") {
+        cancelRequested = true
+        requestGen.incrementAndGet()
+        ConnectionLog.record("Warp Identity: cancel requested — " + reason)
+    }
+
+    /** Whether the LAST completed fetch ended because [cancel] ran. Read by the UI for wording. */
+    fun wasCancelled(): Boolean = cancelRequested
+
+    private fun beginFetch(): Int { cancelRequested = false; return requestGen.get() }
+    private fun cancelled(tok: Int): Boolean = requestGen.get() != tok
+
     fun fetch(context: Context, protocol: String): Boolean {
+        val token = beginFetch()
         if (NativeCore.isRunning()) {
             Log.w(TAG, "tunnel is running — disconnect before fetching identity")
             ConnectionLog.record("Warp Identity: tunnel is running — disconnect first")
@@ -184,6 +209,10 @@ object WarpIdentityFetcher {
             // follow-up log shows exactly which field is missing and how much arrived.
             var lastStageLog = 0L
             while (true) {
+                if (cancelled(token)) {
+                    ConnectionLog.record("Warp Identity: cancelled by user — unwinding (engine stop + previous restore)")
+                    break
+                }
                 if (targets.all { complete(it, masque) }) {
                     ok = true
                     break
@@ -249,6 +278,7 @@ object WarpIdentityFetcher {
      * Isolated to Warp Setting only.
      */
     fun fetchDirectPlain(context: Context, protocol: String): Boolean {
+        val token = beginFetch()
         if (NativeCore.isRunning()) {
             android.util.Log.w(TAG, "tunnel is running — disconnect before fetching identity")
             ConnectionLog.record("Warp Identity: tunnel is running — disconnect first")
@@ -294,6 +324,10 @@ object WarpIdentityFetcher {
             val deadline = android.os.SystemClock.elapsedRealtime() + TIMEOUT_MS
             var lastStageLog = 0L
             while (true) {
+                if (cancelled(token)) {
+                    ConnectionLog.record("Warp Identity: cancelled by user — unwinding")
+                    break
+                }
                 if (targets.all { complete(it, masque) }) { ok = true; break }
                 val finished = !NativeCore.isRunning()
                 if (finished || android.os.SystemClock.elapsedRealtime() >= deadline) {
@@ -353,6 +387,7 @@ object WarpIdentityFetcher {
      * Scope is Warp Setting only — core logic itself is untouched.
      */
     fun fetchViaShard(context: Context, protocol: String): Boolean {
+        val token = beginFetch()
         if (NativeCore.isRunning()) {
             Log.w(TAG, "tunnel is running — disconnect before fetching identity")
             ConnectionLog.record("Warp Identity: tunnel is running — disconnect first")
@@ -381,13 +416,14 @@ object WarpIdentityFetcher {
             moved += file
         }
         // Warp Setting cache-first: try health-ranked top slice quickly; if none answers, full sweep.
+        if (cancelled(token)) { restore(moved); return false }
         val wasRunning = ShardManager.isRunning
         if (!wasRunning) {
             ConnectionLog.record("Warp Identity: trying cached SHARD nodes first…")
             val fastStarted = tryFastShard(context)
             if (fastStarted != null) {
                 ConnectionLog.record("Warp Identity: cached SHARD ready — registering " + protocol + "…")
-                return finishShardProvision(context, norm, protocol, masque, dir, targets, moved, fastStarted, wasRunning)
+                return finishShardProvision(context, norm, protocol, masque, dir, targets, moved, fastStarted, wasRunning, token)
             }
             ConnectionLog.record("Warp Identity: cached SHARD did not answer — full scan…")
         }
@@ -430,6 +466,10 @@ object WarpIdentityFetcher {
             ConnectionLog.record("Warp Identity: stage D ok — engine started (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
             val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
             while (true) {
+                if (cancelled(token)) {
+                    ConnectionLog.record("Warp Identity: cancelled by user — unwinding (engine stop + previous restore)")
+                    break
+                }
                 if (targets.all { complete(it, masque) }) { ok = true; break }
                 val finished = !NativeCore.isRunning()
                 if (finished || SystemClock.elapsedRealtime() >= deadline) {
@@ -579,7 +619,14 @@ object WarpIdentityFetcher {
         }
     }
 
-    private fun finishShardProvision(context: Context, norm: String, protocol: String, masque: Boolean, dir: java.io.File, targets: List<java.io.File>, moved: MutableList<java.io.File>, upstreamRaw: String, wasRunning: Boolean): Boolean {
+    private fun finishShardProvision(context: Context, norm: String, protocol: String, masque: Boolean, dir: java.io.File, targets: List<java.io.File>, moved: MutableList<java.io.File>, upstreamRaw: String, wasRunning: Boolean, token: Int): Boolean {
+        // Cancelled during the fast race: unwind BEFORE touching the engine —
+        // the started engine's cleanup below is skipped entirely this way.
+        if (cancelled(token)) {
+            restore(moved)
+            ConnectionLog.record("Warp Identity: cancelled by user before registration — previous kept")
+            return false
+        }
         val upstream = when { upstreamRaw.startsWith("socks5://", ignoreCase = true) -> upstreamRaw; upstreamRaw.contains("://") -> upstreamRaw; else -> "socks5://" + upstreamRaw }
         var ok = false
         try {
@@ -600,6 +647,10 @@ object WarpIdentityFetcher {
             ConnectionLog.record("Warp Identity: stage D ok — engine started (rc=$startRc isRunning=" + NativeCore.isRunning() + ")")
             val deadline = android.os.SystemClock.elapsedRealtime() + TIMEOUT_MS
             while (true) {
+                if (cancelled(token)) {
+                    ConnectionLog.record("Warp Identity: cancelled by user — unwinding (engine stop + previous restore)")
+                    break
+                }
                 if (targets.all { complete(it, masque) }) { ok = true; break }
                 val finished = !NativeCore.isRunning()
                 if (finished || android.os.SystemClock.elapsedRealtime() >= deadline) {

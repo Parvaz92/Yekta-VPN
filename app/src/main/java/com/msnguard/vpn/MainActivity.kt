@@ -6730,8 +6730,20 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
         lateinit var startBtn: TextView
+        // One in-flight provision op. The second tap means CANCEL — flip the
+        // fetcher's generation so the running fetch unwinds through its normal
+        // (timeout-equal) cleanup: engine kill + previous identity restore.
+        var provisioning = false
         startBtn = createSettingsButton(Strings.t("START \u2014 GET IDENTITY"), backgroundOverride = primary, textColorOverride = primaryContainer) {
             if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
+            if (provisioning) {
+                WarpIdentityFetcher.cancel()
+                term.text = Strings.t("Cancel requested — wait a few seconds\u2026")
+                toastShort(Strings.t("Cancelling\u2026"))
+                // Keep the button disabled here: the worker's completion path
+                // is the only one that re-arms START — no second in-flight.
+                return@createSettingsButton
+            }
             val proto = vaultProtocolSelected(vaultSelected)
             val chosenMethod = vaultMethod
             val methodName = when (chosenMethod) { "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("Shard Relay"); else -> Strings.t("Quantum ECH") }
@@ -6741,8 +6753,9 @@ class MainActivity : Activity() {
                 term.visibility = View.VISIBLE
                 refreshVaultCards(); return@createSettingsButton
             }
+            provisioning = true
             startBtn.isEnabled = false
-            startBtn.text = Strings.t("PROVISIONING...")
+            startBtn.text = Strings.t("PROVISIONING \u2014 TAP TO CANCEL")
             term.text = proto + " \u2014 " + methodName + " \u2014 connecting\u2026"
             term.visibility = View.VISIBLE
             val ctx = this@MainActivity
@@ -6771,11 +6784,17 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     termTail.done = true
                     try { termTail.interrupt() } catch (_: Exception) {}
+                    provisioning = false
                     startBtn.isEnabled = true
                     startBtn.text = Strings.t("START \u2014 GET IDENTITY")
                     if (ok && hasVaultIdentity(proto)) {
                         term.text = proto + " \u2713 " + Strings.t("Key received") + " \u2014 " + methodName
                         toastShort(proto + " \u2713 " + Strings.t("Key received"))
+                    } else if (WarpIdentityFetcher.wasCancelled()) {
+                        // Cancel completed — say so plainly; the fetcher already
+                        // restored any previous identity and stopped the engine.
+                        term.text = proto + " \u2014 " + Strings.t("Cancelled") + " (" + methodName + ")"
+                        toastShort(Strings.t("Provisioning cancelled"))
                     } else {
                         val last = ConnectionLog.snapshot().lastOrNull()?.take(120) ?: "failed"
                         term.text = proto + " \u2014 failed: " + last
