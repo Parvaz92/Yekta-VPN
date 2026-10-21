@@ -300,7 +300,7 @@ object EchEndpointRoster {
         try {
             val arr = JSONArray()
             c.verified.forEach { v -> arr.put(JSONObject().put("spec", v.spec).put("ech", v.ech).put("ts", v.ts)) }
-            context.profiled().edit().putString(PREF, JSONObject().put("verified", arr).put("ts", c.ts)).commit()
+            context.profiled().edit().putString(PREF, JSONObject().put("verified", arr).put("ts", c.ts).toString()).commit()
         } catch (_: Exception) {}
     }
 }
