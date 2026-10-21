@@ -6243,9 +6243,11 @@ class MainActivity : Activity() {
 
         // Master switch between the description and the methods list. ON:
         // every connect scans the path for ITS method first and applies the
-        // winner; OFF: the rows below are the only voice again. The page
-        // rebuilds on toggle so the rows' greyness matches the switch — the
-        // same immediate-repaint rule the profile switcher uses.
+        // winner; OFF: the rows below are the only voice again. The toggle
+        // repaints the rows IN PLACE (alpha only) — no page rebuild, so the
+        // screen never blinks. The click rail reads the live pref, so a row
+        // flipped open mid-session actually opens.
+        val mtuMethodRows = ArrayList<OrbitSettingsRow>()
         content.addView(createToggleRow(
             Strings.t("Automatic Scan"),
             Strings.t("Scan and apply the best MTU per method before every connect"),
@@ -6259,18 +6261,15 @@ class MainActivity : Activity() {
             toastShort(
                 if (on) Strings.t("Automatic Scan on") else Strings.t("Automatic Scan off")
             )
-            mtuPage?.let { pageHost.removeView(it); mtuPage = null }
-            openMtuScreen()
+            for (row in mtuMethodRows) row.alpha = if (on) 0.42f else 1f
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
 
-        val autoScanOn = MtuAutoScan.enabled(this)
         for (method in MtuConfig.Method.entries) {
             val row = navRow(
                 title = method.title,
                 value = MtuConfig.displayValue(this, method),
-                iconRes = R.drawable.ic_settings,
             ) {
-                if (autoScanOn) {
+                if (MtuAutoScan.enabled(this)) {
                     // Greyed menus must not open the dialog under a dead rail:
                     // say why in one line instead of a silent no-op.
                     toastShort(Strings.t("Automatic Scan is on — turn it off to set MTU manually"))
@@ -6278,10 +6277,8 @@ class MainActivity : Activity() {
                     editMtu(method)
                 }
             }
-            if (autoScanOn) {
-                row.alpha = 0.42f                // the greyed, not-editable look
-                row.isClickable = true           // still clickable — opens the toast
-            }
+            if (MtuAutoScan.enabled(this)) row.alpha = 0.42f  // the greyed, not-editable look
+            mtuMethodRows.add(row)
             content.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         }
 
@@ -8016,6 +8013,19 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(14), dp(16), dp(16))
         }
         accountCard.addView(foxySectionHead("\uD83E\uDD8A " + Strings.t("Foxy Account")))
+
+        // User brief: a one-paragraph sign-up explainer — create the account on
+        // Mozilla's own site with an email + password (NOT the saved Google
+        // account), enter those two here, finish with the emailed code — and
+        // the password is never stored anywhere in this app.
+        accountCard.addView(label(
+            Strings.t(
+                "First create your account on Mozilla's official site: register at accounts.firefox.com with an email and a password — do not sign up with the saved Google account. Then enter that same email and password in the boxes below, and finish with the verification code Mozilla emails you. Your password is never stored anywhere in this app."
+            ),
+            13f, foxyC(0xFFB9B9C7, 0xFF54606A),
+        ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(10)
+        })
 
         val chip = label("ACCOUNT: not signed in", 11f, foxyC(0xFFC7C7D1, 0xFF4E6069), TypefaceStyle.MEDIUM).apply {
             setPadding(dp(14), dp(8), dp(14), dp(8))
