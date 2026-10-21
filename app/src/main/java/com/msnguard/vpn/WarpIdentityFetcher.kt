@@ -41,6 +41,8 @@ object WarpIdentityFetcher {
     // Quantum ECH embedded key — same value CoreConfig embeds for the
     // Freedom/direct API path. One constant here so fetcher env was never
     // derived from the tunnel's map. (CHANGED in isolation: see buildEnv doc.)
+    // buildEnv prefers a DNS-verified fresher blob from EchEndpointRoster
+    // (see its doc) — this constant is the always-works fallback.
     private const val ECH_EMBEDDED =
         "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
 
@@ -122,6 +124,8 @@ object WarpIdentityFetcher {
             Log.w(TAG, "unknown protocol $protocol")
             return false
         }
+        // Arm the ECH fallback roster (async, cache-first — see its doc).
+        EchEndpointRoster.maybeProbe(context)
 
         // Stage A — file quiesce: recover stale baks, move aside targets, log exactly what was moved.
         ConnectionLog.record("Warp Identity: stage A — file quiesce for $protocol")
@@ -680,7 +684,7 @@ object WarpIdentityFetcher {
         out["AETHER_LOG_LEVEL"] = "info"
         // Quantum ECH: embedded key, API-only — same key the main connect uses
         // for Freedom; registration dials api.cloudflareclient.com over it.
-        out["AETHER_API_ECH"] = ECH_EMBEDDED
+        out["AETHER_API_ECH"] = EchEndpointRoster.freshApiEch(context) ?: ECH_EMBEDDED
         // Registration-only: no tunnel/scan, just provision via ECH.
         out["AETHER_REGISTER"] = when (protoForEnv) { "mim" -> "mim"; "masque" -> "masque"; "gool" -> "gool"; else -> "wg" }
         // Consumer WARP only — no Zero Trust carry-over from a previous connect.

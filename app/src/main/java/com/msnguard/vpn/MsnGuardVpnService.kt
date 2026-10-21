@@ -2360,6 +2360,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // resolver itself. Cheap: one field write per start.
         AppLanguage.appContext = applicationContext
         AppContext.set(applicationContext)
+        // Arm the ECH fallback roster: cached results are reused for
+        // MAX_AGE_MS, a probe cycle only refreshes on a daemon thread.
+        EchEndpointRoster.maybeProbe(applicationContext)
         when (intent?.action) {
             ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
                 // A fresh user-initiated connect clears both the "user switched it

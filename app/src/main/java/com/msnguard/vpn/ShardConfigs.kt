@@ -317,6 +317,11 @@ object ShardConfigs {
         val customIp = getCustomCfIp(context)
         val profile = node.toShardProfile().apply {
             if (customIp.isNotEmpty()) server = customIp
+            // ECH lookup pair fallback: only a DNS-verified pair replaces the
+            // subscription value (same outer name preferred) — otherwise
+            // verbatim, so carriers where the original pair still works are
+            // byte-identical to before (see EchEndpointRoster doc).
+            echConfigList = com.msnguard.vpn.EchEndpointRoster.substitutePair(context, echConfigList).takeIf { it.isNotBlank() }
         }
         val out = com.msnguard.vpn.shard.ShardOutboundBuilder.outbound(profile, tag)
         // Apply mux only when requested and protocol is vless (same gate as before)
