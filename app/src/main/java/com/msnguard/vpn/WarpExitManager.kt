@@ -12,7 +12,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Xray sidecar for MASQUE/MIM exit only (Warp Setting).
  * Isolated from SHARD: own port (1826), own process, own config dir.
  * Used only when currentProtocol in {masque,mim} and warpExitIsCustom.
- * Chain: aether --upstream socks5://127.0.0.1:1826 --> xray SOCKS 1826 --> user's VLESS (gRPC/ws/etc) --> exit.
+ * Chain: aether --upstream socks5://127.0.0.1:1826 --> xray SOCKS 1826 --> user's
+ * tunnel (gRPC/ws/etc) --> exit. Accepted link types: vless, vmess, trojan,
+ * shadowsocks (SIP002 + legacy), socks://, socks5://, hysteria2:// — wireguard,
+ * anytls and everything else parse≠null-compatible are rejected up front.
  */
 object WarpExitManager {
     private const val TAG = "WarpExit"
@@ -78,14 +81,14 @@ object WarpExitManager {
         }, "warpexit-stop").start()
     }
 
-    fun start(context: Context, vlessUrl: String): Boolean {
+    fun start(context: Context, exitUrl: String): Boolean {
         stop()
         lastError = ""
-        activeLabel = vlessUrl.take(48)
-        val node = ShardConfigs.parse(vlessUrl).firstOrNull()
+        activeLabel = exitUrl.take(48)
+        val node = parseExitNode(exitUrl)
         if (node == null) {
-            lastError = "could not parse VLESS (unsupported type?)"
-            ConnectionLog.record("$TAG parse failed for ${vlessUrl.take(80)}")
+            lastError = "could not parse config — supported: vless, vmess, trojan, ss, socks, hysteria2 (one link)"
+            ConnectionLog.record("$TAG parse failed for ${exitUrl.take(80)}")
             return false
         }
         val listenHost = "127.0.0.1"
@@ -103,6 +106,20 @@ object WarpExitManager {
         ConnectionLog.record("$TAG port $port never opened")
         stop()
         return false
+    }
+
+    /** One link → one node, bypassing the SHARD subscription pool parser
+     *  (which deliberately skips vmess). Everything the sidecar core really
+     *  renders goes through [com.msnguard.vpn.shard.ShardImport.parseOne];
+     *  vmess gets its own [VmessFmt] (base64-JSON share link). */
+    private fun parseExitNode(raw: String): ShardNode? {
+        val line = raw.trim().lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: return null
+        val profile = (if (line.startsWith("vmess://", ignoreCase = true))
+            VmessFmt.parse(line) else com.msnguard.vpn.shard.ShardImport.parseOne(line)) ?: return null
+        val node = profile.toShardNode()
+        if (node.address.contains("[") || node.address.contains("]")) return null
+        if (node.port !in 1..65535) return null
+        return node
     }
 
     private fun awaitListener(port: Int, timeoutMs: Long): Boolean {

@@ -119,6 +119,40 @@ internal object Hysteria2Fmt : ShardFmtBase() {
     }
 }
 
+/** vmess://base64(JSON) — the classic V2RayN share link. Query-style vmess
+ *  (uuid@host:port?...) is rare and rejected rather than half-parsed. */
+internal object VmessFmt {
+    fun parse(str: String): ShardProfile? = try {
+        val payload = str.trim().removePrefix("vmess://").substringBefore('#')
+        val jsonText = ShardUtils.decode(payload)
+        if (!jsonText.startsWith("{")) return null  // not base64-JSON → unsupported
+        val j = org.json.JSONObject(jsonText)
+        val srv = j.optString("add").trim()
+        val portNum = j.optString("port").trim().toIntOrNull() ?: return null
+        if (srv.isEmpty() || j.optString("id").isBlank()) return null
+        val net = ShardNetwork.fromString(j.optString("net").ifEmpty { "tcp" })
+        val tlsFlag = j.optString("tls").trim().lowercase()
+        ShardProfile.create(ShardType.VMESS).apply {
+            remarks = j.optString("ps").ifEmpty { "none" }
+            server = srv
+            serverPort = portNum.toString()
+            password = j.optString("id")
+            alterId = j.optString("aid").toIntOrNull() ?: 0
+            method = j.optString("scy").ifEmpty { "auto" }
+            network = net
+            host = j.optString("host")
+            path = j.optString("path").ifEmpty { "/" }
+            if (net == ShardNetwork.TCP && j.optString("type") == "http") headerType = "http"
+            if (net == ShardNetwork.GRPC && serviceName.isNullOrBlank())
+                serviceName = j.optString("path").takeIf { it.isNotBlank() }
+            security = if (tlsFlag == "tls") "tls" else ""
+            sni = j.optString("sni").takeIf { it.isNotBlank() }
+            fingerPrint = j.optString("fp").takeIf { it.isNotBlank() }
+            alpn = j.optString("alpn").takeIf { it.isNotBlank() }
+        }
+    } catch (_: Exception) { null }
+}
+
 internal object WireguardFmt {
     fun parse(str: String): ShardProfile? = null // SHARD has no wireguard nodes today — stub
 }

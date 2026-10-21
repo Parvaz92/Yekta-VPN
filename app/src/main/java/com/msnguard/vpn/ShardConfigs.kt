@@ -111,6 +111,11 @@ data class ShardNode(
     val extra: String,
     /** The `#fragment` label, decoded. Diagnostic only — never shown as-is. */
     val label: String,
+    /** Encryption/cipher (shadowsocks method, vmess `scy`, vless `encryption`).
+     *  "" means unspecified; the outbound builder falls back per protocol. */
+    val method: String = "",
+    /** vmess `aid`. 0 for every other protocol. */
+    val alterId: Int = 0,
 ) {
     /**
      * Stable identity, used as the health-memory key and for dedupe.

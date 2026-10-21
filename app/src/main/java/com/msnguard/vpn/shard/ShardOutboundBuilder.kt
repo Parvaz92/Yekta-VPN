@@ -22,6 +22,19 @@ internal object ShardOutboundBuilder {
                 }
                 settings.put("vnext", JSONArray().put(vnext))
             }
+            ShardType.VMESS -> {
+                val user = JSONObject().apply {
+                    put("id", profile.password.orEmpty())
+                    put("alterId", profile.alterId ?: 0)
+                    put("security", profile.method ?: "auto")
+                }
+                val vnext = JSONObject().apply {
+                    put("address", serverAddress(profile))
+                    put("port", profile.serverPort?.toIntOrNull() ?: 443)
+                    put("users", JSONArray().put(user))
+                }
+                settings.put("vnext", JSONArray().put(vnext))
+            }
             ShardType.TROJAN -> {
                 val srv = JSONObject().apply {
                     put("address", serverAddress(profile)); put("port", profile.serverPort?.toIntOrNull() ?: 443)
@@ -72,7 +85,8 @@ internal object ShardOutboundBuilder {
     }
 
     private fun protoName(p: ShardProfile): String = when (p.configType) {
-        ShardType.VLESS -> "vless"; ShardType.TROJAN -> "trojan"; ShardType.SHADOWSOCKS -> "shadowsocks"
+        ShardType.VLESS -> "vless"; ShardType.VMESS -> "vmess"; ShardType.TROJAN -> "trojan"
+        ShardType.SHADOWSOCKS -> "shadowsocks"
         ShardType.SOCKS -> "socks"; ShardType.HYSTERIA2 -> "hysteria"; else -> p.configType.name.lowercase()
     }
 
@@ -125,6 +139,14 @@ internal object ShardOutboundBuilder {
                     if (!p.xhttpExtra.isNullOrBlank()) try { put("extra", JSONObject(p.xhttpExtra)) } catch (_: Exception) {}
                 }
                 stream.put("xhttpSettings", x); sni = p.host
+            }
+            ShardNetwork.H2 -> {
+                val hosts = p.host.orEmpty().split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                stream.put("http2Settings", JSONObject().apply {
+                    put("host", JSONArray().apply { if (hosts.isEmpty()) put("") else hosts.forEach { put(it) } })
+                    put("path", p.path ?: "/")
+                })
+                sni = hosts.firstOrNull()
             }
             ShardNetwork.GRPC -> {
                 stream.put("grpcSettings", JSONObject().apply {

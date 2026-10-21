@@ -6375,7 +6375,7 @@ class MainActivity : Activity() {
         lateinit var exitDirectBtn: TextView
         lateinit var exitNodeBtn: TextView
         val exitCollapse = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = roundedBackground(SURFACE, 14, DIVIDER); visibility = View.GONE }
-        val exitField = settingsField(value = "", hintText = "vless://uuid@host:port?security=reality#name", multiline = true).apply { minLines = 2; maxLines = 4 }
+        val exitField = settingsField(value = "", hintText = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link", multiline = true).apply { minLines = 2; maxLines = 4 }
         val exitHint = label(Strings.t("Per transport"), 10f, MUTED)
         var applyBtn: TextView? = null
         var currentExitTransport: CoreConfig.WarpTransport = warpTransportOfRail(railSelected)
@@ -6387,7 +6387,7 @@ class MainActivity : Activity() {
             val isCustom = mode == CoreConfig.WARP_EXIT_MODE_CUSTOM
             val raw = CoreConfig.warpExitCustom(this@MainActivity, t)
             exitField.setText(raw)
-            exitField.hint = "vless://uuid@host:port?security=reality#name"
+            exitField.hint = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link"
             if (isCustom) {
                 // Same selected-state palette as the Endpoint Scanner chips below
                 // (selectedSurface fill + violet border + violet text) — user
@@ -8234,10 +8234,13 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 val selected = com.msnguard.vpn.foxy.FoxySettings.selectedCountryCode(this)
+                // display-only alphabetical order — the saved value is the country
+                // CODE, never the index, so connect behavior is untouched
+                val sorted = countries.sortedBy { it.name.lowercase() }
                 val names = arrayOf("\u2699\uFE0F " + Strings.t("Automatic (recommended)")) +
-                    countries.map { foxyFlag(it.code) + "  " + it.name }.toTypedArray()
+                    sorted.map { foxyFlag(it.code) + "  " + it.name }.toTypedArray()
                 val checked = if (selected == null) 0 else
-                    1 + countries.indexOfFirst { it.code.equals(selected, true) }.coerceAtLeast(-1)
+                    1 + sorted.indexOfFirst { it.code.equals(selected, true) }.coerceAtLeast(-1)
                 AlertDialog.Builder(this)
                     .setTitle(Strings.t("Server"))
                     .setSingleChoiceItems(names, checked) { dialog, which ->
@@ -8245,14 +8248,14 @@ class MainActivity : Activity() {
                             com.msnguard.vpn.foxy.FoxySettings.saveSelectedCountryCode(this, null)
                             ConnectionLog.record("Foxy: location set to Automatic")
                         } else {
-                            val country = countries[which - 1]
+                            val country = sorted[which - 1]
                             com.msnguard.vpn.foxy.FoxySettings.saveSelectedCountryCode(this, country.code)
                             ConnectionLog.record("Foxy: location set to " + country.name + " (" + country.code + ")")
                         }
                         (serverRow.findViewById<TextView>(android.R.id.text2) // not used; kept null-safe
                             ?: (serverRow.tag as? TextView)).apply {
                             this?.text = if (which == 0) Strings.t("Automatic (recommended)")
-                                else foxyFlag(countries[which - 1].code) + "  " + countries[which - 1].name
+                                else foxyFlag(sorted[which - 1].code) + "  " + sorted[which - 1].name
                         }
                         dialog.dismiss()
                     }
