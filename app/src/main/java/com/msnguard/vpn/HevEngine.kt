@@ -43,7 +43,17 @@ object HevEngine : TunEngine {
     override val isRunning: Boolean get() = try { hev.htproxy.TProxyService.TProxyIsRunning() } catch (_: Throwable) { false }
 
     override fun start(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean): Boolean {
-        if (isRunning) return true
+        if (isRunning) {
+            // The native Hev thread is process-wide: if FOXY's own engine owns
+            // it right now, we must NOT pretend we started it — our stop()
+            // would then skip the native teardown through the lease below
+            // while Foxy's own teardown is what stops it.
+            if (HevNativeLease.isOwnedBy(HevNativeLease.FOXY)) {
+                ConnectionLog.record("Hev: the native Hev thread belongs to FOXY — refusing to take it over")
+                return false
+            }
+            return true
+        }
         // Prefer AppContext; TunEngineManager already has a Context but the
         // interface does not carry it — keep this indirection so HevEngine
         // stays a pure TunEngine.
@@ -111,6 +121,9 @@ object HevEngine : TunEngine {
         return try {
             val ok = hev.htproxy.TProxyService.TProxyStartService(cfgFile.absolutePath, rawFd)
             if (ok) {
+                // We now own the process-wide native thread; the lease tells
+                // the FOXY engine (and us in stop()) who may stop it.
+                HevNativeLease.claim(HevNativeLease.SHARED)
                 ConnectionLog.record("Hev started → SOCKS 127.0.0.1:$socksPort mtu=$mtu")
             } else {
                 ConnectionLog.record("Hev start returned false (check logcat hev)")
@@ -129,7 +142,11 @@ object HevEngine : TunEngine {
 
     override fun stop() {
         try {
-            if (isRunning) {
+            // Only the owner may stop the native thread. When FOXY's own engine
+            // owns it, leave it up — Foxy's teardown stops it and closes its
+            // fd. This guard is what makes the shared engine's teardown unable
+            // to bring the FOXY path down.
+            if (isRunning && !HevNativeLease.isOwnedBy(HevNativeLease.FOXY)) {
                 hev.htproxy.TProxyService.TProxyStopService()
                 ConnectionLog.record("Hev stopped")
             }
@@ -144,6 +161,8 @@ object HevEngine : TunEngine {
             // fd is the last reference to the TUN — closing it is what takes
             // the interface, and the status-bar key, down.
             closeOwnedFd()
+            // Release ownership unless someone else claimed the thread meanwhile.
+            HevNativeLease.release(HevNativeLease.SHARED)
         }
     }
 }

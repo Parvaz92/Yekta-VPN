@@ -88,7 +88,11 @@ class ServerListClient(
             val record = records.getJSONObject(i)
             val countryJson = record.optJSONObject("country") ?: record
             val country = parseCountry(countryJson)
-            val isExcluded = EXCLUDED_COUNTRY_NAMES.any { it.equals(country.name, ignoreCase = true) }
+            // "Recomended Location" ( Mozilla's own REC pseudo-country, their
+            //  spelling ) duplicates our Automatic entry in the chooser — drop it
+            //  from the user-facing list; the connect path never selects REC.
+            val isExcluded = EXCLUDED_COUNTRY_NAMES.any { it.equals(country.name, ignoreCase = true) } ||
+                country.code.equals(RECOMMENDED_COUNTRY_CODE, ignoreCase = true)
             if (country.code.isNotBlank() && country.cities.isNotEmpty() && !isExcluded) {
                 countries.add(country)
             }

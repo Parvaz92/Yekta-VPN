@@ -31,18 +31,29 @@ internal fun ShardProfile.toShardNode(): ShardNode = ShardNode(
     realityMldsa65Verify = mldsa65Verify.orEmpty(),
     extra = xhttpExtra.orEmpty(),
     label = remarks,
+    method = method.orEmpty(),
+    alterId = alterId ?: 0,
 )
 
 internal fun ShardNode.toShardProfile(): ShardProfile {
     val ct = when (protocol) {
         "vless" -> ShardType.VLESS; "trojan" -> ShardType.TROJAN; "shadowsocks" -> ShardType.SHADOWSOCKS
-        "socks" -> ShardType.SOCKS; "hysteria2","hysteria" -> ShardType.HYSTERIA2; else -> ShardType.VLESS
+        "socks" -> ShardType.SOCKS; "hysteria2","hysteria" -> ShardType.HYSTERIA2
+        "vmess" -> ShardType.VMESS; else -> ShardType.VLESS
     }
     return ShardProfile.create(ct).apply {
         server = this@toShardProfile.address
         serverPort = this@toShardProfile.port.toString()
         password = this@toShardProfile.credential
-        method = if (ct == ShardType.SHADOWSOCKS) this@toShardProfile.credential else "none"
+        // shadowsocks round-trip used to take the cipher from the CREDENTIAL
+        // (method==password — an xray "unknown method" error): the node's own
+        // method field now carries it end to end.
+        method = when (ct) {
+            ShardType.SHADOWSOCKS -> this@toShardProfile.method.ifBlank { this@toShardProfile.credential }
+            ShardType.VMESS -> this@toShardProfile.method.ifBlank { "auto" }
+            else -> "none"
+        }
+        alterId = this@toShardProfile.alterId
         network = this@toShardProfile.network
         security = this@toShardProfile.security
         path = this@toShardProfile.path

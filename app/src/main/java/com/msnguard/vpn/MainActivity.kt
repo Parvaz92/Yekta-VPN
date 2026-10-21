@@ -6375,7 +6375,7 @@ class MainActivity : Activity() {
         lateinit var exitDirectBtn: TextView
         lateinit var exitNodeBtn: TextView
         val exitCollapse = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = roundedBackground(SURFACE, 14, DIVIDER); visibility = View.GONE }
-        val exitField = settingsField(value = "", hintText = "vless://uuid@host:port?security=reality#name", multiline = true).apply { minLines = 2; maxLines = 4 }
+        val exitField = settingsField(value = "", hintText = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link", multiline = true).apply { minLines = 2; maxLines = 4 }
         val exitHint = label(Strings.t("Per transport"), 10f, MUTED)
         var applyBtn: TextView? = null
         var currentExitTransport: CoreConfig.WarpTransport = warpTransportOfRail(railSelected)
@@ -6387,7 +6387,7 @@ class MainActivity : Activity() {
             val isCustom = mode == CoreConfig.WARP_EXIT_MODE_CUSTOM
             val raw = CoreConfig.warpExitCustom(this@MainActivity, t)
             exitField.setText(raw)
-            exitField.hint = "vless://uuid@host:port?security=reality#name"
+            exitField.hint = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link"
             if (isCustom) {
                 // Same selected-state palette as the Endpoint Scanner chips below
                 // (selectedSurface fill + violet border + violet text) — user
@@ -7888,38 +7888,29 @@ class MainActivity : Activity() {
 
     /** The three-dot header used on section cards of the mockup. */
     private fun foxySectionHead(title: String): LinearLayout {
-        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val dot = { color: Int ->
-            View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(5) }
-                background = roundedBackground(color, 3, color)
-            }
-        }
-        bar.addView(dot(0xFF27C93F.toInt()))
-        bar.addView(dot(0xFFFF5F56.toInt()))
-        bar.addView(dot(0xFFFFBD2E.toInt()))
-        bar.addView(label("\u25B8 " + title.uppercase(), 12f, palette.violet, TypefaceStyle.MEDIUM).apply {
-            // mock typography: wide tracking, uppercase title (sample spec)
-            letterSpacing = 0.14f
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(6) }
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        bar.addView(label(title.uppercase(), 11.5f, MUTED, TypefaceStyle.MEDIUM).apply {
+            // Violet Ink / Ice Light head: small tracked uppercase, nothing else
+            letterSpacing = 0.11f
+            setPadding(dp(2), 0, 0, 0)
         })
         return bar
     }
 
-    /** Mock-style info row: label left, value right — no chevron, inert. */
-    private fun foxyInfoRow(title: String, value: String, valueColor: Int): LinearLayout {
+    /** Connection info row: a framed neon card — fill = surface, hairline stroke
+     *  in the row's own neon accent (server=violet, status=blue, quota=amber). */
+    private fun foxyInfoRow(title: String, value: String, valueColor: Int, accent: Int): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 14, stroke = DIVIDER)
+            minimumHeight = dp(52)
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 16, stroke = accent)
         }
-        row.addView(label(title, 14f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
+        row.addView(label(title, 13f, MUTED), LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
         ))
-        val valueLabel = label(value, 14f, valueColor)
+        val valueLabel = label(value, 13.5f, valueColor)
         row.tag = valueLabel  // fetchFoxyQuota updates this in place
         row.addView(valueLabel, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -7927,20 +7918,40 @@ class MainActivity : Activity() {
         return row
     }
 
-    /** Theme+neon button whose listener is ALWAYS attached — the click itself
-     *  guards readiness, so a "disabled" look can never mute a tap. */
+    /** A country code → its regional-indicator flag emoji, "" if not a code. */
+    private fun foxyFlag(code: String): String {
+        val up = code.trim().uppercase()
+        if (up.length != 2 || up[0].code !in 'A'.code..'Z'.code || up[1].code !in 'A'.code..'Z'.code) return ""
+        return String(Character.toChars(0x1F1E6 + (up[0].code - 'A'.code))) +
+            String(Character.toChars(0x1F1E6 + (up[1].code - 'A'.code)))
+    }
+
+    /** Violet Ink (dark) / Ice Light (light) ramp — restyles ONLY the Foxy page;
+     *  every other page keeps its palette untouched. */
+    private fun foxyC(dark: Long, light: Long): Int =
+        if (AppAppearance.isNight(this)) dark.toInt() else light.toInt()
+
+    /** Fields are recessed steps off the card: SURFACE on the dark card,
+     *  surfaceVariant on the white one. */
+    private val foxyFieldFill: Int
+        get() = foxyC(SURFACE.toLong(), SURFACE_VARIANT.toLong())
+
+    private fun foxyViolet(): Int =
+        if (AppAppearance.isNight(this)) palette.violet else palette.violetText
+
+    /** Violet-filled action button whose listener is ALWAYS attached — the click
+     *  itself guards readiness, so an unready look can never mute a tap. */
     private fun foxyActionButton(title: String, ready: Boolean): TextView =
         TextView(this).apply {
             text = title
-            textSize = 14.5f
+            textSize = 13.5f
             gravity = Gravity.CENTER
-            setTextColor(if (ready) INK else 0xFF9494A0.toInt())
-            // mock geometry: ~43dp tall, radius 10, dark fill + faint gray border
-            background = roundedBackground(SURFACE, 10, DIVIDER)
-            alpha = if (ready) 1f else 0.55f
+            letterSpacing = 0.02f
+            textSize = 12.5f
             isClickable = true
             isFocusable = true
-            setPadding(dp(14), 0, dp(14), 0)
+            setPadding(dp(12), 0, dp(12), 0)
+            styleFoxyButton(this, ready)
         }
 
     /** The dedicated page — a faithful build of the approved mockup. */
@@ -7955,7 +7966,7 @@ class MainActivity : Activity() {
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeFoxySettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label(Strings.t("Foxy Account & Setting"), 21f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
+            addView(label("\uD83E\uDD8A  " + Strings.t("Foxy Account & Setting"), 21f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
         })
 
         val pending = com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this)
@@ -7966,15 +7977,15 @@ class MainActivity : Activity() {
             background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
             setPadding(dp(16), dp(14), dp(16), dp(16))
         }
-        accountCard.addView(foxySectionHead(Strings.t("Foxy Account")))
+        accountCard.addView(foxySectionHead("\uD83E\uDD8A " + Strings.t("Foxy Account")))
 
-        val chip = label("ACCOUNT: not signed in", 11f, 0xFFC7C7D1.toInt(), TypefaceStyle.MEDIUM).apply {
+        val chip = label("ACCOUNT: not signed in", 11f, foxyC(0xFFC7C7D1, 0xFF4E6069), TypefaceStyle.MEDIUM).apply {
             setPadding(dp(14), dp(8), dp(14), dp(8))
             letterSpacing = 0.10f
-            background = roundedBackground(Color.TRANSPARENT, 14, 0xFF3A3A46.toInt())
+            background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong()))
         }
         when (pending) {
-            "pending" -> { chip.text = "WAITING: check your email for the code"; chip.setTextColor(palette.violet); chip.background = roundedBackground(Color.TRANSPARENT, 14, 0xFF3A3A46.toInt()) }
+            "pending" -> { chip.text = "WAITING: check your email for the code"; chip.setTextColor(foxyViolet()); chip.background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong())) }
             "active" -> {
                 chip.text = "ACCOUNT: signed in"
                 chip.setTextColor(0xFF6B5BD6.toInt())
@@ -7989,23 +8000,27 @@ class MainActivity : Activity() {
         val email = settingsField("", "").apply {
             setSingleLine(true)
             hint = "you@mozilla.com"
-            background = roundedBackground(SURFACE, 10, DIVIDER)
+            // user brief (05:41): double the height of the email/password/code boxes
+            minimumHeight = dp(44)
+            background = roundedBackground(foxyFieldFill, 10, DIVIDER)
             setOnFocusChangeListener { v, focused ->
                 v.background = roundedBackground(
-                    SURFACE, 10, if (focused) palette.violet else DIVIDER,
+                    foxyFieldFill, 10, if (focused) 0xFF6B5BD6.toInt() else DIVIDER,
                 )
             }
         }
         val password = settingsField("", "", secure = true).apply {
             setSingleLine(true)
             hint = "Firefox password"
-            background = roundedBackground(SURFACE, 10, DIVIDER)
+            minimumHeight = dp(44)
+            background = roundedBackground(foxyFieldFill, 10, DIVIDER)
         }  // note 3: typed as •
         val code = settingsField("", "").apply {
             isEnabled = false
             alpha = 0.4f
             setSingleLine(true)
-            background = roundedBackground(SURFACE, 10, DIVIDER)
+            minimumHeight = dp(44)
+            background = roundedBackground(foxyFieldFill, 10, DIVIDER)
         }
 
         // Rediscover the account the user already signed in with (note 4).
@@ -8063,39 +8078,43 @@ class MainActivity : Activity() {
             }
             "active" -> {
                 sendCodeBtn.text = Strings.t("Sign Out")
-                styleSignIn(false)
+                styleFoxyButton(sendCodeBtn, true, 2)
                 signInBtn.text = Strings.t("Signed In ✓")
+                styleFoxyButton(signInBtn, false, 3)
             }
         }
 
-        // Initial (or post sign-out) look:
-        refreshSendCodeEnabled()
-        if (pending != "active") styleSignIn(false)
+        // Initial (or post sign-out) look — the active branch painted its own
+        // plates above, so the generic refresh must not repaint them.
+        if (pending != "active") {
+            refreshSendCodeEnabled()
+            styleSignIn(false)
+        }
 
-        accountCard.addView(label("Email", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDCE7  Email", 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
         accountCard.addView(email)
 
-        accountCard.addView(label("Password", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDD12  Password", 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
         accountCard.addView(password)
 
         accountCard.addView(sendCodeBtn, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
         ).apply { topMargin = dp(14) })
 
-        accountCard.addView(label("Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDD22  Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(14) })
         accountCard.addView(code)
 
         accountCard.addView(signInBtn, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
         ).apply { topMargin = dp(12) })
 
         val hint = label("", 11f, MUTED).apply { setPadding(dp(2), dp(12), dp(2), 0) }
@@ -8111,7 +8130,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { rightMargin = dp(7) }
             background = roundedBackground(0xFF22C55E.toInt(), 4, 0xFF22C55E.toInt())
         })
-        fastlyLine.addView(label(Strings.t("Traffic exits via the Fastly edge — HTTP/2 CONNECT"), 11f, 0xFF9A9AA6.toInt()))
+        fastlyLine.addView(label(Strings.t("Traffic exits via the Fastly edge — HTTP/2 CONNECT"), 11f, foxyC(0xFF9A9AA6, 0xFF5B6D75)))
         accountCard.addView(fastlyLine)
 
         content.addView(accountCard, LinearLayout.LayoutParams(
@@ -8124,16 +8143,17 @@ class MainActivity : Activity() {
             background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
             setPadding(dp(16), dp(14), dp(16), dp(14))
         }
-        connCard.addView(foxySectionHead(Strings.t("Connection")))
+        connCard.addView(foxySectionHead("\u26A1 " + Strings.t("Connection")))
         // Server row: the real location picker (the KNOWN GAP from the alpha
         // mockup — a decorative row shipped instead of a working chooser). It
         // is only usable once at least one country is cached/fetchable; until
         // then it reads "Automatic (recommended)" and the tap reports why.
         val serverRow = foxyInfoRow(Strings.t("Server"),
             com.msnguard.vpn.foxy.FoxySettings.selectedCountryCode(this)?.let { code ->
-                foxyCachedCountries().firstOrNull { it.code.equals(code, true) }?.name ?: code
+                foxyCachedCountries().firstOrNull { it.code.equals(code, true) }
+                    ?.let { c -> foxyFlag(c.code) + "  " + c.name } ?: code
             } ?: Strings.t("Automatic (recommended)"),
-            INK)
+            INK, palette.neonViolet)
         serverRow.isClickable = true
         serverRow.setOnClickListener { onFoxyServerRowClicked(serverRow) }
         connCard.addView(serverRow, LinearLayout.LayoutParams(
@@ -8144,12 +8164,15 @@ class MainActivity : Activity() {
         val foxyStatus = TunnelStatus.isActive()
         val statusRow = foxyInfoRow(Strings.t("Status"),
             if (foxyStatus) Strings.t("Connected") else Strings.t("Disconnected"),
-            if (foxyStatus) 0xFF27C93F.toInt() else MUTED)
+            if (foxyStatus) foxyC(0xFF27C93F, 0xFF0A7340) else MUTED,
+            palette.neonBlue)
         connCard.addView(statusRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
-        quotaRow = foxyInfoRow(Strings.t("Monthly quota"), Strings.t("Shows after sign-in"), MUTED)
-        connCard.addView(quotaRow)
+        quotaRow = foxyInfoRow(Strings.t("Monthly quota"), Strings.t("Shows after sign-in"), MUTED, palette.amber)
+        connCard.addView(quotaRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         content.addView(connCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(14) })
@@ -8174,11 +8197,13 @@ class MainActivity : Activity() {
         com.msnguard.vpn.foxy.FoxyTunnel.tokenStore(this).savedEmail = null
         chip.text = "ACCOUNT: not signed in"
         chip.setTextColor(MUTED)
-        chip.background = roundedBackground(SURFACE, 11, DIVIDER)
+        chip.background = roundedBackground(Color.TRANSPARENT, 11, foxyC(0xFF3A3A46, palette.divider.toLong()))
         codeField.isEnabled = false; codeField.alpha = 0.4f
         codeField.text.clear(); codeField.hint = "Verify after Send Code"
         sendBtn.text = Strings.t("Send Code")
+        styleFoxyButton(sendBtn, false)
         signInBtnLocal.text = Strings.t("Sign In")
+        styleFoxyButton(signInBtnLocal, false)
         toastShort(Strings.t("Foxy account signed out"))
     }
 
@@ -8209,10 +8234,13 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 val selected = com.msnguard.vpn.foxy.FoxySettings.selectedCountryCode(this)
-                val names = arrayOf(Strings.t("Automatic (recommended)")) +
-                    countries.map { it.name }.toTypedArray()
+                // display-only alphabetical order — the saved value is the country
+                // CODE, never the index, so connect behavior is untouched
+                val sorted = countries.sortedBy { it.name.lowercase() }
+                val names = arrayOf("\u2699\uFE0F " + Strings.t("Automatic (recommended)")) +
+                    sorted.map { foxyFlag(it.code) + "  " + it.name }.toTypedArray()
                 val checked = if (selected == null) 0 else
-                    1 + countries.indexOfFirst { it.code.equals(selected, true) }.coerceAtLeast(-1)
+                    1 + sorted.indexOfFirst { it.code.equals(selected, true) }.coerceAtLeast(-1)
                 AlertDialog.Builder(this)
                     .setTitle(Strings.t("Server"))
                     .setSingleChoiceItems(names, checked) { dialog, which ->
@@ -8220,13 +8248,14 @@ class MainActivity : Activity() {
                             com.msnguard.vpn.foxy.FoxySettings.saveSelectedCountryCode(this, null)
                             ConnectionLog.record("Foxy: location set to Automatic")
                         } else {
-                            val country = countries[which - 1]
+                            val country = sorted[which - 1]
                             com.msnguard.vpn.foxy.FoxySettings.saveSelectedCountryCode(this, country.code)
                             ConnectionLog.record("Foxy: location set to " + country.name + " (" + country.code + ")")
                         }
                         (serverRow.findViewById<TextView>(android.R.id.text2) // not used; kept null-safe
                             ?: (serverRow.tag as? TextView)).apply {
-                            this?.text = if (which == 0) Strings.t("Automatic (recommended)") else countries[which - 1].name
+                            this?.text = if (which == 0) Strings.t("Automatic (recommended)")
+                                else foxyFlag(sorted[which - 1].code) + "  " + sorted[which - 1].name
                         }
                         dialog.dismiss()
                     }
@@ -8249,8 +8278,7 @@ class MainActivity : Activity() {
         val email = emailField.text.toString().trim()
         val password = passwordField.text.toString()
         sendBtn.text = Strings.t("Sending…")
-        sendBtn.setTextColor(MUTED)
-        sendBtn.alpha = 0.55f
+        styleFoxyButton(sendBtn, false)
         chip.text = "SIGNING IN…"
         chip.setTextColor(palette.violet)
         chip.background = roundedBackground(SURFACE, 11, DIVIDER)
@@ -8275,7 +8303,7 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (error != null) {
                     chip.text = "SIGN-IN FAILED: " + (error ?: "unknown")
-                    chip.setTextColor(0xFFFF5F56.toInt())
+                    chip.setTextColor(foxyC(0xFFFF5F56, 0xFFE04257))
                     sendBtn.text = Strings.t("Send Code")
                     styleFoxyButton(
                         sendBtn,
@@ -8285,7 +8313,7 @@ class MainActivity : Activity() {
                 }
                 if (needsCode) {
                     chip.text = "CODE SENT — CHECK YOUR EMAIL"
-                    chip.setTextColor(palette.violet)
+                    chip.setTextColor(foxyViolet())
                     codeField.isEnabled = true
                     codeField.alpha = 1f
                     codeField.hint = "Paste the code from your email"
@@ -8301,7 +8329,7 @@ class MainActivity : Activity() {
                     chip.background = roundedBackground(0xFFE7E2FF.toInt(), 11, 0xFFC9BFFF.toInt())
                     sendBtn.text = Strings.t("Sign Out")
                     signInBtn.text = Strings.t("Signed In ✓")
-                    styleFoxyButton(signInBtn, false)
+                    styleFoxyButton(signInBtn, false, 3)
                     fetchFoxyQuota(quotaRow)
                 }
             }
@@ -8317,8 +8345,7 @@ class MainActivity : Activity() {
     ) {
         val code = codeField.text.toString().trim()
         signInBtn.text = Strings.t("Verifying…")
-        signInBtn.setTextColor(MUTED)
-        signInBtn.alpha = 0.55f
+        styleFoxyButton(signInBtn, false)
         chip.text = "VERIFYING…"
         chip.setTextColor(palette.violet)
         Thread {
@@ -8334,7 +8361,7 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (error != null) {
                     chip.text = "CODE FAILED: " + (error ?: "unknown")
-                    chip.setTextColor(0xFFFF5F56.toInt())
+                    chip.setTextColor(foxyC(0xFFFF5F56, 0xFFE04257))
                     signInBtn.text = Strings.t("Sign In")
                     styleFoxyButton(signInBtn, true)
                     return@runOnUiThread
@@ -8347,7 +8374,7 @@ class MainActivity : Activity() {
                 codeField.hint = "Signed in"
                 codeField.alpha = 0.4f
                 signInBtn.text = Strings.t("Signed In ✓")
-                styleFoxyButton(signInBtn, false)
+                styleFoxyButton(signInBtn, false, 3)
                 toastShort(Strings.t("Foxy account verified"))
                 ConnectionLog.record("Foxy: verified — tokens minted")
                 // keep the email on disk for the next visit (note 4) — password never stored
@@ -8358,11 +8385,29 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** One place for the theme+neon look, shared by every Foxy button. */
-    private fun styleFoxyButton(btn: TextView, ready: Boolean) {
-        btn.setTextColor(if (ready) INK else 0xFF9494A0.toInt())
-        btn.background = roundedBackground(SURFACE, 10, if (ready) 0xFF27C93F.toInt() else DIVIDER)
-        btn.alpha = if (ready) 1f else 0.55f
+    /** One place for the Violet Ink / Ice Light button, shared by every Foxy button.
+     *  Tones: 0 idle (recessed, muted) · 1 violet ready · 2 black Sign Out ·
+     *  3 green Signed In — a signed-in state must never look switched off. */
+    private fun styleFoxyButton(btn: TextView, ready: Boolean, tone: Int = if (ready) 1 else 0) {
+        btn.alpha = 1f
+        when (tone) {
+            1 -> {
+                btn.setTextColor(0xFFFFFFFF.toInt())
+                btn.background = roundedBackground(0xFF6B5BD6.toInt(), 10, 0xFF6B5BD6.toInt())
+            }
+            2 -> { // solid black plate in both palettes, clearly alive
+                btn.setTextColor(foxyC(0xFFEAF6F3, 0xFFFFFFFF))
+                btn.background = roundedBackground(foxyC(0xFF14161E, 0xFF111A1F), 10, foxyC(0xFF3A3A46, 0xFF2A3340))
+            }
+            3 -> { // green plate, dark label on both greens for contrast
+                btn.setTextColor(foxyC(0xFF04210B, 0xFF04210B))
+                btn.background = roundedBackground(foxyC(0xFF27C93F, 0xFF17A05E), 10, foxyC(0xFF27C93F, 0xFF17A05E))
+            }
+            else -> {
+                btn.setTextColor(foxyC(0xFF6D6D78, 0xFF9A9EAE))
+                btn.background = roundedBackground(foxyFieldFill, 10, DIVIDER)
+            }
+        }
     }
 
     private fun fetchFoxyQuota(row: LinearLayout?) {

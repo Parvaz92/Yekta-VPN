@@ -43,6 +43,7 @@ data class ShardProfile(
     var portHoppingInterval: String? = null,
     var bandwidthDown: String? = null,
     var bandwidthUp: String? = null,
+    var alterId: Int? = null,       // vmess only
 ) {
     companion object {
         fun create(type: ShardType) = ShardProfile(configType = type)
@@ -66,11 +67,13 @@ object ShardNetwork {
     const val XHTTP = "xhttp"
     const val GRPC = "grpc"
     const val HYSTERIA = "hysteria"
+    const val H2 = "h2"
     fun fromString(t: String?): String = when (t?.lowercase(Locale.US)) {
         "ws" -> WS
         "httpupgrade" -> HTTP_UPGRADE
         "xhttp" -> XHTTP
         "grpc" -> GRPC
+        "h2", "http2" -> H2
         "hysteria" -> HYSTERIA
         "tcp" -> TCP
         else -> t?.lowercase(Locale.US) ?: TCP

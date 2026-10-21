@@ -563,7 +563,11 @@ object CoreConfig {
                     // WireGuard/WoW there is no H2, but same API_ECH path
                     // is the filtered-carrier fix (FCAE 2.3.2 -> embed).
                     useEch = true
-                    echValue = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+                    // ECHEndpointRoster hands the freshest cloudflare-ech.com
+                    // blob (DNS-verified against the fallback resolver list);
+                    // null → the embedded constant below, unchanged behavior.
+                    echValue = EchEndpointRoster.freshApiEch(context)
+                        ?: "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
                     echIsEmbedded = true
                     useApiEch = true
                 }

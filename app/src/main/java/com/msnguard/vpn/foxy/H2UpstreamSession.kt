@@ -634,38 +634,19 @@ class H2UpstreamSession(
             }
             handedOff = true
 
-            // Wrap the data plane with MSN's traffic counters (Warp Setting of the
-            // FOXY method only; totals expose through FoxyTunnel.txBytes/rxBytes).
-            val rawIn = streamInput
-            val rawOut = NettyStreamOutput(streamChannel)
+            // Byte counting lives inside NettyStreamInput/NettyStreamOutput (below).
+            // The counters used to ride java.io.Filter{Input,Output}Stream
+            // wrappers here, and FilterOutputStream.write(byte[], off, len)
+            // is BYTE-BY-BYTE: our override write(Int) → write(ByteArray) →
+            // write(ByteArray, off, len) → super.write → write(Int) again —
+            // infinite recursion, StackOverflowError on the FIRST client byte
+            // relayed. That is exactly the alpha38 death "pb: <hash> —
+            // connection closed". The reference project returns the raw
+            // streams with no wrappers; these counters are MSN's traffic-tile
+            // counters only, so they move into the netty stream classes.
             return TunneledStream(
-                input = object : java.io.FilterInputStream(rawIn) {
-                    override fun read(): Int {
-                        val r = super.read()
-                        if (r >= 0) FoxyTunnel.rxBytes += 1
-                        return r
-                    }
-                    override fun read(b: ByteArray, off: Int, len: Int): Int {
-                        val n = super.read(b, off, len)
-                        if (n > 0) FoxyTunnel.rxBytes += n
-                        return n
-                    }
-                    override fun available(): Int = rawIn.available()
-                    override fun close() = rawIn.close()
-                },
-                output = object : java.io.FilterOutputStream(rawOut) {
-                    private val single = ByteArray(1)
-                    override fun write(b: Int) {
-                        single[0] = b.toByte()
-                        write(single)
-                    }
-                    override fun write(b: ByteArray, off: Int, len: Int) {
-                        super.write(b, off, len)
-                        FoxyTunnel.txBytes += len
-                    }
-                    override fun flush() = rawOut.flush()
-                    override fun close() = rawOut.close()
-                },
+                input = streamInput,
+                output = NettyStreamOutput(streamChannel),
                 close = { streamChannel.close() },
             )
         } finally {
@@ -716,6 +697,11 @@ class H2UpstreamSession(
 
                 throw IOException("Failed writing to the upstream stream", future.cause())
             }
+
+            // Traffic-tile counter. Counted once per bulk write here — NOT on a
+            // FilterOutputStream wrapper (see openStream(): that recursion
+            // died with a StackOverflowError on the first relayed byte).
+            FoxyTunnel.txBytes += len
         }
 
         override fun close() {
@@ -763,6 +749,13 @@ class H2UpstreamSession(
         }
 
         override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val n = readInner(b, off, len)
+            if (n > 0) FoxyTunnel.rxBytes += n
+            return n
+        }
+
+        /** Actual pump; [read] counts exactly one increment per byte (no FilterInputStream wrapper — see openStream()). */
+        private fun readInner(b: ByteArray, off: Int, len: Int): Int {
             if (len == 0) return 0
             if (finished && current == null) return -1
             var totalRead = 0
