@@ -8097,7 +8097,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(12) })
         accountCard.addView(email)
 
-        accountCard.addView(label("\U0001F512  Password", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDD12  Password", 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
