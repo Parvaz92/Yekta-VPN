@@ -677,8 +677,7 @@ class MainActivity : Activity() {
         // than Latin at the same sp, so the same 38dp reads looser; 34 + the tighter
         // lineHeightMult reclaims two rows' worth of height for the dial. English
         // keeps the v1.8.5 38dp exactly.
-        transportRailHeight = dp(8) + transportRail.rowCount *
-            (if (localizedTypography) dp(34) else dp(38))
+        transportRailHeight = dp(108)
         transportRail.select(Protocol.entries.indexOf(selectedProtocol), animate = false)
         renderChainCard()
         // The dead space under the action bar looked like a rendering bug. It is
@@ -1432,6 +1431,9 @@ class MainActivity : Activity() {
 
     /** Status LED colour + glow for the header chip. */
     private fun renderStatusLed() {
+        if (::transportRail.isInitialized) {
+            transportRail.setConnecting(visualState == OrbitDialView.State.CONNECTING)
+        }
         val (fill, glow) = when (visualState) {
             OrbitDialView.State.CONNECTED -> connected to true
             OrbitDialView.State.DEGRADED -> palette.amber to true

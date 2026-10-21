@@ -199,7 +199,7 @@ class MetricTile(
  * The caller passes labels only; the grid shape is derived. [rowCount] is public
  * so the screen can size the view without duplicating the arithmetic.
  */
-class TransportRail(
+private class LegacyTransportRail(
     context: Context,
     private val palette: AppAppearance.Palette,
     private val labels: List<String>,
