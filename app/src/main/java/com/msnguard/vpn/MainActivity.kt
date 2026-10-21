@@ -3521,8 +3521,13 @@ class MainActivity : Activity() {
                 palette,
                 Strings.t("Tor over WARP"),
                 Strings.t("Direct, Meek and your own bridges, inside a WARP transport"),
-                chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
-                    TorManager.isChainable(this, torMode()),
+                // The STORED arm, not a masked effective value: the service's
+                // chain decision is exactly this key, so the switch must SHOW
+                // it. A user who reads "off" below while the pref is actually
+                // on (chains running) would never be able to reason about the
+                // two states — show the stored one and grey availability
+                // instead, which names the real reason.
+                chainArmed(Protocol.TOR),
             ) { armed ->
                 setChainArmed(armed, Protocol.TOR)
                 renderChainCard()
@@ -5911,7 +5916,10 @@ class MainActivity : Activity() {
         val torSelected = selectedProtocol == Protocol.TOR
         val torChainable = TorManager.isChainable(this, torMode())
         torChainRowRef?.apply {
-            setChecked(chainArmed(Protocol.TOR) && torSelected && torChainable)
+            // Stored arm again — the truthful view of what the NEXT connect
+            // will do. Availability stays the combination (non-chainable mode
+            // = greyed with its reason, transport not Tor = unavailable).
+            setChecked(chainArmed(Protocol.TOR))
             setAvailable(torSelected && torChainable && modeControlsEnabled)
         }
         // Tor's outer transport: user request is "whenever Tor is selected" on all

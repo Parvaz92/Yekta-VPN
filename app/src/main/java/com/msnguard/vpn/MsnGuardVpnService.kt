@@ -2899,6 +2899,14 @@ ConnectionLog.record("MTU: $psiphonChainMtu for ${chainMethod.title} (chain)")
         val chained = TorManager.chainArmed(this)
         chainMode = chained
         chainOuterCommitted = false
+        // The one line the user can check when a question like "why did the
+        // chain run / why did it not" comes up: this names the switch state the
+        // service actually saw — never infer it from a UI screen that might
+        // paint a masked or stale value.
+        ConnectionLog.record(
+            if (chained) "Tor: over-WARP switch is ON — chain armed, kernel follows it"
+            else "Tor: over-WARP switch is OFF (or the mode cannot chain) — Tor runs on its own core only, no WARP chain"
+        )
 
         worker.execute {
             try {
