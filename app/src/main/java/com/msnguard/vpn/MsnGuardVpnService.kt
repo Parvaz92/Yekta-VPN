@@ -544,6 +544,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var activeSocksPort = 0
 
     /**
+     * MTU the CURRENT connect's TUN was established with.
+     *
+     * The tun2socks engine and the TUN builder must agree on the MTU — if the
+     * builder is set to a scanned 1400 while the engine keeps the 1500 default,
+     * lwIP advertises an MSS the TUN cannot carry and large packets die. The
+     * Psiphon onConnected path starts the engine with the signature default
+     * (no local MTU variable is in scope there — plain and chained runs both
+     * land on it), so it reads this field instead. Every start path that builds
+     * a TUN writes it right after resolving its number; every connect resets
+     * it first, so a stale value never leaks across transports. WARP paths
+     * pass their number explicitly and never read it.
+     */
+    @Volatile
+    private var currentTunMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+
+    /**
      * True while running Psiphon-over-WARP: the Rust core holds a WARP tunnel and
      * publishes a local SOCKS5 listener, and Psiphon dials out through it.
      *
@@ -1326,7 +1342,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
-        if (!TunEngineManager.start(this, tunFd, port)) {
+        // Engine MTU = the TUN's MTU (currentTunMtu): the Psiphon onConnected
+        // path has no local MTU variable in scope — plain and chained runs
+        // land here — so it reads the connect-scoped field the builder wrote.
+        if (!TunEngineManager.start(this, tunFd, port, mtu = currentTunMtu)) {
             failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
@@ -2779,7 +2798,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         chainMethod,
                         Tun2SocksManager.VPN_INTERFACE_MTU,
                     )
-                    ConnectionLog.record("MTU: $psiphonChainMtu for ${chainMethod.title} (chain)")
+                    currentTunMtu = psiphonChainMtu
+ConnectionLog.record("MTU: $psiphonChainMtu for ${chainMethod.title} (chain)")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonChainMtu)
@@ -2885,7 +2905,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Tor: creating TUN before Tor starts")
                 val torMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.TOR, Tun2SocksManager.VPN_INTERFACE_MTU)
-                ConnectionLog.record("MTU: $torMtu for Tor")
+                currentTunMtu = torMtu
+ConnectionLog.record("MTU: $torMtu for Tor")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(torMtu)
@@ -2993,7 +3014,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // e.g. speed tests) DNS replies came back on rebinded conids and
                 // were rejected as "wrong remote address" — name resolution died
                 // mid-session while the tunnel itself was still healthy.
-                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnly = true)) {
+                // mtu passed explicitly: the TUN was established with torMtu and the engine
+                // must agree (the 1500 default would kill large packets once a
+                // scan hands the TUN a smaller number than the engine's MSS).
+                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, mtu = torMtu, dnsOnly = true)) {
                     error("Could not start device routing")
                 }
 
@@ -3069,7 +3093,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     MtuConfig.Method.FOXY,
                     MtuConfig.get(this, MtuConfig.Method.FOXY),
                 )
-                ConnectionLog.record("MTU: $foxyMtu for FOXY")
+                currentTunMtu = foxyMtu
+ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(foxyMtu)
@@ -3187,6 +3212,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
                 val shardMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.SHARD, Tun2SocksManager.VPN_INTERFACE_MTU)
+                currentTunMtu = shardMtu
                 ConnectionLog.record("MTU: $shardMtu for SHARD")
                 tun = Builder()
                     .setSession("MSN-GUARD")
@@ -4597,6 +4623,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // MTU auto-scan: every connect starts its own scan context — no stale
         // value from the previous tunnel can reach a different transport
         // (MtuAutoScan doc explains why this matters for the chain's per-rung env).
+        currentTunMtu = Tun2SocksManager.VPN_INTERFACE_MTU
         MtuAutoScan.markSessionStart()
         // Exit-country preference: latched for the whole session, like
         // proxyMode below. The rotation must not change target mid-flight, and
@@ -4910,6 +4937,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                     ConnectionLog.record("Creating TUN interface BEFORE Psiphon starts")
                     val psiphonMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.PSIPHON, Tun2SocksManager.VPN_INTERFACE_MTU)
+                    currentTunMtu = psiphonMtu
                     ConnectionLog.record("MTU: $psiphonMtu for Psiphon")
                     tun = Builder()
                         .setSession("MSN-GUARD")
