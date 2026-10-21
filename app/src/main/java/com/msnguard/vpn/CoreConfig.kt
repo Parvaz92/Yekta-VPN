@@ -648,7 +648,11 @@ object CoreConfig {
         // the in-engine half so even a lingering file cannot be reused.
         when (text("endpoint_discovery", "cache").lowercase()) {
             "fresh" -> out["AETHER_QUICK_RECONNECT"] = "0"
-            else -> { /* cache: let the engine decide; do not force */ }
+            // Android has no interactive stdin for the core. Leaving this unset
+            // lets the core's CLI fallback decide whether to reuse the gateway;
+            // make the app preference explicit so Cache & refresh really verifies
+            // the saved endpoint before scanning again on every WARP transport.
+            else -> out["AETHER_QUICK_RECONNECT"] = "1"
         }
 
         return out
