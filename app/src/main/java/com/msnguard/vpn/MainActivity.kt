@@ -677,7 +677,8 @@ class MainActivity : Activity() {
         // than Latin at the same sp, so the same 38dp reads looser; 34 + the tighter
         // lineHeightMult reclaims two rows' worth of height for the dial. English
         // keeps the v1.8.5 38dp exactly.
-        transportRailHeight = dp(108)
+        transportRailHeight = dp(8) + transportRail.rowCount *
+            (if (localizedTypography) dp(34) else dp(38))
         transportRail.select(Protocol.entries.indexOf(selectedProtocol), animate = false)
         renderChainCard()
         // The dead space under the action bar looked like a rendering bug. It is
@@ -753,6 +754,17 @@ class MainActivity : Activity() {
         }
         pageHost = FrameLayout(this).apply {
             setBackgroundColor(CANVAS)
+            // Same language mirror as mainRoot below, but on the actual root:
+            // Settings and every other page are children of pageHost, NOT of
+            // mainRoot, so an unmirrored pageHost left the whole Persian menu
+            // left-to-right on phones whose OS locale is not Persian (the
+            // in-app language picker chose fa, the resources did not follow).
+            // The comment that used to live on mainRoot was attached to a
+            // sibling and only covered the main screen.
+            layoutDirection = when (AppLanguage.current()) {
+                "fa" -> android.view.View.LAYOUT_DIRECTION_RTL
+                else -> android.view.View.LAYOUT_DIRECTION_LTR
+            }
             addView(mainRoot, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1431,9 +1443,6 @@ class MainActivity : Activity() {
 
     /** Status LED colour + glow for the header chip. */
     private fun renderStatusLed() {
-        if (::transportRail.isInitialized) {
-            transportRail.setConnecting(visualState == OrbitDialView.State.CONNECTING)
-        }
         val (fill, glow) = when (visualState) {
             OrbitDialView.State.CONNECTED -> connected to true
             OrbitDialView.State.DEGRADED -> palette.amber to true
@@ -2631,6 +2640,21 @@ class MainActivity : Activity() {
      * backup rows. The sheet names what survives — monthly traffic totals — so
      * the user is not left wondering whether their data counter was wiped too.
      */
+    /**
+     * Every bottom sheet opens in its own window, whose mirror follows the OS
+     * locale, not the in-app language pick. A Persian sheet on an English
+     * phone rendered left-to-right — the reported "menu is not RTL". The
+     * activity root's direction does not reach across windows, so each
+     * window's decor gets the explicit direction, resolved from the same
+     * preference [AppLanguage.current] already answers for Strings.
+     */
+    private fun mirrorDialog(dialog: Dialog) {
+        dialog.window?.decorView?.layoutDirection = when (AppLanguage.current()) {
+            "fa" -> android.view.View.LAYOUT_DIRECTION_RTL
+            else -> android.view.View.LAYOUT_DIRECTION_LTR
+        }
+    }
+
     private fun confirmResetSettings() {
         if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
             toastShort(Strings.t("Disconnect first — a reset changes what the tunnel uses"))
@@ -2678,6 +2702,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -2733,6 +2758,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -4157,6 +4183,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -4492,6 +4519,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -4660,6 +4688,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5026,6 +5055,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5267,6 +5297,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5433,6 +5464,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5501,6 +5533,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5577,6 +5610,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5755,6 +5789,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -6873,7 +6908,7 @@ class MainActivity : Activity() {
         actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().putString(ck, raw).putString(mk, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Exit-Node") }; ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
         dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
-        dialog.show(); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
+        dialog.show(); mirrorDialog(dialog); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
     }
 
     private fun editMtu(method: MtuConfig.Method) {
@@ -6991,6 +7026,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -8338,6 +8374,7 @@ class MainActivity : Activity() {
                     }
                     .setNegativeButton(Strings.t("Cancel"), null)
                     .show()
+                    .also { mirrorDialog(it) }
             }
         }.start()
     }

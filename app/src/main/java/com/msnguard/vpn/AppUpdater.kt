@@ -89,6 +89,7 @@ class AppUpdater(private val activity: Activity) {
             .setNegativeButton(Strings.t("Later"), null)
             .setPositiveButton(Strings.t("Update")) { _, _ -> openDownload(release) }
             .show()
+            .also { mirror(it) }
     }
 
     private fun openDownload(release: Release) {
@@ -173,7 +174,7 @@ class AppUpdater(private val activity: Activity) {
             .setView(layout)
             .setCancelable(false)
             .create()
-            .also { it.show() }
+            .also { it.show(); mirror(it) }
     }
 
     private fun dismissProgress() {
@@ -183,6 +184,7 @@ class AppUpdater(private val activity: Activity) {
 
     private fun showMessage(title: String, message: String) {
         dialogBuilder().setTitle(title).setMessage(message).setPositiveButton(Strings.t("OK"), null).show()
+            .also { mirror(it) }
     }
 
     // The overlay is picked per palette. Passing a fixed one here overrides the
@@ -193,6 +195,16 @@ class AppUpdater(private val activity: Activity) {
         if (AppAppearance.isNight(activity)) R.style.ThemeOverlay_MsnGuard_AlertDialog
         else R.style.ThemeOverlay_MsnGuard_Light_AlertDialog,
     )
+
+    // Persian sheets opened in their own window resolved LTR when the OS locale
+    // was not Persian (the in-app picker had). Same one-line mirror the
+    // activity applies to its roots, driven by the same preference.
+    private fun mirror(alert: AlertDialog) {
+        alert.window?.decorView?.layoutDirection = when (AppLanguage.current()) {
+            "fa" -> android.view.View.LAYOUT_DIRECTION_RTL
+            else -> android.view.View.LAYOUT_DIRECTION_LTR
+        }
+    }
 
     private fun appVersion(): String = activity.packageManager
         .getPackageInfo(activity.packageName, 0).versionName ?: "0.0.0"
