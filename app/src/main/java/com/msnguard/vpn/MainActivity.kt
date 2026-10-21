@@ -6211,6 +6211,9 @@ class MainActivity : Activity() {
     // ─────────────────────────────────────────────────────────────────
 
     private fun mtuSummary(): String {
+        // Automatic Scan owns the numbers when it is on: the settings row says
+        // so at a glance, exactly like every other on/off summary here.
+        if (MtuAutoScan.enabled(this)) return Strings.t("Auto scan")
         // The briefest invariant for the settings list: defaults → Default,
         // anything overridden → Custom. Full per-method numbers live inside
         // the screen where they can be read at a glance.
@@ -6235,15 +6238,50 @@ class MainActivity : Activity() {
             Strings.t("Applies on the next connect — per transport, 68–1500. Empty returns the default."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(18)
+            leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(10)
         })
 
+        // Master switch between the description and the methods list. ON:
+        // every connect scans the path for ITS method first and applies the
+        // winner; OFF: the rows below are the only voice again. The page
+        // rebuilds on toggle so the rows' greyness matches the switch — the
+        // same immediate-repaint rule the profile switcher uses.
+        content.addView(createToggleRow(
+            Strings.t("Automatic Scan"),
+            Strings.t("Scan and apply the best MTU per method before every connect"),
+            MtuAutoScan.enabled(this),
+        ) { on ->
+            MtuAutoScan.setEnabled(this, on)
+            ConnectionLog.record(
+                if (on) "MTU: Automatic Scan armed — each connect scans its method first"
+                else "MTU: Automatic Scan off — manual per-method values apply"
+            )
+            toastShort(
+                if (on) Strings.t("Automatic Scan on") else Strings.t("Automatic Scan off")
+            )
+            mtuPage?.let { pageHost.removeView(it); mtuPage = null }
+            openMtuScreen()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
+
+        val autoScanOn = MtuAutoScan.enabled(this)
         for (method in MtuConfig.Method.entries) {
             val row = navRow(
                 title = method.title,
                 value = MtuConfig.displayValue(this, method),
                 iconRes = R.drawable.ic_settings,
-            ) { editMtu(method) }
+            ) {
+                if (autoScanOn) {
+                    // Greyed menus must not open the dialog under a dead rail:
+                    // say why in one line instead of a silent no-op.
+                    toastShort(Strings.t("Automatic Scan is on — turn it off to set MTU manually"))
+                } else {
+                    editMtu(method)
+                }
+            }
+            if (autoScanOn) {
+                row.alpha = 0.42f                // the greyed, not-editable look
+                row.isClickable = true           // still clickable — opens the toast
+            }
             content.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         }
 
