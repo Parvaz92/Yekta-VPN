@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import com.msnguard.vpn.shard.toShardNode
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -117,7 +118,7 @@ object WarpExitManager {
         val profile = (if (line.startsWith("vmess://", ignoreCase = true))
             com.msnguard.vpn.shard.VmessFmt.parse(line)
             else com.msnguard.vpn.shard.ShardImport.parseOne(line)) ?: return null
-        val node = com.msnguard.vpn.shard.toShardNode(profile)
+        val node = profile.toShardNode()
         if (node.address.contains("[") || node.address.contains("]")) return null
         if (node.port !in 1..65535) return null
         return node
