@@ -754,6 +754,17 @@ class MainActivity : Activity() {
         }
         pageHost = FrameLayout(this).apply {
             setBackgroundColor(CANVAS)
+            // Same language mirror as mainRoot below, but on the actual root:
+            // Settings and every other page are children of pageHost, NOT of
+            // mainRoot, so an unmirrored pageHost left the whole Persian menu
+            // left-to-right on phones whose OS locale is not Persian (the
+            // in-app language picker chose fa, the resources did not follow).
+            // The comment that used to live on mainRoot was attached to a
+            // sibling and only covered the main screen.
+            layoutDirection = when (AppLanguage.current()) {
+                "fa" -> android.view.View.LAYOUT_DIRECTION_RTL
+                else -> android.view.View.LAYOUT_DIRECTION_LTR
+            }
             addView(mainRoot, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2629,6 +2640,21 @@ class MainActivity : Activity() {
      * backup rows. The sheet names what survives — monthly traffic totals — so
      * the user is not left wondering whether their data counter was wiped too.
      */
+    /**
+     * Every bottom sheet opens in its own window, whose mirror follows the OS
+     * locale, not the in-app language pick. A Persian sheet on an English
+     * phone rendered left-to-right — the reported "menu is not RTL". The
+     * activity root's direction does not reach across windows, so each
+     * window's decor gets the explicit direction, resolved from the same
+     * preference [AppLanguage.current] already answers for Strings.
+     */
+    private fun mirrorDialog(dialog: Dialog) {
+        dialog.window?.decorView?.layoutDirection = when (AppLanguage.current()) {
+            "fa" -> android.view.View.LAYOUT_DIRECTION_RTL
+            else -> android.view.View.LAYOUT_DIRECTION_LTR
+        }
+    }
+
     private fun confirmResetSettings() {
         if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
             toastShort(Strings.t("Disconnect first — a reset changes what the tunnel uses"))
@@ -2676,6 +2702,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -2731,6 +2758,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -3521,8 +3549,13 @@ class MainActivity : Activity() {
                 palette,
                 Strings.t("Tor over WARP"),
                 Strings.t("Direct, Meek and your own bridges, inside a WARP transport"),
-                chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
-                    TorManager.isChainable(this, torMode()),
+                // The STORED arm, not a masked effective value: the service's
+                // chain decision is exactly this key, so the switch must SHOW
+                // it. A user who reads "off" below while the pref is actually
+                // on (chains running) would never be able to reason about the
+                // two states — show the stored one and grey availability
+                // instead, which names the real reason.
+                chainArmed(Protocol.TOR),
             ) { armed ->
                 setChainArmed(armed, Protocol.TOR)
                 renderChainCard()
@@ -4150,6 +4183,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -4485,6 +4519,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -4653,6 +4688,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5019,6 +5055,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5260,6 +5297,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5426,6 +5464,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5494,6 +5533,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5570,6 +5610,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5748,6 +5789,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -5911,7 +5953,10 @@ class MainActivity : Activity() {
         val torSelected = selectedProtocol == Protocol.TOR
         val torChainable = TorManager.isChainable(this, torMode())
         torChainRowRef?.apply {
-            setChecked(chainArmed(Protocol.TOR) && torSelected && torChainable)
+            // Stored arm again — the truthful view of what the NEXT connect
+            // will do. Availability stays the combination (non-chainable mode
+            // = greyed with its reason, transport not Tor = unavailable).
+            setChecked(chainArmed(Protocol.TOR))
             setAvailable(torSelected && torChainable && modeControlsEnabled)
         }
         // Tor's outer transport: user request is "whenever Tor is selected" on all
@@ -6211,6 +6256,9 @@ class MainActivity : Activity() {
     // ─────────────────────────────────────────────────────────────────
 
     private fun mtuSummary(): String {
+        // Automatic Scan owns the numbers when it is on: the settings row says
+        // so at a glance, exactly like every other on/off summary here.
+        if (MtuAutoScan.enabled(this)) return Strings.t("Auto scan")
         // The briefest invariant for the settings list: defaults → Default,
         // anything overridden → Custom. Full per-method numbers live inside
         // the screen where they can be read at a glance.
@@ -6235,15 +6283,47 @@ class MainActivity : Activity() {
             Strings.t("Applies on the next connect — per transport, 68–1500. Empty returns the default."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(18)
+            leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(10)
         })
+
+        // Master switch between the description and the methods list. ON:
+        // every connect scans the path for ITS method first and applies the
+        // winner; OFF: the rows below are the only voice again. The toggle
+        // repaints the rows IN PLACE (alpha only) — no page rebuild, so the
+        // screen never blinks. The click rail reads the live pref, so a row
+        // flipped open mid-session actually opens.
+        val mtuMethodRows = ArrayList<OrbitSettingsRow>()
+        content.addView(createToggleRow(
+            Strings.t("Automatic Scan"),
+            Strings.t("Scan and apply the best MTU per method before every connect"),
+            MtuAutoScan.enabled(this),
+        ) { on ->
+            MtuAutoScan.setEnabled(this, on)
+            ConnectionLog.record(
+                if (on) "MTU: Automatic Scan armed — each connect scans its method first"
+                else "MTU: Automatic Scan off — manual per-method values apply"
+            )
+            toastShort(
+                if (on) Strings.t("Automatic Scan on") else Strings.t("Automatic Scan off")
+            )
+            for (row in mtuMethodRows) row.alpha = if (on) 0.42f else 1f
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
 
         for (method in MtuConfig.Method.entries) {
             val row = navRow(
                 title = method.title,
                 value = MtuConfig.displayValue(this, method),
-                iconRes = R.drawable.ic_settings,
-            ) { editMtu(method) }
+            ) {
+                if (MtuAutoScan.enabled(this)) {
+                    // Greyed menus must not open the dialog under a dead rail:
+                    // say why in one line instead of a silent no-op.
+                    toastShort(Strings.t("Automatic Scan is on — turn it off to set MTU manually"))
+                } else {
+                    editMtu(method)
+                }
+            }
+            if (MtuAutoScan.enabled(this)) row.alpha = 0.42f  // the greyed, not-editable look
+            mtuMethodRows.add(row)
             content.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         }
 
@@ -6695,8 +6775,20 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
         lateinit var startBtn: TextView
+        // One in-flight provision op. The second tap means CANCEL — flip the
+        // fetcher's generation so the running fetch unwinds through its normal
+        // (timeout-equal) cleanup: engine kill + previous identity restore.
+        var provisioning = false
         startBtn = createSettingsButton(Strings.t("START \u2014 GET IDENTITY"), backgroundOverride = primary, textColorOverride = primaryContainer) {
             if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
+            if (provisioning) {
+                WarpIdentityFetcher.cancel()
+                term.text = Strings.t("Cancel requested — wait a few seconds\u2026")
+                toastShort(Strings.t("Cancelling\u2026"))
+                // Keep the button disabled here: the worker's completion path
+                // is the only one that re-arms START — no second in-flight.
+                return@createSettingsButton
+            }
             val proto = vaultProtocolSelected(vaultSelected)
             val chosenMethod = vaultMethod
             val methodName = when (chosenMethod) { "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("Shard Relay"); else -> Strings.t("Quantum ECH") }
@@ -6706,8 +6798,9 @@ class MainActivity : Activity() {
                 term.visibility = View.VISIBLE
                 refreshVaultCards(); return@createSettingsButton
             }
+            provisioning = true
             startBtn.isEnabled = false
-            startBtn.text = Strings.t("PROVISIONING...")
+            startBtn.text = Strings.t("PROVISIONING \u2014 TAP TO CANCEL")
             term.text = proto + " \u2014 " + methodName + " \u2014 connecting\u2026"
             term.visibility = View.VISIBLE
             val ctx = this@MainActivity
@@ -6736,11 +6829,17 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     termTail.done = true
                     try { termTail.interrupt() } catch (_: Exception) {}
+                    provisioning = false
                     startBtn.isEnabled = true
                     startBtn.text = Strings.t("START \u2014 GET IDENTITY")
                     if (ok && hasVaultIdentity(proto)) {
                         term.text = proto + " \u2713 " + Strings.t("Key received") + " \u2014 " + methodName
                         toastShort(proto + " \u2713 " + Strings.t("Key received"))
+                    } else if (WarpIdentityFetcher.wasCancelled()) {
+                        // Cancel completed — say so plainly; the fetcher already
+                        // restored any previous identity and stopped the engine.
+                        term.text = proto + " \u2014 " + Strings.t("Cancelled") + " (" + methodName + ")"
+                        toastShort(Strings.t("Provisioning cancelled"))
                     } else {
                         val last = ConnectionLog.snapshot().lastOrNull()?.take(120) ?: "failed"
                         term.text = proto + " \u2014 failed: " + last
@@ -6809,7 +6908,7 @@ class MainActivity : Activity() {
         actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().putString(ck, raw).putString(mk, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Exit-Node") }; ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
         dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
-        dialog.show(); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
+        dialog.show(); mirrorDialog(dialog); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
     }
 
     private fun editMtu(method: MtuConfig.Method) {
@@ -6927,6 +7026,7 @@ class MainActivity : Activity() {
         })
         dialog.show()
         dialog.window?.apply {
+            mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.62f)
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
@@ -7979,6 +8079,19 @@ class MainActivity : Activity() {
         }
         accountCard.addView(foxySectionHead("\uD83E\uDD8A " + Strings.t("Foxy Account")))
 
+        // User brief: a one-paragraph sign-up explainer — create the account on
+        // Mozilla's own site with an email + password (NOT the saved Google
+        // account), enter those two here, finish with the emailed code — and
+        // the password is never stored anywhere in this app.
+        accountCard.addView(label(
+            Strings.t(
+                "First create your account on Mozilla's official site: register at accounts.firefox.com with an email and a password — do not sign up with the saved Google account. Then enter that same email and password in the boxes below, and finish with the verification code Mozilla emails you. Your password is never stored anywhere in this app."
+            ),
+            13f, foxyC(0xFFB9B9C7, 0xFF54606A),
+        ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(10)
+        })
+
         val chip = label("ACCOUNT: not signed in", 11f, foxyC(0xFFC7C7D1, 0xFF4E6069), TypefaceStyle.MEDIUM).apply {
             setPadding(dp(14), dp(8), dp(14), dp(8))
             letterSpacing = 0.10f
@@ -8261,6 +8374,7 @@ class MainActivity : Activity() {
                     }
                     .setNegativeButton(Strings.t("Cancel"), null)
                     .show()
+                    .also { mirrorDialog(it) }
             }
         }.start()
     }
@@ -9126,7 +9240,7 @@ class MainActivity : Activity() {
         preferences().edit().putBoolean(chainPrefKey(protocol), armed).apply()
         val inner = if (protocol == Protocol.TOR) "Tor" else "Psiphon"
         if (armed) {
-            ConnectionLog.record("$inner-over-WARP armed: outer MASQUE, $inner inside it")
+            ConnectionLog.record("$inner-over-WARP armed: outer WireGuard by default, $inner inside it")
         } else {
             ConnectionLog.record("$inner-over-WARP disarmed")
         }
@@ -9894,7 +10008,7 @@ class MainActivity : Activity() {
         AUTO(
             CoreConfig.CHAIN_OUTER_AUTO,
             "Auto",
-            "Try MASQUE, then WireGuard, then WoW — remembers what works",
+            "Try WireGuard, then MASQUE, then WoW — remembers what works",
         ),
         MASQUE("masque", "MASQUE", "HTTP/3, falling back to HTTP/2 with TLS fragmentation"),
         WIREGUARD("wireguard", "WireGuard", "Single WARP tunnel; blocked on some carriers"),

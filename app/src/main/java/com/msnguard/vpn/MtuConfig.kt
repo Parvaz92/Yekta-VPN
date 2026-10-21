@@ -77,8 +77,14 @@ object MtuConfig {
         else -> null
     }
 
-    /** Effective MTU for [method] — stored value or its default. */
+    /**
+     * Effective MTU for [method].
+     * With Automatic Scan armed, the connect-time scan for THIS connect wins
+     * (the record lives one connect — see MtuAutoScan); otherwise the stored
+     * override or the default, exactly as before the switch existed.
+     */
     fun get(context: Context, method: Method): Int {
+        MtuAutoScan.sessionValue(method)?.let { return it }
         val raw = context.profiled().getInt(method.prefKey, -1)
         // 0 and -1 both mean "unset": an earlier build wrote the default rather
         // than leaving the key absent, and reading that back would hand 0 to

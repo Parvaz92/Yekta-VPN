@@ -544,6 +544,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var activeSocksPort = 0
 
     /**
+     * MTU the CURRENT connect's TUN was established with.
+     *
+     * The tun2socks engine and the TUN builder must agree on the MTU — if the
+     * builder is set to a scanned 1400 while the engine keeps the 1500 default,
+     * lwIP advertises an MSS the TUN cannot carry and large packets die. The
+     * Psiphon onConnected path starts the engine with the signature default
+     * (no local MTU variable is in scope there — plain and chained runs both
+     * land on it), so it reads this field instead. Every start path that builds
+     * a TUN writes it right after resolving its number; every connect resets
+     * it first, so a stale value never leaks across transports. WARP paths
+     * pass their number explicitly and never read it.
+     */
+    @Volatile
+    private var currentTunMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+
+    /**
      * True while running Psiphon-over-WARP: the Rust core holds a WARP tunnel and
      * publishes a local SOCKS5 listener, and Psiphon dials out through it.
      *
@@ -1326,7 +1342,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
-        if (!TunEngineManager.start(this, tunFd, port)) {
+        // Engine MTU = the TUN's MTU (currentTunMtu): the Psiphon onConnected
+        // path has no local MTU variable in scope — plain and chained runs
+        // land here — so it reads the connect-scoped field the builder wrote.
+        if (!TunEngineManager.start(this, tunFd, port, mtu = currentTunMtu)) {
             failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
@@ -2773,8 +2792,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (!proxyMode) {
                     val address = Tun2SocksManager.selectPrivateAddress()
                     ConnectionLog.record("Chain: creating TUN before either tunnel starts")
-                    val psiphonChainMtu = Tun2SocksManager.VPN_INTERFACE_MTU
-                    ConnectionLog.record("MTU: $psiphonChainMtu for Psiphon (legacy path)")
+                    val chainMethod = if (currentProtocol == "TOR") MtuConfig.Method.TOR else MtuConfig.Method.PSIPHON
+                    val psiphonChainMtu = MtuAutoScan.tunMtu(
+                        this,
+                        chainMethod,
+                        Tun2SocksManager.VPN_INTERFACE_MTU,
+                    )
+                    currentTunMtu = psiphonChainMtu
+ConnectionLog.record("MTU: $psiphonChainMtu for ${chainMethod.title} (chain)")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonChainMtu)
@@ -2874,13 +2899,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val chained = TorManager.chainArmed(this)
         chainMode = chained
         chainOuterCommitted = false
+        // The one line the user can check when a question like "why did the
+        // chain run / why did it not" comes up: this names the switch state the
+        // service actually saw — never infer it from a UI screen that might
+        // paint a masked or stale value.
+        ConnectionLog.record(
+            if (chained) "Tor: over-WARP switch is ON — chain armed, kernel follows it"
+            else "Tor: over-WARP switch is OFF (or the mode cannot chain) — Tor runs on its own core only, no WARP chain"
+        )
 
         worker.execute {
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Tor: creating TUN before Tor starts")
-                val torMtu = Tun2SocksManager.VPN_INTERFACE_MTU
-                ConnectionLog.record("MTU: $torMtu for Tor (legacy path)")
+                val torMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.TOR, Tun2SocksManager.VPN_INTERFACE_MTU)
+                currentTunMtu = torMtu
+ConnectionLog.record("MTU: $torMtu for Tor")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(torMtu)
@@ -2988,7 +3022,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // e.g. speed tests) DNS replies came back on rebinded conids and
                 // were rejected as "wrong remote address" — name resolution died
                 // mid-session while the tunnel itself was still healthy.
-                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnly = true)) {
+                // mtu passed explicitly: the TUN was established with torMtu and the engine
+                // must agree (the 1500 default would kill large packets once a
+                // scan hands the TUN a smaller number than the engine's MSS).
+                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, mtu = torMtu, dnsOnly = true)) {
                     error("Could not start device routing")
                 }
 
@@ -3059,8 +3096,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 ControlPlane_HookProtect()
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Foxy: creating TUN")
-                val foxyMtu = MtuConfig.get(this, MtuConfig.Method.FOXY)
-                ConnectionLog.record("MTU: $foxyMtu for FOXY")
+                val foxyMtu = MtuAutoScan.tunMtu(
+                    this,
+                    MtuConfig.Method.FOXY,
+                    MtuConfig.get(this, MtuConfig.Method.FOXY),
+                )
+                currentTunMtu = foxyMtu
+ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(foxyMtu)
@@ -3177,7 +3219,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
-                val shardMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                val shardMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.SHARD, Tun2SocksManager.VPN_INTERFACE_MTU)
+                currentTunMtu = shardMtu
                 ConnectionLog.record("MTU: $shardMtu for SHARD")
                 tun = Builder()
                     .setSession("MSN-GUARD")
@@ -4249,6 +4292,37 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * concurrently (its RUNNING compare_exchange returns "already running"), so the
      * next rung would fail instantly if the previous one were still unwinding.
      */
+    /**
+     * Transport NAME of the last successful auto rung (per inner tunnel).
+     *
+     * Written alongside [CoreConfig.CHAIN_OUTER_PREF] (its index) so a ladder
+     * reorder can be detected: an index alone cannot say which transport it
+     * meant once the order changes.
+     */
+    private val CHAIN_OUTER_TRANSPORT_PREF = "chain_outer_transport"
+    private val CHAIN_OUTER_TRANSPORT_TOR_PREF = "chain_outer_transport_tor"
+
+    /** Size of the ladder before the alpha46 reorder (masque, wireguard, gool). */
+    private val OLD_LADDER_SIZE = 3
+
+    /** The pre-alpha46 ladder order, for remapping a stored index once. */
+    private val OLD_LADDER = listOf("masque", "wireguard", "gool")
+
+    /**
+     * Map an index written under the old ladder onto the new order.
+     *
+     * The remap is by NAME: old index → old name → new index. A stored 0 that
+     * meant MASQUE lands on the new MASQUE index (1), a stored 2 that meant
+     * WoW stays 2 — the transport itself is preserved, only its position moves.
+     */
+    private fun remapLegacyIndex(oldIndex: Int): Int {
+        if (oldIndex !in OLD_LADDER.indices) return -1
+        return CoreConfig.CHAIN_OUTER_LADDER.indexOf(OLD_LADDER[oldIndex])
+    }
+
+    private fun chainOuterTransportPref(inner: String): String =
+        if (inner == "Tor") CHAIN_OUTER_TRANSPORT_TOR_PREF else CHAIN_OUTER_TRANSPORT_PREF
+
     private fun raiseOuterLeg(inner: String = "Psiphon"): String? {
         // Auto gives the whole ladder; a pinned transport gives just that one, with
         // no fallback — a pin exists to stop the app spending a minute on transports
@@ -4263,7 +4337,26 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // -1, not 0: absent must be distinguishable from "rung 0 worked", or a fresh
         // install would look like it had already proven MASQUE and the plain-history
         // hint below would never be consulted.
-        val chainMemory = prefs.getInt(CoreConfig.CHAIN_OUTER_PREF, -1)
+        // The ladder was reordered in alpha46 (WireGuard now leads). A stored
+        // index from the old order points at a DIFFERENT rung — a legacy 0
+        // would start the walk on WireGuard and believe it had proven MASQUE.
+        // Re-anchor: keep only indices whose remembered transport actually is
+        // that index in the NEW order (chain_outer_transport stores the name).
+        val legacyChainMemory = prefs.getInt(CoreConfig.CHAIN_OUTER_PREF, -1)
+        val chainTransportName = prefs.getString(CHAIN_OUTER_TRANSPORT_PREF, null)
+        val chainMemory = if (
+            chainTransportName == null && legacyChainMemory in 0 until OLD_LADDER_SIZE
+        ) {
+            // No name recorded yet: this is a value written before alpha46 —
+            // remap it through the old ladder's order rather than guessing.
+            remapLegacyIndex(legacyChainMemory)
+        } else {
+            legacyChainMemory
+        }
+        // A recorded NAME that disagrees with the index means the ladder moved
+        // under it again — trust the name and re-anchor the index.
+        val namedIndex = chainTransportName?.let { CoreConfig.CHAIN_OUTER_LADDER.indexOf(it) }
+            ?.takeIf { it >= 0 } ?: chainMemory
         val plainHint = prefs.getString(CoreConfig.PLAIN_WORKING_TRANSPORT_PREF, null)
             ?.let { ladder.indexOf(it) }
             ?.takeIf { it >= 0 }
@@ -4271,7 +4364,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // when the full ladder is what we are walking.
         val start = when {
             !auto -> 0
-            chainMemory in ladder.indices -> chainMemory
+            namedIndex in ladder.indices -> namedIndex
             plainHint != null -> plainHint
             else -> {
                 // No history at all — the user just asked WireGuard to go first on
@@ -4286,7 +4379,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ConnectionLog.record(
                 "Chain: outer transport pinned to ${CoreConfig.chainOuterLabel(ladder[0])}"
             )
-        } else if (chainMemory !in ladder.indices && plainHint != null) {
+        } else if (namedIndex !in ladder.indices && plainHint != null) {
             // Say which evidence was used. Without this the reordering is invisible
             // and a support log cannot distinguish it from the static order.
             ConnectionLog.record(
@@ -4386,7 +4479,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // and the index would refer to the wrong transport later.
                 if (auto) {
                     profiled().edit()
-                        .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
+                        .putInt(CoreConfig.CHAIN_OUTER_PREF, index)
+                        .putString(chainOuterTransportPref(inner), protocol)
+                        .apply()
                 }
                 chainOuterCommitted = true
                 ConnectionLog.record("Chain: $label is carrying the outer leg")
@@ -4533,6 +4628,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
+        // MTU auto-scan: every connect starts its own scan context — no stale
+        // value from the previous tunnel can reach a different transport
+        // (MtuAutoScan doc explains why this matters for the chain's per-rung env).
+        currentTunMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+        MtuAutoScan.markSessionStart()
         // Exit-country preference: latched for the whole session, like
         // proxyMode below. The rotation must not change target mid-flight, and
         // the budget resets here so a quick reconnect (which passes straight
@@ -4844,8 +4944,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     val address = Tun2SocksManager.selectPrivateAddress()
 
                     ConnectionLog.record("Creating TUN interface BEFORE Psiphon starts")
-                    val psiphonMtu = Tun2SocksManager.VPN_INTERFACE_MTU
-                    ConnectionLog.record("MTU: $psiphonMtu for Psiphon (legacy path)")
+                    val psiphonMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.PSIPHON, Tun2SocksManager.VPN_INTERFACE_MTU)
+                    currentTunMtu = psiphonMtu
+                    ConnectionLog.record("MTU: $psiphonMtu for Psiphon")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonMtu)
@@ -5072,6 +5173,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}")
                     } else {
                         ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
+                    }
+                }
+                // MTU Automatic Scan (v2): measure THIS transport's path first
+                // so the engine env below and the TUN builder both use the same
+                // freshly measured number. OFF → nothing runs here.
+                if (MtuAutoScan.enabled(this@MsnGuardVpnService)) {
+                    MtuConfig.methodForProtocol(currentProtocol)?.let { warpMethod ->
+                        MtuAutoScan.tunMtu(this@MsnGuardVpnService, warpMethod, MtuConfig.get(this@MsnGuardVpnService, warpMethod))
                     }
                 }
                 val baseEnv = CoreConfig.envFromEffectiveConfig(

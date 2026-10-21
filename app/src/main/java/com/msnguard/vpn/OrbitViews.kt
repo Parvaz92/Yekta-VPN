@@ -234,7 +234,9 @@ class TransportRail(
     }
 
     /** How many rows the labels need at [perRow] columns. */
-    val rowCount: Int = if (labels.isEmpty()) {
+    val rowCount: Int = if (labels.size == 7) {
+        2
+    } else if (labels.isEmpty()) {
         1
     } else {
         (labels.size + perRow - 1) / perRow
@@ -242,6 +244,13 @@ class TransportRail(
 
     /** Columns actually laid out. Never more than there are labels. */
     private val columns: Int = perRow.coerceAtMost(labels.size.coerceAtLeast(1))
+    private fun rowFor(index: Int): Int = if (labels.size == 7) {
+        if (index < 3) 0 else 1
+    } else index / columns
+    private fun columnsFor(row: Int): Int = if (labels.size == 7 && row == 1) 4 else columns
+    private fun columnFor(index: Int): Int = if (labels.size == 7 && index >= 3) index - 3 else index % columns
+    private fun widthFor(index: Int): Float =
+        (width - paddingLeft - paddingRight).coerceAtLeast(0).toFloat() / columnsFor(rowFor(index))
 
     /** Width of one cell, derived from the padded content box. */
     private val cellWidth: Float
@@ -291,9 +300,10 @@ class TransportRail(
         addView(thumb, LayoutParams(0, 0))
 
         val grid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        labels.indices.step(columns).forEach { start ->
+        val starts = if (labels.size == 7) listOf(0, 3) else labels.indices.step(columns).toList()
+        starts.forEachIndexed { rowIndex, start ->
             val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            for (index in start until (start + columns)) {
+            for (index in start until (start + columnsFor(rowIndex))) {
                 if (index >= labels.size) {
                     // Short last row: a weighted spacer, so the cells that do exist
                     // keep the same width as every other row's instead of stretching
@@ -375,7 +385,7 @@ class TransportRail(
         val innerWidth = MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight
         val innerHeight = MeasureSpec.getSize(heightMeasureSpec) - paddingTop - paddingBottom
         if (innerWidth > 0 && innerHeight > 0) {
-            val cw = (innerWidth.toFloat() / columns).roundToInt()
+            val cw = (innerWidth.toFloat() / columnsFor(rowFor(selectedIndex))).roundToInt()
             val ch = (innerHeight.toFloat() / rowCount).roundToInt()
             val params = thumb.layoutParams
             if (params.width != cw || params.height != ch) {
@@ -389,8 +399,8 @@ class TransportRail(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (cellWidth <= 0f || cellHeight <= 0f) return
-        thumb.translationX = (selectedIndex % columns) * cellWidth
-        thumb.translationY = (selectedIndex / columns) * cellHeight
+        thumb.translationX = columnFor(selectedIndex) * widthFor(selectedIndex)
+        thumb.translationY = rowFor(selectedIndex) * cellHeight
     }
 
     /**
@@ -408,9 +418,14 @@ class TransportRail(
         if (cw <= 0f || ch <= 0f) return
         val inset = ch * 0.22f
         val insetX = cw * 0.18f
-        for (column in 1 until columns) {
-            val x = paddingLeft + column * cw
-            canvas.drawLine(x, paddingTop + inset, x, (height - paddingBottom) - inset, gridPaint)
+        for (row in 0 until rowCount) {
+            val rowColumns = columnsFor(row)
+            val rowWidth = (width - paddingLeft - paddingRight).toFloat() / rowColumns
+            for (column in 1 until rowColumns) {
+                val x = paddingLeft + column * rowWidth
+                val y = paddingTop + row * ch
+                canvas.drawLine(x, y + inset, x, y + ch - inset, gridPaint)
+            }
         }
         for (row in 1 until rowCount) {
             val y = paddingTop + row * ch
@@ -424,11 +439,14 @@ class TransportRail(
         cells.forEachIndexed { i, cell ->
             cell.setTextColor(if (i == index) palette.ink else palette.faint)
         }
-        val slotX = cellWidth
+        val slotX = widthFor(index)
         val slotY = cellHeight
+        val params = thumb.layoutParams
+        params.width = slotX.roundToInt()
+        thumb.layoutParams = params
         if (slotX <= 0f || slotY <= 0f) return
-        val targetX = (index % columns) * slotX
-        val targetY = (index / columns) * slotY
+        val targetX = columnFor(index) * slotX
+        val targetY = rowFor(index) * slotY
         thumbAnimator?.cancel()
         if (!animate) {
             thumb.translationX = targetX

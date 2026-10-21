@@ -426,13 +426,26 @@ object CoreConfig {
         // comes back — the number changes and nothing on the wire does.
         // Only sent when the user actually picked something, so an untouched
         // install keeps the engine's own defaults exactly.
-        if (MtuConfig.isCustom(context, MtuConfig.Method.MASQUE)) {
+        // Automatic Scan: the connect-time winner reaches the engine with the
+        // same gate as a manual value — MtuConfig.get returns the one-connect
+        // session scan when armed, so the TUN and the engine netstack keep
+        // taking THE SAME number (scan without the gate would leave a scanned
+        // TUN feeding the engine's built-in default: the exact mismatch the
+        // screen's own comment warns about). No scan this connect → gate is
+        // still just isCustom, identical to before.
+        if (MtuConfig.isCustom(context, MtuConfig.Method.MASQUE) ||
+            MtuAutoScan.sessionValue(MtuConfig.Method.MASQUE) != null
+        ) {
             out["AETHER_MASQUE_MTU"] = MtuConfig.get(context, MtuConfig.Method.MASQUE).toString()
         }
-        if (MtuConfig.isCustom(context, MtuConfig.Method.WIREGUARD)) {
+        if (MtuConfig.isCustom(context, MtuConfig.Method.WIREGUARD) ||
+            MtuAutoScan.sessionValue(MtuConfig.Method.WIREGUARD) != null
+        ) {
             out["AETHER_WG_MTU"] = MtuConfig.get(context, MtuConfig.Method.WIREGUARD).toString()
         }
-        if (MtuConfig.isCustom(context, MtuConfig.Method.WOW)) {
+        if (MtuConfig.isCustom(context, MtuConfig.Method.WOW) ||
+            MtuAutoScan.sessionValue(MtuConfig.Method.WOW) != null
+        ) {
             // WoW's outer leg is WireGuard and its inner hop rides inside a
             // masque tunnel, so both knobs apply; the masque one is capped by
             // mim_inner_budget so an inner that no longer fits is refused with
@@ -737,22 +750,20 @@ object CoreConfig {
     /**
      * The outer transports tried, in order, until one carries Psiphon.
      *
-     * Ordered by measured likelihood of working on an Iranian carrier, cheapest
-     * first:
+     * Ordered by user request (alpha46): WireGuard leads the DEFAULT auto
+     * ladder — the cheapest, fastest rung and the one the user wants tried
+     * first; `masque` follows (HTTP/3 over UDP/443, then HTTP/2 over TCP/443
+     * with TLS fragmentation, gateway cache + last-known-good endpoint); and
+     * `gool` last: WARP-on-WARP stacks two tunnels under the inner tunnel —
+     * the slowest rung, only worth reaching when the single-layer ones are
+     * blocked.
      *
-     *  - `masque` leads because it has two transports of its own (HTTP/3 over
-     *    UDP/443, then HTTP/2 over TCP/443 with TLS fragmentation) and a gateway
-     *    cache plus a last-known-good endpoint, so a repeat connect is fast.
-     *  - `wireguard` next: it is blocked outright on some carriers (Hamrah-e-Aval
-     *    has never carried it) but connects immediately on others.
-     *  - `gool` last. It is WARP-on-WARP, so it stacks two tunnels under Psiphon
-     *    for three in total — the slowest rung, and only worth reaching when the
-     *    single-layer ones are blocked.
-     *
-     * The rung that works is remembered per device, so this ordering only decides
-     * the very first attempt.
+     * The rung that works is remembered per device (CHAIN_OUTER_PREF), so
+     * this ordering only decides the very first attempt; a pinned
+     * transport (chain_outer_mode) is unaffected — that is still the user's
+     * manual choice and bypasses the ladder entirely.
      */
-    val CHAIN_OUTER_LADDER = listOf("masque", "wireguard", "gool")
+    val CHAIN_OUTER_LADDER = listOf("wireguard", "masque", "gool")
 
     /**
      * Which transport the user pinned for the chain's outer leg, or "auto".
