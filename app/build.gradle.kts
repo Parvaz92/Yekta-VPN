@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.Base64
 
 plugins {
     id("com.android.application")
@@ -32,7 +33,7 @@ android {
         versionName = "3.1.0-alpha57"
         // The encoded CI value is safe in generated Kotlin source. This is still extractable from an APK.
         val relaySecret = System.getenv("MSN_IDENTITY_RELAY_HMAC").orEmpty()
-        val relayEncoded = java.util.Base64.getEncoder().encodeToString(relaySecret.toByteArray(Charsets.UTF_8))
+        val relayEncoded = Base64.getEncoder().encodeToString(relaySecret.toByteArray(Charsets.UTF_8))
         buildConfigField("String", "IDENTITY_RELAY_HMAC_B64", "\"$relayEncoded\"")
 
     }
