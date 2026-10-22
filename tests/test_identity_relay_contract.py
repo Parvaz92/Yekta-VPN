@@ -33,6 +33,9 @@ class RelayContract(unittest.TestCase):
         self.assertIn('KEY_TYPE_MASQUE: &str = "secp256r1"', (ROOT / "core/aether/src/consts.rs").read_text())
         for key in ('"key"', '"tos"', '"key_type"', '"tunnel_type"'):
             self.assertIn('put(' + key, RELAY)
+        self.assertIn('JSONObject().put("warp_enabled", true)', RELAY)
+        self.assertIn('if (!enabled.optBoolean("warp_enabled", false))', RELAY)
+        self.assertIn('request(endpoint, "PATCH", ENROLL_PATH_PREFIX + deviceId, update, token)', RELAY)
         self.assertIn('wg_private_key', CORE_CONFIG)
         self.assertIn('cert_pem', CORE_CONFIG)
 

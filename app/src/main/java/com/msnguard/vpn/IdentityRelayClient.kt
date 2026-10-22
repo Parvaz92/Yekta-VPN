@@ -98,10 +98,17 @@ object IdentityRelayClient {
             put("locale", java.util.Locale.getDefault().toString())
         }.toString()
         val account = request(endpoint, "POST", REGISTER_PATH, body, null)
-        if (!masque) return Hop(account, privateBytes, "", "", 0)
         val deviceId = account.optString("id").takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) }
             ?: error("invalid device id")
         val token = account.optString("token").takeIf { it.isNotEmpty() } ?: error("missing token")
+        // A newly registered WARP account can handshake without carrying traffic
+        // until warp_enabled is set. MASQUE needs its own authenticated key PATCH.
+        if (!account.optBoolean("warp_enabled", false)) {
+            val enabled = request(endpoint, "PATCH", ENROLL_PATH_PREFIX + deviceId,
+                JSONObject().put("warp_enabled", true).toString(), token)
+            if (!enabled.optBoolean("warp_enabled", false)) error("WARP was not enabled")
+        }
+        if (!masque) return Hop(account, privateBytes, "", "", 0)
         val pair = KeyPairGenerator.getInstance("EC").apply {
             initialize(java.security.spec.ECGenParameterSpec("secp256r1"), SecureRandom())
         }.generateKeyPair()
@@ -146,8 +153,10 @@ object IdentityRelayClient {
             connection.readTimeout = READ_TIMEOUT_MS
             connection.requestMethod = method
             connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
             connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("User-Agent", "WARP for Android")
+            connection.setRequestProperty("CF-Client-Version", "a-6.35-4471")
             connection.setRequestProperty(AUTH_TIMESTAMP, timestamp)
             connection.setRequestProperty(AUTH_NONCE, nonce)
             connection.setRequestProperty(AUTH_SIGNATURE, signature)
