@@ -28,10 +28,15 @@ android {
         applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 391
-        versionName = "3.1.0-alpha56"
+        versionCode = 392
+        versionName = "3.1.0-alpha57"
+        // The encoded CI value is safe in generated Kotlin source. This is still extractable from an APK.
+        val relaySecret = System.getenv("MSN_IDENTITY_RELAY_HMAC").orEmpty()
+        val relayEncoded = java.util.Base64.getEncoder().encodeToString(relaySecret.toByteArray(Charsets.UTF_8))
+        buildConfigField("String", "IDENTITY_RELAY_HMAC_B64", "\"$relayEncoded\"")
 
     }
+    buildFeatures { buildConfig = true }
 
     splits {
         abi {
@@ -146,6 +151,7 @@ android {
     implementation("io.netty:netty-transport:4.1.115.Final")
     implementation("io.netty:netty-handler-proxy:4.1.115.Final")
     implementation("org.conscrypt:conscrypt-android:2.5.2")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("androidx.core:core-splashscreen:1.0.1")

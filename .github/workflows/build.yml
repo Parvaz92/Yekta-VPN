@@ -76,10 +76,13 @@ jobs:
           AETHERY_KEYSTORE_PASSWORD: ${{ secrets.AETHERY_KEYSTORE_PASSWORD }}
           AETHERY_KEY_ALIAS: ${{ secrets.AETHERY_KEY_ALIAS }}
           AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
+          MSN_IDENTITY_RELAY_HMAC: ${{ secrets.MSN_IDENTITY_RELAY_HMAC }}
           # foojay can no longer serve JDK 21, so stop Gradle trying to fetch
           # one and use the JDK installed above. auto-detect is Gradle's default.
           ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-download: 'false'
-        run: ./gradlew assembleRelease -PaetheryKeystore=release.keystore
+        run: |
+          test -n "$MSN_IDENTITY_RELAY_HMAC" || { echo 'MSN_IDENTITY_RELAY_HMAC secret is required for relay builds' >&2; exit 1; }
+          ./gradlew assembleRelease -PaetheryKeystore=release.keystore
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4

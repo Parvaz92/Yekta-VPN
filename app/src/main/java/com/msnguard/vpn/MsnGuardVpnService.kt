@@ -4413,6 +4413,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             )
             sendStatus(STATUS_CONNECTING, Strings.tf("Connecting %s…", Strings.t(label)))
 
+            if (!IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, protocol)) {
+                val identity = IdentityRelayClient.provision(this@MsnGuardVpnService, protocol) { stopRequested.get() }
+                if (!identity.success) {
+                    ConnectionLog.record("Chain: $label relay identity unavailable; trying existing core path")
+                }
+            }
             val config = CoreConfig.chainOuterJson(this, protocol)
             // 2.3.0 config is the process environment, not the JSON blob. The
             // outer leg must move the engine's SOCKS listener aside to
@@ -5009,6 +5015,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         worker.execute {
             try {
                 ConnectionLog.record("Preparing $currentProtocol identity")
+                val relayProtocol = runCatching { JSONObject(effectiveConfig).optString("protocol") }
+                    .getOrDefault("").lowercase()
+                if (CoreConfig.warpTransportOf(relayProtocol) != null &&
+                    !IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, relayProtocol)) {
+                    val outcome = IdentityRelayClient.provision(this@MsnGuardVpnService, relayProtocol) { stopRequested.get() }
+                    if (!outcome.success) {
+                        ConnectionLog.record("Identity relay unavailable; trying existing core path")
+                    } else {
+                        ConnectionLog.record("Identity relay: $relayProtocol stored")
+                    }
+                }
                 NativeCore.attach(this)
                 // PattNG relays the core's own output line by line; an
                 // in-process library has no stdout, so install the callback
