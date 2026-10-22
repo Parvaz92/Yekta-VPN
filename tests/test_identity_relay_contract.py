@@ -54,21 +54,14 @@ class RelayContract(unittest.TestCase):
 
     def test_identity_validator_accepts_numbered_toml_keys(self):
         validator = PROVISIONER.split('fun validIdentityFile')[1].split('fun hasIdentity')[0]
-        key_pattern = re.search(r'val fields = Regex\("(.*?)"\)', validator, re.DOTALL)
-        self.assertIsNotNone(key_pattern)
-        assert key_pattern is not None
-        # Decode Kotlin's backslash escapes as the regex engine sees them.
-        pattern = key_pattern.group(1).replace('\\\\', '\\')
-        sample = '\n'.join([
-            'device_id = "device"', 'access_token = "token"',
-            'ipv4 = "172.16.0.2"', 'ipv6 = "2606:4700:110::2"',
-            'wg_private_key = "' + 'A' * 43 + '="',
-            'wg_peer_public_key = "' + 'B' * 43 + '="',
-        ])
-        fields = dict(re.findall(pattern, sample))
-        self.assertEqual(fields['ipv4'], '172.16.0.2')
-        self.assertEqual(fields['ipv6'], '2606:4700:110::2')
-        self.assertIn('wg_private_key', fields)
+        self.assertIn('org.tomlj.Toml.parse(file.toPath())', validator)
+        self.assertIn('fields.hasErrors()', validator)
+        for key in ('device_id', 'access_token', 'ipv4', 'wg_private_key', 'wg_peer_public_key',
+                    'cert_pem', 'key_pem', 'cert_issued_at'):
+            self.assertIn('"' + key + '"', validator)
+        self.assertIn('fields.getLong("cert_issued_at")', validator)
+        self.assertIn('implementation("org.tomlj:tomlj:2.2.0")',
+                      (ROOT / 'app/build.gradle.kts').read_text())
 
     def test_no_private_data_in_logging(self):
         for forbidden in ('Log.i(TAG, response', 'ConnectionLog.record(response', 'Log.w(TAG, body', 'ConnectionLog.record(body'):

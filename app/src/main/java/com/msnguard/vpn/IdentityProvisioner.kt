@@ -59,19 +59,19 @@ object IdentityProvisioner {
      * already has what it needs.
      */
     fun validIdentityFile(file: File, masque: Boolean): Boolean = try {
-        val text = file.readText()
-        val fields = Regex("(?m)^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*$")
-            .findAll(text).associate { it.groupValues[1] to it.groupValues[2] }
-        val issued = Regex("(?m)^cert_issued_at\\s*=\\s*(\\d+)\\s*$")
-            .find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-        fun key(name: String, size: Int) = runCatching {
-            android.util.Base64.decode(fields[name], android.util.Base64.DEFAULT).size == size
-        }.getOrDefault(false)
-        !fields["device_id"].isNullOrBlank() && !fields["access_token"].isNullOrBlank() &&
-            !fields["ipv4"].isNullOrBlank() && key("wg_private_key", 32) &&
-            key("wg_peer_public_key", 32) &&
-            (!masque || (fields["cert_pem"]?.contains("BEGIN CERTIFICATE") == true &&
-                fields["key_pem"]?.contains("BEGIN PRIVATE KEY") == true && issued > 0L))
+        val fields = org.tomlj.Toml.parse(file.toPath())
+        if (fields.hasErrors()) false else {
+            fun key(name: String, size: Int) = runCatching {
+                android.util.Base64.decode(fields.getString(name), android.util.Base64.DEFAULT).size == size
+            }.getOrDefault(false)
+            !fields.getString("device_id").isNullOrBlank() &&
+                !fields.getString("access_token").isNullOrBlank() &&
+                !fields.getString("ipv4").isNullOrBlank() &&
+                key("wg_private_key", 32) && key("wg_peer_public_key", 32) &&
+                (!masque || (fields.getString("cert_pem")?.contains("BEGIN CERTIFICATE") == true &&
+                    fields.getString("key_pem")?.contains("BEGIN PRIVATE KEY") == true &&
+                    (fields.getLong("cert_issued_at") ?: 0L) > 0L))
+        }
     } catch (_: Exception) { false }
 
     fun hasIdentity(context: Context, protocol: String): Boolean {
