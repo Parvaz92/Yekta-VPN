@@ -9227,7 +9227,23 @@ class MainActivity : Activity() {
      * re-armed on the next launch.
      */
     private fun chainArmed(protocol: Protocol = selectedProtocol): Boolean =
-        preferences().getBoolean(chainPrefKey(protocol), CHAIN_ARMED_DEFAULT)
+        preferences().getBoolean(chainPrefKey(protocol), chainDefault(protocol))
+
+    /**
+     * The default each chain key reads back with before the user ever toggles it.
+     *
+     * This has to be the SAME constant the service side reads for that key, and
+     * the two sides disagreed for Tor: the toggle row default on this side was
+     * [CHAIN_ARMED_DEFAULT] (off) while TorManager arms its key with true — so on
+     * a fresh install the switch painted OFF, yet the service chained Tor into
+     * WARP. Field report: "the switch is off but Tor still connected through
+     * WARP; toggling it on and then off is the only thing that fixes it" — the
+     * on/off round-trip worked precisely because it finally wrote the key, and
+     * the default disagreement vanished. Borrow TorManager's default here so
+     * the switch tells the truth before any toggle exists.
+     */
+    private fun chainDefault(protocol: Protocol): Boolean =
+        if (protocol == Protocol.TOR) TorManager.CHAIN_ARMED_DEFAULT else CHAIN_ARMED_DEFAULT
 
     /**
      * Persist whether the next connect chains the selected transport inside WARP.
