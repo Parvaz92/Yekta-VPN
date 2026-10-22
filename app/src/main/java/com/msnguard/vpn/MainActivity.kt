@@ -402,10 +402,12 @@ class MainActivity : Activity() {
      */
     private var countryLookupIp = ""
     private val statusHandler = Handler(Looper.getMainLooper())
+    private var refreshWarpIdentityCards: (() -> Unit)? = null
     private val statusPoll = object : Runnable {
         override fun run() {
             if (!uiForeground) return
             renderStatus()
+            if (warpSettingPage != null) refreshWarpIdentityCards?.invoke()
             statusHandler.postDelayed(this, STATUS_POLL_MS)
         }
     }
@@ -4858,7 +4860,7 @@ class MainActivity : Activity() {
     private fun currentLanguagePref(): String = AppLanguage.current(this)
 
     /**
-     * Pick the UI language: English, Persian, Chinese.
+     * Pick the UI language: English, Persian, Chinese, Russian.
      *
      * Exactly the theme's shape: write the preference, recreate(), and the
      * whole tree is rebuilt reading [Strings.t] at every label. The tunnel is
@@ -4950,11 +4952,9 @@ class MainActivity : Activity() {
      * Settings owns the choice.
      *
      * The sheet is built with the same geometry as [showChoiceSheet] rather
-     * than a hand-rolled dialog: the same SURFACE fill and corner radius, the
-     * same bottom-anchored MATCH_PARENT window, the same row height and
-     * padding, and the same SELECTED marker. Three full-width rows stack
-     * vertically, so "فارسی", "English" and "中文" each get a whole line and
-     * none of them can be squeezed into a sliver again.
+     * than a hand-rolled dialog: the same SURFACE fill and corner radius,
+     * the same bottom-anchored MATCH_PARENT window, and full-width rows
+     * so every language name remains legible.
      */
     /**
      * The typeface for a *specific* language's label, unlike [Typefaces.regular]
@@ -6355,6 +6355,7 @@ class MainActivity : Activity() {
     private fun warpSettingSummary(): String = ""
 
     private fun openWarpSettingScreen() {
+        refreshWarpIdentityCards = null
         warpSettingPage?.let(pageHost::removeView)
         val page = FrameLayout(this).apply { setBackgroundColor(warpC(CANVAS.toLong(), 0xFFF1F4F7)); isClickable = true }
         val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
@@ -6694,6 +6695,8 @@ class MainActivity : Activity() {
                 val card = vaultCards[i]
                 val isOk = hasVaultIdentity(proto)
                 val isSel = !isOk && proto == vaultSelected
+                (card.getChildAt(0) as? TextView)?.text =
+                    if (isOk) "\u2713" else when (proto) { "masque" -> "\u2B22"; "mim" -> "\u2B23"; else -> "\u2B21" }
                 when {
                     isOk -> {
                         card.background = roundedBackground(connectedContainer, 14, connected)
@@ -6727,6 +6730,7 @@ class MainActivity : Activity() {
             val p = vaultCardProtos[i]
             vaultCards[i].setOnClickListener { syncSelect(p) }
         }
+        refreshWarpIdentityCards = ::refreshVaultCards
         refreshVaultCards()
         vaultBox.addView(vaultGrid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
 
@@ -6873,7 +6877,11 @@ class MainActivity : Activity() {
         warpSettingPage = page; pageHost.addView(page); page.requestApplyInsets(); animatePageOpen(page)
     }
 
-    private fun closeWarpSettingScreen() { warpSettingPage?.let { animatePageClose(it) { warpSettingPage = null } }; openSettingsScreen() }
+    private fun closeWarpSettingScreen() {
+        refreshWarpIdentityCards = null
+        warpSettingPage?.let { animatePageClose(it) { warpSettingPage = null } }
+        openSettingsScreen()
+    }
 
     /**
      * Arm a one-shot fresh scan when the user switches the Masque exit between
@@ -8698,13 +8706,10 @@ class MainActivity : Activity() {
      * starts at the connect and the gate runs after the handshake.
      */
     private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
-        // ECH fast lane: with AETHER_ECH=auto the WARP transports no longer raise
-        // SHARD to fetch a missing identity — the engine fetches the
-        // ECHConfigList and registers on its own link, exactly as in the FCAE
-        // log. So the old "hasIdentity → 120s" branch never fires and the scan
-        // budget is always the fast one: the fresh-install penalty is gone.
+        // The first-connect ladder is a UI deadline, not the core's scan
+        // deadline. Give MASQUE 80s so ECH/API delays do not evict it at 48s.
         Protocol.WIREGUARD -> 32_000L
-        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
+        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 80_000L
         Protocol.WARP_IN_WARP -> 55_000L
         else -> 240_000L // SHARD: 31 slices x12s=372s worst, 5 successes at slice 19 ≈228s — 240 covers it; 45s killed slice 4/31
     }
