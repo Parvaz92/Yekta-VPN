@@ -4858,7 +4858,7 @@ class MainActivity : Activity() {
     private fun currentLanguagePref(): String = AppLanguage.current(this)
 
     /**
-     * Pick the UI language: English, Persian, Chinese.
+     * Pick the UI language: English, Persian, Chinese, Russian.
      *
      * Exactly the theme's shape: write the preference, recreate(), and the
      * whole tree is rebuilt reading [Strings.t] at every label. The tunnel is
@@ -4950,11 +4950,9 @@ class MainActivity : Activity() {
      * Settings owns the choice.
      *
      * The sheet is built with the same geometry as [showChoiceSheet] rather
-     * than a hand-rolled dialog: the same SURFACE fill and corner radius, the
-     * same bottom-anchored MATCH_PARENT window, the same row height and
-     * padding, and the same SELECTED marker. Three full-width rows stack
-     * vertically, so "فارسی", "English" and "中文" each get a whole line and
-     * none of them can be squeezed into a sliver again.
+     * than a hand-rolled dialog: the same SURFACE fill and corner radius,
+     * the same bottom-anchored MATCH_PARENT window, and full-width rows
+     * so every language name remains legible.
      */
     /**
      * The typeface for a *specific* language's label, unlike [Typefaces.regular]

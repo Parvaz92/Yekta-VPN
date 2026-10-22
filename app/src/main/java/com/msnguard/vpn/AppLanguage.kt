@@ -4,7 +4,7 @@ import android.content.Context
 import com.msnguard.vpn.profiled
 
 /**
- * The app's UI language: English, Persian, Chinese.
+ * The app's UI language: English, Persian, Chinese, Russian.
  *
  * Chosen once, on first launch, by a one-time picker; after that the row in
  * Settings owns it. An install that has not answered yet keeps following the
@@ -13,14 +13,14 @@ import com.msnguard.vpn.profiled
  */
 object AppLanguage {
 
-    /** Preference key. Values: "en", "fa", "zh". */
+    /** Preference key. Values: "en", "fa", "zh", "ru". */
     const val PREF = "app_language"
 
     /** Preference key recording that the user has already picked a language once. */
     const val PREF_CHOSEN = "language_chosen"
 
     /** The language codes the UI itself is translated into. */
-    val SUPPORTED = listOf("en", "fa", "zh")
+    val SUPPORTED = listOf("en", "fa", "zh", "ru")
 
     /**
      * The active language code, never blank.
@@ -85,6 +85,7 @@ object AppLanguage {
     fun label(code: String): String = when (code) {
         "fa" -> "فارسی"
         "zh" -> "中文"
+        "ru" -> "Русский"
         else -> "English"
     }
 }

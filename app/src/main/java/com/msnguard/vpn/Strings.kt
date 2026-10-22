@@ -880,6 +880,7 @@ object Strings {
         val row = table[english]
         val l = AppLanguage.current()
         if (l == "en") return row?.first ?: english
+        if (l == "ru") return RussianStrings.t(english)
         row ?: return english
         return when (l) {
             "fa" -> row.second.ifBlank { english }
