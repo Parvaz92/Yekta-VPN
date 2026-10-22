@@ -6651,13 +6651,13 @@ class MainActivity : Activity() {
             addView(TextView(this@MainActivity).apply { text = "\u25CF"; textSize = 7f; setTextColor(0xFFFFBD2E.toInt()) })
         })
         vaultHeader.addView(label("\u25B8 " + Strings.t("Identity Vault"), 11f, connected, TypefaceStyle.MEDIUM).apply { setPadding(dp(10), 0, 0, 0); letterSpacing = 0.06f })
-        vaultHeader.addView(label("ECH  \u00B7  SHARD", 10f, MUTED).apply { gravity = Gravity.END; setPadding(dp(6), 0, 0, 0) }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
+        vaultHeader.addView(label("Relay  \u00B7  ECH  \u00B7  SHARD", 10f, MUTED).apply { gravity = Gravity.END; setPadding(dp(6), 0, 0, 0) }.also { (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.weight = 1f } })
         vaultBox.addView(vaultHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         vaultBox.addView(label(Strings.t("Pick method, pick strategy, then Start. Green means identity stored (persists per method)."), 11.5f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8); bottomMargin = dp(12) })
 
         // Vault selection mirrors railSelected (bidirectional sync)
         var vaultSelected: String = railSelected
-        var vaultMethod: String = "ech" // ech | shard | plain
+        var vaultMethod: String = "relay" // relay | ech | shard | plain
         val vaultProtos = listOf("masque" to "MASQUE", "mim" to "MiM", "wireguard" to "WireGuard", "gool" to "WoW")
         val vaultCards = mutableListOf<LinearLayout>()
         val vaultCardProtos = mutableListOf<String>()
@@ -6731,18 +6731,26 @@ class MainActivity : Activity() {
         vaultBox.addView(vaultGrid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
 
         val methodRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        lateinit var relayBtn: TextView
         lateinit var echBtn: TextView
         lateinit var shardBtn: TextView
         lateinit var plainBtn: TextView
         fun refreshMethodRow() {
             val selBg = roundedBackground(selectedSurface, 12, palette.violet)
             val offBg = roundedBackground(SURFACE, 12, DIVIDER)
+            relayBtn.background = if (vaultMethod == "relay") selBg else offBg
             echBtn.background = if (vaultMethod == "ech") selBg else offBg
             shardBtn.background = if (vaultMethod == "shard") selBg else offBg
             plainBtn.background = if (vaultMethod == "plain") selBg else offBg
+            relayBtn.setTextColor(if (vaultMethod == "relay") palette.violet else MUTED)
             echBtn.setTextColor(if (vaultMethod == "ech") palette.violet else MUTED)
             shardBtn.setTextColor(if (vaultMethod == "shard") palette.violet else MUTED)
             plainBtn.setTextColor(if (vaultMethod == "plain") palette.violet else MUTED)
+        }
+        relayBtn = TextView(this).apply {
+            text = "Relay"; textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(6), dp(12), dp(6), dp(12))
+            typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
+            setOnClickListener { vaultMethod = "relay"; refreshMethodRow() }
         }
         echBtn = TextView(this).apply {
             text = Strings.t("Quantum ECH"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
@@ -6750,7 +6758,7 @@ class MainActivity : Activity() {
             setOnClickListener { vaultMethod = "ech"; refreshMethodRow() }
         }
         shardBtn = TextView(this).apply {
-            text = Strings.t("Shard Relay"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            text = Strings.t("SHARD"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener { vaultMethod = "shard"; refreshMethodRow() }
         }
@@ -6759,8 +6767,9 @@ class MainActivity : Activity() {
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener { vaultMethod = "plain"; refreshMethodRow() }
         }
-        methodRow.addView(echBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
-        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        methodRow.addView(relayBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        methodRow.addView(echBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
         methodRow.addView(plainBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         vaultBox.addView(methodRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
         refreshMethodRow()
@@ -6776,10 +6785,12 @@ class MainActivity : Activity() {
         // fetcher's generation so the running fetch unwinds through its normal
         // (timeout-equal) cleanup: engine kill + previous identity restore.
         var provisioning = false
+        val relayCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        var chosenCancelMethod = "relay"
         startBtn = createSettingsButton(Strings.t("START \u2014 GET IDENTITY"), backgroundOverride = primary, textColorOverride = primaryContainer) {
             if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@createSettingsButton }
             if (provisioning) {
-                WarpIdentityFetcher.cancel()
+                if (chosenCancelMethod == "relay") relayCancelled.set(true) else WarpIdentityFetcher.cancel()
                 term.text = Strings.t("Cancel requested — wait a few seconds\u2026")
                 toastShort(Strings.t("Cancelling\u2026"))
                 // Keep the button disabled here: the worker's completion path
@@ -6788,7 +6799,9 @@ class MainActivity : Activity() {
             }
             val proto = vaultProtocolSelected(vaultSelected)
             val chosenMethod = vaultMethod
-            val methodName = when (chosenMethod) { "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("Shard Relay"); else -> Strings.t("Quantum ECH") }
+            chosenCancelMethod = chosenMethod
+            relayCancelled.set(false)
+            val methodName = when (chosenMethod) { "relay" -> "Relay"; "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("SHARD"); else -> Strings.t("Quantum ECH") }
             if (hasVaultIdentity(proto)) {
                 toastShort(proto + " \u2713 " + Strings.t("Key received"))
                 term.text = proto + " \u2014 " + Strings.t("Key received") + " (" + methodName + ")"
@@ -6796,7 +6809,7 @@ class MainActivity : Activity() {
                 refreshVaultCards(); return@createSettingsButton
             }
             provisioning = true
-            startBtn.isEnabled = false
+            startBtn.isEnabled = true
             startBtn.text = Strings.t("PROVISIONING \u2014 TAP TO CANCEL")
             term.text = proto + " \u2014 " + methodName + " \u2014 connecting\u2026"
             term.visibility = View.VISIBLE
@@ -6818,6 +6831,9 @@ class MainActivity : Activity() {
             Thread {
                 val ok = try {
                     when (chosenMethod) {
+                        "relay" -> IdentityRelayClient.provision(ctx, proto) { relayCancelled.get() }.also {
+                            ConnectionLog.record("Identity relay: " + proto + " — " + it.error)
+                        }.success
                         "shard" -> WarpIdentityFetcher.fetchViaShard(ctx, proto)
                         "plain" -> WarpIdentityFetcher.fetchDirectPlain(ctx, proto)
                         else -> WarpIdentityFetcher.fetch(ctx, proto)
@@ -6832,7 +6848,8 @@ class MainActivity : Activity() {
                     if (ok && hasVaultIdentity(proto)) {
                         term.text = proto + " \u2713 " + Strings.t("Key received") + " \u2014 " + methodName
                         toastShort(proto + " \u2713 " + Strings.t("Key received"))
-                    } else if (WarpIdentityFetcher.wasCancelled()) {
+                    } else if ((chosenMethod == "relay" && relayCancelled.get()) ||
+                        (chosenMethod != "relay" && WarpIdentityFetcher.wasCancelled())) {
                         // Cancel completed — say so plainly; the fetcher already
                         // restored any previous identity and stopped the engine.
                         term.text = proto + " \u2014 " + Strings.t("Cancelled") + " (" + methodName + ")"

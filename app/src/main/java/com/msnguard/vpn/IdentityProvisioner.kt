@@ -58,38 +58,32 @@ object IdentityProvisioner {
      * Kotlin keeps this class from running a SHARD session for a phone that
      * already has what it needs.
      */
+    fun validIdentityFile(file: File, masque: Boolean): Boolean = try {
+        val text = file.readText()
+        val fields = Regex("(?m)^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*$")
+            .findAll(text).associate { it.groupValues[1] to it.groupValues[2] }
+        val issued = Regex("(?m)^cert_issued_at\\s*=\\s*(\\d+)\\s*$")
+            .find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        fun key(name: String, size: Int) = runCatching {
+            android.util.Base64.decode(fields[name], android.util.Base64.DEFAULT).size == size
+        }.getOrDefault(false)
+        !fields["device_id"].isNullOrBlank() && !fields["access_token"].isNullOrBlank() &&
+            !fields["ipv4"].isNullOrBlank() && key("wg_private_key", 32) &&
+            key("wg_peer_public_key", 32) &&
+            (!masque || (fields["cert_pem"]?.contains("BEGIN CERTIFICATE") == true &&
+                fields["key_pem"]?.contains("BEGIN PRIVATE KEY") == true && issued > 0L))
+    } catch (_: Exception) { false }
+
     fun hasIdentity(context: Context, protocol: String): Boolean {
-        // Mirrors config_path in CoreConfig.json and derive_sibling_path in main.rs.
         val base = File(context.filesDir, "aether.toml")
-        val configPath = when (protocol.lowercase()) {
-            "masque" -> siblingFile(base, "masque")
-            // GOOL/WoW dials two WARP identities, so both halves must exist.
-            "gool", "warp-in-warp", "wow" -> {
-                if (!siblingFile(base, "secondary").exists()) return false
-                base
-            }
-            // MIM dials two MASQUE identities: the primary AND its -secondary
-            // sibling. The check below only looked at aether-masque.toml, so a
-            // phone that had the outer hop but not the inner one reported
-            // "already provisioned", skipped SHARD, and the core failed at
-            // load_or_provision_masque(secondary) — "no masque identity found".
-            "mim", "masque-in-masque", "masque over masque" -> {
-                if (!siblingFile(siblingFile(base, "masque"), "secondary").exists()) return false
-                siblingFile(base, "masque")
-            }
-            else -> base
-        }
-        if (!configPath.exists()) return false
-        return try {
-            val toml = configPath.readText()
-            // The account fields the core itself checks: account_id / token
-            // (device registration) and the masque certificate. A file that
-            // carries none of them is a placeholder, not an identity.
-            toml.contains("account_id") || toml.contains("account_token") ||
-                toml.contains("certificate") || toml.contains("private_key")
-        } catch (e: Exception) {
-            Log.w(TAG, "could not read ${configPath.name}: ${e.message}")
-            false
+        val masque = siblingFile(base, "masque")
+        return when (protocol.lowercase()) {
+            "masque" -> validIdentityFile(masque, true)
+            "mim", "masque-in-masque", "masque over masque" ->
+                validIdentityFile(masque, true) && validIdentityFile(siblingFile(masque, "secondary"), true)
+            "gool", "wow", "warp-in-warp" ->
+                validIdentityFile(base, false) && validIdentityFile(siblingFile(base, "secondary"), false)
+            else -> validIdentityFile(base, false)
         }
     }
 
@@ -388,19 +382,16 @@ object IdentityProvisioner {
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = connection.responseCode
             if (code !in 200..299) {
-                val errBody = runCatching { connection.errorStream?.bufferedReader()?.readText()?.take(400) }.getOrNull()
-                Log.w(TAG, "registration through SHARD returned HTTP $code${if (!errBody.isNullOrBlank()) " — ${errBody.take(200)}" else ""}")
-                ConnectionLog.record("Identity Vault: $protocol via Shard — HTTP $code${if (!errBody.isNullOrBlank()) " — ${errBody.take(120)}" else ""}")
+                Log.w(TAG, "registration through SHARD returned HTTP $code")
+                ConnectionLog.record("Identity Vault: $protocol via Shard — HTTP $code")
                 return null
             }
             val response = connection.inputStream.bufferedReader().readText()
-            val snippet = response.take(300)
-            ConnectionLog.record("Identity Vault: $protocol via Shard — HTTP ${code} — ${snippet.take(120)}")
             val parsed = JSONObject(response)
             val saved = saveIdentity(context, protocol, parsed)
             if (saved == null) {
-                Log.w(TAG, "registration through SHARD: saveIdentity returned null for $protocol — keys: ${parsed.keys().asSequence().joinToString()} — body ${response.take(300)}")
-                ConnectionLog.record("Identity Vault: $protocol via Shard — parse/save null — keys ${parsed.keys().asSequence().joinToString().take(80)}")
+                Log.w(TAG, "registration through SHARD: identity response incomplete")
+                ConnectionLog.record("Identity Vault: $protocol via Shard — parse/save failed")
             }
             saved
         } catch (e: Exception) {
@@ -531,40 +522,79 @@ object IdentityProvisioner {
      * silently undoing everything this class just did.
      */
     private fun saveIdentity(context: Context, protocol: String, response: JSONObject): File? {
-        return try {
-            val config = response.optJSONObject("config")
-                ?: response.optJSONObject("peer_config")
-                ?: return null
-            // The fields PersistedIdentity serializes. Empty strings are the
-            // core's own defaults for the ones this transport does not use.
-            val toml = buildString {
-                appendLine("device_id = \"${response.optString("id")}\"")
-                appendLine("access_token = \"${response.optString("token")}\"")
-                appendLine("cert_pem = \"\"")
-                appendLine("key_pem = \"\"")
-                appendLine("cert_issued_at = 0")
-                appendLine("ipv4 = \"${config.optString("interface")}\"")
-                appendLine("ipv6 = \"${config.optString("interface_v6")}\"")
-                appendLine("wg_private_key = \"${response.optString("private_key")}\"")
-                appendLine("wg_peer_public_key = \"${config.optString("public_key")}\"")
-                appendLine("client_id = \"${response.optString("client_id")}\"")
-                appendLine("organization = \"\"")
-                appendLine("gateway_proxy = \"\"")
-                appendLine("assigned_endpoint = \"${config.optString("endpoint")}\"")
-            }
-            val base = File(context.filesDir, "aether.toml")
-            val target = when (protocol.lowercase()) {
-                "masque" -> siblingFile(base, "masque")
-                "gool", "warp-in-warp", "wow" -> siblingFile(base, "gool")
-                else -> base
-            }
-            target.writeText(toml)
-            Log.i(TAG, "saved a WARP identity to ${target.name} via SHARD")
-            target
-        } catch (e: Exception) {
-            Log.w(TAG, "could not save the identity: ${e.message}")
-            null
+        // These legacy callers do not retain a device-generated X25519 key or
+        // enroll MASQUE certificates. A registration response alone cannot be
+        // persisted as a usable identity; never create a misleading TOML file.
+        Log.w(TAG, "legacy $protocol registration cannot save a complete identity")
+        return null
+    }
+
+    fun relayToml(response: JSONObject, privateKey: ByteArray, cert: String, key: String, issued: Long): String? {
+        val config = response.optJSONObject("config") ?: return null
+        val addresses = config.optJSONObject("interface")?.optJSONObject("addresses") ?: return null
+        val peers = config.optJSONArray("peers") ?: return null
+        val peer = peers.optJSONObject(0) ?: return null
+        fun b64(value: String, length: Int): String? = runCatching {
+            val bytes = android.util.Base64.decode(value, android.util.Base64.DEFAULT)
+            if (bytes.size == length) value else null
+        }.getOrNull()
+        val peerKey = b64(peer.optString("public_key"), 32) ?: return null
+        val clientId = b64(config.optString("client_id"), 3) ?: ""
+        if (privateKey.size != 32 || response.optString("id").isBlank() ||
+            response.optString("token").isBlank() || addresses.optString("v4").isBlank()
+        ) return null
+        if ((cert.isBlank() || key.isBlank()) && issued != 0L) return null
+        if (issued != 0L && (!cert.contains("BEGIN CERTIFICATE") || !key.contains("BEGIN PRIVATE KEY"))) return null
+        fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
+            .replace("\n", "\\n").replace("\r", "\\r") + "\""
+        val account = response.optJSONObject("account")
+        val services = config.optJSONObject("services")
+        val endpoint = peer.optJSONObject("endpoint")?.optString("v4").orEmpty().substringBefore(':')
+        return buildString {
+            appendLine("device_id = " + quoted(response.optString("id")))
+            appendLine("access_token = " + quoted(response.optString("token")))
+            appendLine("cert_pem = " + quoted(cert))
+            appendLine("key_pem = " + quoted(key))
+            appendLine("cert_issued_at = $issued")
+            appendLine("ipv4 = " + quoted(addresses.optString("v4")))
+            appendLine("ipv6 = " + quoted(addresses.optString("v6")))
+            appendLine("wg_private_key = " + quoted(android.util.Base64.encodeToString(privateKey, android.util.Base64.NO_WRAP)))
+            appendLine("wg_peer_public_key = " + quoted(peerKey))
+            appendLine("client_id = " + quoted(clientId))
+            appendLine("organization = " + quoted(account?.optString("organization").orEmpty()))
+            appendLine("gateway_proxy = " + quoted(services?.optString("http_proxy").orEmpty()))
+            appendLine("assigned_endpoint = " + quoted(endpoint))
         }
+    }
+
+    fun installRelayedFiles(files: List<Pair<File, String>>): Boolean {
+        val staged = mutableListOf<Pair<File, File>>()
+        val backups = mutableListOf<Pair<File, File>>()
+        val installed = mutableListOf<File>()
+        try {
+            for ((target, text) in files) {
+                val temp = File(target.parentFile, target.name + ".relay-new")
+                temp.writeText(text)
+                if (!validIdentityFile(temp, target.name.contains("masque"))) error("invalid staged identity")
+                staged += target to temp
+            }
+            for ((target, temp) in staged) {
+                val backup = File(target.parentFile, target.name + ".relay-old")
+                if (target.exists()) {
+                    if (backup.exists()) error("previous relay recovery pending")
+                    if (!target.renameTo(backup)) error("identity backup failed")
+                    backups += target to backup
+                }
+                if (!temp.renameTo(target)) error("identity install failed")
+                installed += target
+            }
+            backups.forEach { (_, backup) -> backup.delete() }
+            return true
+        } catch (_: Exception) {
+            installed.forEach { it.delete() }
+            backups.forEach { (target, backup) -> backup.renameTo(target) }
+            return false
+        } finally { staged.forEach { (_, temp) -> temp.delete() } }
     }
 
     private fun nowIso(): String =
