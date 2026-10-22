@@ -211,10 +211,18 @@ object FoxyTunnel {
         watchdog = null
         dialCandidates = null
         appContext = null
+        val wasRunning = socks != null || session != null
         runCatching { socks?.stop().also { socks = null } }
         runCatching { session?.close().also { session = null } }
         FoxyLog.mirror = null
-        ConnectionLog.record("Foxy: stopped")
+        // Field report: a user disconnects Foxy, tries Tor later and still sees
+        // "Foxy: stopped" — a teardown log worded like an alarm, which looked
+        // like Foxy interfering with the new connection. It never was: this
+        // stop() runs on EVERY disconnect path by design (each transport's
+        // shutdown calls it to guarantee no Foxy SOCKS or H2 session survives).
+        // Keep the guarantee, drop the noise — only tell the log when Foxy was
+        // actually serving a tunnel beforehand.
+        if (wasRunning) ConnectionLog.record("Foxy: stopped")
     }
 
     /** Log-location helper for the in-panel vault path (unused external state). */

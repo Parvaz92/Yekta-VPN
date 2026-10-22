@@ -33,14 +33,14 @@ object TunEnginePref {
         return if (v in ALL) v else LEGACY
     }
     fun label(key: String, ctx: Context): String = when (key) {
-        ZEPTUN -> "Zeptun"
-        HEV    -> "Hev Tun2Socks"
-        else   -> "BadVPN Tun2Socks"
+        ZEPTUN -> Strings.t("Zeptun")
+        HEV    -> Strings.t("Hev Tun2Socks")
+        else   -> Strings.t("BadVPN Tun2Socks")
     }
     fun description(key: String): String = when (key) {
-        ZEPTUN -> "High speed & low latency · Next-gen kernel engine"
-        HEV    -> "Lightweight & stable · Low battery consumption"
-        else   -> "High compatibility · Best for older Android versions"
+        ZEPTUN -> Strings.t("High speed & low latency · Next-gen kernel engine")
+        HEV    -> Strings.t("Lightweight & stable · Low battery consumption")
+        else   -> Strings.t("High compatibility · Best for older Android versions")
     }
 }
 

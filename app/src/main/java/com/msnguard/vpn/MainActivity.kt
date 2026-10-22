@@ -2672,10 +2672,7 @@ class MainActivity : Activity() {
             addView(label(Strings.t("Reset to defaults"), 22f, INK, TypefaceStyle.MEDIUM))
         })
         sheet.addView(label(
-            "Every setting goes back to how the app arrived: connection mode, " +
-                "tunnel type, SOCKS port, countries, manual bridges, split " +
-                "tunnelling and anti-DPI shaping. Your monthly data total is kept. " +
-                "Back up first if you may want these choices again.",
+            Strings.t("Every setting goes back to how the app arrived: connection mode, tunnel type, SOCKS port, countries, manual bridges, split tunnelling and anti-DPI shaping. Your monthly data total is kept. Back up first if you may want these choices again."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -6359,11 +6356,11 @@ class MainActivity : Activity() {
 
     private fun openWarpSettingScreen() {
         warpSettingPage?.let(pageHost::removeView)
-        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS); isClickable = true }
+        val page = FrameLayout(this).apply { setBackgroundColor(warpC(CANVAS.toLong(), 0xFFF1F4F7)); isClickable = true }
         val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(16), dp(24), dp(24)) }
         // Header
-        content.addView(LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL; addView(this@MainActivity.createHeaderBackButton { this@MainActivity.closeWarpSettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(this@MainActivity.label(Strings.t("Warp Setting"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }) })
+        content.addView(LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL; addView(this@MainActivity.createHeaderBackButton { this@MainActivity.closeWarpSettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(this@MainActivity.label(Strings.t("Warp Setting"), 22f, warpC(INK.toLong(), 0xFF15212A), TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }) })
 
         // Rail — 4 equal chips like 801, no scroll, text only (no H2/H3)
         val railTransports = listOf(
@@ -6388,7 +6385,7 @@ class MainActivity : Activity() {
 
         val rail = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 16, stroke = DIVIDER)
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, warpC(SURFACE_VARIANT.toLong(), 0xFFF7F3FF), 16, stroke = warpC(DIVIDER.toLong(), 0xFFD8CCF2))
             setPadding(dp(6), dp(6), dp(6), dp(6))
         }
         // Build chips with equal weight so they fit without scrolling
@@ -6417,8 +6414,8 @@ class MainActivity : Activity() {
                 val chip = chipViews[i]
                 val sel = proto == railSelected
                 if (sel) {
-                    chip.background = roundedBackground(connectedContainer, 12, connected)
-                    chip.setTextColor(connected)
+                    chip.background = roundedBackground(warpC(connectedContainer.toLong(), 0xFFE7E1FF), 12, warpC(connected.toLong(), 0xFF5A43B5))
+                    chip.setTextColor(warpC(connected.toLong(), 0xFF5A43B5))
                 } else {
                     chip.background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
                     chip.setTextColor(MUTED)
@@ -6438,7 +6435,7 @@ class MainActivity : Activity() {
         val exitBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, warpC(SURFACE_VARIANT.toLong(), 0xFFFFFFFF), 18, stroke = warpC(DIVIDER.toLong(), 0xFFD5DDE3))
         }
         val exitHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         exitHeader.addView(LinearLayout(this@MainActivity).apply {
@@ -6454,7 +6451,7 @@ class MainActivity : Activity() {
         val exitToggleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         lateinit var exitDirectBtn: TextView
         lateinit var exitNodeBtn: TextView
-        val exitCollapse = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = roundedBackground(SURFACE, 14, DIVIDER); visibility = View.GONE }
+        val exitCollapse = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = roundedBackground(warpC(SURFACE.toLong(), 0xFFF7F9FB), 14, warpC(DIVIDER.toLong(), 0xFFD5DDE3)); visibility = View.GONE }
         val exitField = settingsField(value = "", hintText = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link", multiline = true).apply { minLines = 2; maxLines = 4 }
         val exitHint = label(Strings.t("Per transport"), 10f, MUTED)
         var applyBtn: TextView? = null
@@ -7980,8 +7977,8 @@ class MainActivity : Activity() {
     }
 
     private fun foxyChipText(): String = when (com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this)) {
-        "active" -> "ACCOUNT: signed in"
-        else -> "ACCOUNT: not signed in"
+        "active" -> Strings.t("ACCOUNT: signed in")
+        else -> Strings.t("ACCOUNT: not signed in")
     }
 
     /* ── Foxy page pieces (mirror of the approved mockup, theme-colored) ── */
@@ -8005,7 +8002,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
             minimumHeight = dp(52)
-            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE, 16, stroke = accent)
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, foxyC(SURFACE.toLong(), 0xFFFFFFFF), 16, stroke = accent)
         }
         row.addView(label(title, 13f, MUTED), LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
@@ -8038,6 +8035,11 @@ class MainActivity : Activity() {
 
     private fun foxyViolet(): Int =
         if (AppAppearance.isNight(this)) palette.violet else palette.violetText
+
+    /** Light mode uses a soft violet rail and blue-green panels instead of the
+     *  dark theme's saturated green selection surfaces. */
+    private fun warpC(dark: Long, light: Long): Int =
+        if (AppAppearance.isNight(this)) dark.toInt() else light.toInt()
 
     /** Violet-filled action button whose listener is ALWAYS attached — the click
      *  itself guards readiness, so an unready look can never mute a tap. */
@@ -8074,7 +8076,7 @@ class MainActivity : Activity() {
         // ── FOXY ACCOUNT card ──
         val accountCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, foxyC(SURFACE_VARIANT.toLong(), 0xFFFFFFFF), 18, stroke = foxyC(DIVIDER.toLong(), 0xFFD7DFE5))
             setPadding(dp(16), dp(14), dp(16), dp(16))
         }
         accountCard.addView(foxySectionHead("\uD83E\uDD8A " + Strings.t("Foxy Account")))
@@ -8092,7 +8094,7 @@ class MainActivity : Activity() {
             topMargin = dp(10)
         })
 
-        val chip = label("ACCOUNT: not signed in", 11f, foxyC(0xFFC7C7D1, 0xFF4E6069), TypefaceStyle.MEDIUM).apply {
+        val chip = label(Strings.t("ACCOUNT: not signed in"), 11f, foxyC(0xFFC7C7D1, 0xFF4E6069), TypefaceStyle.MEDIUM).apply {
             setPadding(dp(14), dp(8), dp(14), dp(8))
             letterSpacing = 0.10f
             background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong()))
@@ -8100,7 +8102,7 @@ class MainActivity : Activity() {
         when (pending) {
             "pending" -> { chip.text = "WAITING: check your email for the code"; chip.setTextColor(foxyViolet()); chip.background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong())) }
             "active" -> {
-                chip.text = "ACCOUNT: signed in"
+                chip.text = Strings.t("ACCOUNT: signed in")
                 chip.setTextColor(0xFF6B5BD6.toInt())
                 chip.background = roundedBackground(0xFFE7E2FF.toInt(), 11, 0xFFC9BFFF.toInt())
             }
@@ -8204,13 +8206,13 @@ class MainActivity : Activity() {
             styleSignIn(false)
         }
 
-        accountCard.addView(label("\uD83D\uDCE7  Email", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDCE7  " + Strings.t("Email"), 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
         accountCard.addView(email)
 
-        accountCard.addView(label("\uD83D\uDD12  Password", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDD12  " + Strings.t("Password"), 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
@@ -8220,7 +8222,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(38),
         ).apply { topMargin = dp(14) })
 
-        accountCard.addView(label("\uD83D\uDD22  Verification code", 11f, MUTED).apply { letterSpacing = 0.10f },
+        accountCard.addView(label("\uD83D\uDD22  " + Strings.t("Verification code"), 11f, MUTED).apply { letterSpacing = 0.10f },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(14) })
@@ -8308,7 +8310,7 @@ class MainActivity : Activity() {
     private fun onFoxySignOutClicked(chip: TextView, sendBtn: TextView, signInBtnLocal: TextView, codeField: EditText) {
         com.msnguard.vpn.foxy.FoxyTunnel.signOut(this)
         com.msnguard.vpn.foxy.FoxyTunnel.tokenStore(this).savedEmail = null
-        chip.text = "ACCOUNT: not signed in"
+        chip.text = Strings.t("ACCOUNT: not signed in")
         chip.setTextColor(MUTED)
         chip.background = roundedBackground(Color.TRANSPARENT, 11, foxyC(0xFF3A3A46, palette.divider.toLong()))
         codeField.isEnabled = false; codeField.alpha = 0.4f
@@ -8438,7 +8440,7 @@ class MainActivity : Activity() {
                     ConnectionLog.record("Foxy: verification code sent to " + email)
                 } else {
                     // login returned tokens directly (no code needed)
-                    chip.text = "ACCOUNT: signed in"
+                    chip.text = Strings.t("ACCOUNT: signed in")
                     chip.setTextColor(0xFF6B5BD6.toInt())
                     chip.background = roundedBackground(0xFFE7E2FF.toInt(), 11, 0xFFC9BFFF.toInt())
                     sendBtn.text = Strings.t("Sign Out")
@@ -8480,7 +8482,7 @@ class MainActivity : Activity() {
                     styleFoxyButton(signInBtn, true)
                     return@runOnUiThread
                 }
-                chip.text = "ACCOUNT: signed in"
+                chip.text = Strings.t("ACCOUNT: signed in")
                 chip.setTextColor(0xFF6B5BD6.toInt())
                 chip.background = roundedBackground(0xFFE7E2FF.toInt(), 11, 0xFFC9BFFF.toInt())
                 codeField.isEnabled = false
