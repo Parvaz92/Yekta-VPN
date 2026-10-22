@@ -6758,7 +6758,7 @@ class MainActivity : Activity() {
             setOnClickListener { vaultMethod = "ech"; refreshMethodRow() }
         }
         shardBtn = TextView(this).apply {
-            text = Strings.t("Shard Relay"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
+            text = Strings.t("SHARD"); textSize = 11f; gravity = Gravity.CENTER; setPadding(dp(8), dp(12), dp(8), dp(12))
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener { vaultMethod = "shard"; refreshMethodRow() }
         }
@@ -6801,7 +6801,7 @@ class MainActivity : Activity() {
             val chosenMethod = vaultMethod
             chosenCancelMethod = chosenMethod
             relayCancelled.set(false)
-            val methodName = when (chosenMethod) { "relay" -> "Relay"; "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("Shard Relay"); else -> Strings.t("Quantum ECH") }
+            val methodName = when (chosenMethod) { "relay" -> "Relay"; "plain" -> Strings.t("Native Link"); "shard" -> Strings.t("SHARD"); else -> Strings.t("Quantum ECH") }
             if (hasVaultIdentity(proto)) {
                 toastShort(proto + " \u2713 " + Strings.t("Key received"))
                 term.text = proto + " \u2014 " + Strings.t("Key received") + " (" + methodName + ")"

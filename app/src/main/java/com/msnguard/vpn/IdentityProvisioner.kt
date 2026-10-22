@@ -60,7 +60,7 @@ object IdentityProvisioner {
      */
     fun validIdentityFile(file: File, masque: Boolean): Boolean = try {
         val text = file.readText()
-        val fields = Regex("(?m)^([A-Za-z_]+)\\s*=\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*$")
+        val fields = Regex("(?m)^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*$")
             .findAll(text).associate { it.groupValues[1] to it.groupValues[2] }
         val issued = Regex("(?m)^cert_issued_at\\s*=\\s*(\\d+)\\s*$")
             .find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
