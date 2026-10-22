@@ -269,8 +269,11 @@ class MsnGuardTileService : TileService() {
          * Must stay in step with it: the tile's promise is "reconnect the way I last
          * connected", so if the two defaults disagree, a tile-initiated connect on a
          * fresh install raises a different tunnel shape than the button does.
+         * Same lesson the Tor side just taught: defaults that differ across
+         * processes produce a UI that shows one thing while the service does
+         * another. MainActivity arms this key off by default, so the tile does too.
          */
-        const val CHAIN_ARMED_DEFAULT = true
+        const val CHAIN_ARMED_DEFAULT = false
 
 
         enum class Protocol(
