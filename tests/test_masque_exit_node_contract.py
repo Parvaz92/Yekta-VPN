@@ -33,8 +33,15 @@ class MasqueExitNodeContractTest(unittest.TestCase):
 
     def test_version_is_experimental_and_incremented(self):
         text = BUILD.read_text()
-        self.assertIn("versionCode = 399", text)
-        self.assertIn('versionName = "3.1.2"', text)
+        self.assertIn("versionCode = 400", text)
+        self.assertIn('versionName = "3.1.3"', text)
+
+    def test_custom_exit_clears_freedom_ech_on_main_and_mtu_retry_env(self):
+        service = SERVICE.read_text()
+        self.assertGreaterEqual(service.count('remove("AETHER_API_ECH")'), 2)
+        self.assertGreaterEqual(service.count('remove("AETHER_ECH")'), 2)
+        self.assertIn('put("AETHER_UPSTREAM", warpExitUpstream!!)', service)
+        self.assertIn('patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"', service)
 
 
 if __name__ == "__main__":

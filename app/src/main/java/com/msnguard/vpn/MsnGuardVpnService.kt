@@ -5213,7 +5213,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     this@MsnGuardVpnService,
                     effectiveConfig,
                 )
-                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply { put("AETHER_UPSTREAM", warpExitUpstream!!) } else baseEnv
+                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply {
+                    put("AETHER_UPSTREAM", warpExitUpstream!!)
+                    // The Exit Node is already the alternate egress. Match the
+                    // working H2 path: do not carry Freedom's API ECH into the
+                    // SOCKS route, where it causes the API/TLS EOF seen in logs.
+                    remove("AETHER_ECH")
+                    remove("AETHER_API_ECH")
+                    remove("AETHER_ECH_DNS")
+                    remove("AETHER_ECH_DOMAIN")
+                } else baseEnv
                 // Warp Setting log — prove which endpoint scanner family actually hit the wire.
                 // Isolated: one ConnectionLog line, no protocol/connect change. For Ptech-ipv6
                 // the engine must show `ip=v6` and candidates from 2606:4700:d0/d1; for Ptech-ipv4
@@ -5901,6 +5910,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     val ladderTransport = CoreConfig.warpTransportOf(ladderProto)
                     if (ladderTransport != null && CoreConfig.warpExitIsCustom(this, ladderTransport) && WarpExitManager.isRunning) {
                         patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                        // Keep the MTU retry on the same custom-exit profile:
+                        // Freedom-only API ECH must not leak into the SOCKS path.
+                        patched.remove("AETHER_ECH")
+                        patched.remove("AETHER_API_ECH")
+                        patched.remove("AETHER_ECH_DNS")
+                        patched.remove("AETHER_ECH_DOMAIN")
                     }
                 }
                 CoreConfig.applyEnv(patched)
