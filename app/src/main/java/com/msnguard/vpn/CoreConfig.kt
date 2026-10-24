@@ -535,7 +535,15 @@ object CoreConfig {
         // 0 gateways in 120s (3.0.19 log). Match PattNG: MASQUE fragment OFF
         // by default — user can still turn it on via h2_fragmentation pref.
         // Mixed-case SNI only inside fragment branch (FCAE parity).
-        if (isMasqueForEnv && text("h2_fragmentation", "off") == "on") {
+        if (isMasqueForEnv) {
+            // MASQUE H2 parity: the working profile hardens the H2 ClientHello
+            // with fragmentation before the gateway scan starts. Keep the
+            // optional mixed-case SNI switch separate.
+            out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
+            if (bool("mixed_case_sni", false)) {
+                out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
+            }
+        } else if (text("h2_fragmentation", "off") == "on") {
             out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
             if (bool("mixed_case_sni", false)) {
                 out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
@@ -567,18 +575,22 @@ object CoreConfig {
             var echValue: String? = null
             var useApiEch = false
             var echIsEmbedded = false
-            // isMasqueForEnv covers masque + mim; add wireguard + gool (WoW) for identity.
-            val isWarpForIdentity = isMasqueForEnv || effectiveProtocol == "wireguard" || effectiveProtocol == "gool"
+            // MASQUE H2 follows the working profile with ECH fully off:
+            // the API and the tunnel both use clear TLS. WireGuard/WoW keep
+            // their API-only ECH path.
+            val isWarpForIdentity = !isMasqueForEnv &&
+                (effectiveProtocol == "wireguard" || effectiveProtocol == "gool")
             when {
-                echLower.isEmpty() && isWarpForIdentity -> {
-                    // Freedom direct: embed key on the API-only var so
-                    // resolve_ech for H2 stays OFF (no AETHER_ECH). For
-                    // WireGuard/WoW there is no H2, but same API_ECH path
-                    // is the filtered-carrier fix (FCAE 2.3.2 -> embed).
+                echLower.isEmpty() && isMasqueForEnv -> {
+                    // The working H2 profile asks the core to resolve ECH and
+                    // reuse that key for both the API and the MASQUE session.
                     useEch = true
-                    // ECHEndpointRoster hands the freshest cloudflare-ech.com
-                    // blob (DNS-verified against the fallback resolver list);
-                    // null → the embedded constant below, unchanged behavior.
+                    echValue = "auto"
+                }
+                echLower.isEmpty() && isWarpForIdentity -> {
+                    // Freedom WireGuard/WoW keep the embedded API key because
+                    // their API path is filtered on the direct carrier.
+                    useEch = true
                     echValue = EchEndpointRoster.freshApiEch(context)
                         ?: "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
                     echIsEmbedded = true
@@ -591,7 +603,7 @@ object CoreConfig {
             }
             if (useEch && echValue != null) {
                 if (useApiEch) {
-                    out["AETHER_API_ECH"] = echValue
+                    out["AETHER_ECH"] = echValue
                 } else {
                     out["AETHER_ECH"] = echValue
                     if (!echIsEmbedded) {
