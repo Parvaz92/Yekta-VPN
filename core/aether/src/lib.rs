@@ -1128,7 +1128,11 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             let mode = prober::ScanMode::parse(&mode_str);
             let probe = prober::MasqueProbe {
-                sni: quic::masque_sni()?,
+                sni: if masque_h2::enabled() {
+                    consts::CONNECT_SNI.to_string()
+                } else {
+                    quic::masque_sni()?
+                },
                 authority: quic::default_authority().to_string(),
                 path: quic::default_path().to_string(),
                 cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1288,7 +1292,11 @@ async fn hunt_masque_peer(
     );
     let mode = prober::ScanMode::parse(mode_str);
     let probe = prober::MasqueProbe {
-        sni: quic::masque_sni()?,
+        sni: if masque_h2::enabled() {
+            consts::CONNECT_SNI.to_string()
+        } else {
+            quic::masque_sni()?
+        },
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1331,11 +1339,16 @@ async fn quick_verify_masque_peer(
 ) -> bool {
     // The core checks the name as it starts; a job of the library given no domain name fails
     // every check here.
-    let sni = match quic::masque_sni() {
-        Ok(sni) => sni,
-        Err(e) => {
-            log::warn!("[-] {e}");
-            return false;
+    // H2 uses the WARP CONNECT SNI; H3 keeps the configured camouflage SNI.
+    let sni = if masque_h2::enabled() {
+        consts::CONNECT_SNI.to_string()
+    } else {
+        match quic::masque_sni() {
+            Ok(sni) => sni,
+            Err(e) => {
+                log::warn!("[-] {e}");
+                return false;
+            }
         }
     };
     let vp = quic::VerifyParams {
@@ -1606,7 +1619,8 @@ async fn establish_masque(
     let tunnel_task = if h2 {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer,
-            sni: quic::masque_sni()?,
+            // H2 parity: use the CONNECT SNI for the actual TCP/TLS session.
+            sni: consts::CONNECT_SNI.to_string(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),

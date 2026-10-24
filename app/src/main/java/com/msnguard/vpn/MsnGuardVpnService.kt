@@ -5186,8 +5186,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting sidecar")
                     val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
                     if (ok) {
-                        warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
-                        ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}")
+                        // Match the reference sequence: stage 1 proves that the
+                        // Exit-Node SOCKS path can carry a real TCP dial before
+                        // Aether spends time on WARP/API/gateway work.
+                        val preflight = WarpExitManager.probeTcpThroughExit("api.cloudflareclient.com", 443)
+                        if (preflight) {
+                            warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                            ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}; TCP preflight passed")
+                        } else {
+                            ConnectionLog.record("Warp Setting: Exit-Node TCP preflight failed — falling back to Freedom")
+                            WarpExitManager.stop()
+                        }
                     } else {
                         ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
                     }
@@ -5204,7 +5213,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     this@MsnGuardVpnService,
                     effectiveConfig,
                 )
-                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply { put("AETHER_UPSTREAM", warpExitUpstream!!) } else baseEnv
+                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply {
+                    put("AETHER_UPSTREAM", warpExitUpstream!!)
+                    // The Exit Node is already the alternate egress. Match the
+                    // working H2 path: do not carry Freedom's API ECH into the
+                    // SOCKS route, where it causes the API/TLS EOF seen in logs.
+                    remove("AETHER_ECH")
+                    remove("AETHER_API_ECH")
+                    remove("AETHER_ECH_DNS")
+                    remove("AETHER_ECH_DOMAIN")
+                } else baseEnv
                 // Warp Setting log — prove which endpoint scanner family actually hit the wire.
                 // Isolated: one ConnectionLog line, no protocol/connect change. For Ptech-ipv6
                 // the engine must show `ip=v6` and candidates from 2606:4700:d0/d1; for Ptech-ipv4
@@ -5892,6 +5910,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     val ladderTransport = CoreConfig.warpTransportOf(ladderProto)
                     if (ladderTransport != null && CoreConfig.warpExitIsCustom(this, ladderTransport) && WarpExitManager.isRunning) {
                         patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                        // Keep the MTU retry on the same custom-exit profile:
+                        // Freedom-only API ECH must not leak into the SOCKS path.
+                        patched.remove("AETHER_ECH")
+                        patched.remove("AETHER_API_ECH")
+                        patched.remove("AETHER_ECH_DNS")
+                        patched.remove("AETHER_ECH_DOMAIN")
                     }
                 }
                 CoreConfig.applyEnv(patched)
