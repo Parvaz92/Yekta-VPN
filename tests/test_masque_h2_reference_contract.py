@@ -29,9 +29,12 @@ def test_h2_live_session_uses_connect_sni():
     assert "sni: quic::masque_sni()?" not in block
 
 
-def test_reference_api_ech_is_reused_by_masque_session():
-    assert 'variable: "AETHER_ECH"' in (ROOT / "core/aether/src/tls.rs").read_text(encoding="utf-8")
-    assert 'out["AETHER_ECH"] = echValue' in (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text(encoding="utf-8")
+def test_masque_h2_keeps_api_ech_disabled_when_no_key_is_available():
+    tls = (ROOT / "core/aether/src/tls.rs").read_text(encoding="utf-8")
+    config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text(encoding="utf-8")
+    assert 'variable: "AETHER_API_ECH"' in tls
+    assert 'if (socksProxyForCore.isBlank() && !isMasqueForEnv)' in config
+    assert 'out["AETHER_API_ECH"] = echValue' in config
 
 
 def test_masque_h2_always_fragments_client_hello():
@@ -46,13 +49,8 @@ def test_masque_does_not_prepare_api_or_session_ech():
     config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text(encoding="utf-8")
     block = config.split("// ECH:", 1)[1].split("// Zero Trust", 1)[0]
     assert "val isWarpForIdentity = !isMasqueForEnv" in block
-    assert 'out["AETHER_API_ECH"]' not in block
-    assert 'echLower.isEmpty() && isMasqueForEnv' in block
-    assert 'echValue = "auto"' in block
+    assert 'echLower.isEmpty() && isMasqueForEnv' not in block
+    assert 'out["AETHER_API_ECH"]' in block
     assert 'out["AETHER_ECH"] = echValue' in block
-
-
-def test_core_reuses_api_ech_for_h2_session():
-    block = CORE_TEXT.split("async fn resolve_ech", 1)[1].split("fn masque_reconnect_delay", 1)[0]
-    assert "account::api_ech_in_use()" in block
-    assert "offering the ECHConfigList the WARP API took" in block
+    assert 'if (isMasqueForEnv) {' in block
+    assert 'out.remove("AETHER_API_ECH")' in block

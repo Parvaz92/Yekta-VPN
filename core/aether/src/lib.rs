@@ -1246,15 +1246,6 @@ async fn resolve_ech() -> Result<Option<Vec<u8>>> {
     if setting.as_deref().is_none_or(str::is_empty) {
         return Ok(None);
     }
-    // The API and the H2 session share one ECH lifecycle. Reuse the validated
-    // key the API already obtained instead of performing a second lookup.
-    if let Some(key) = account::api_ech_in_use() {
-        log::info!(
-            "[+] offering the ECHConfigList the WARP API took ({} bytes)",
-            key.len()
-        );
-        return Ok(Some(key));
-    }
     let key = tls::ech_key(&tls::SESSION_ECH_OPTION, setting.as_deref(), || {
         dns::fetch_ech_config(&dns::SESSION_ECH)
     })

@@ -568,7 +568,7 @@ object CoreConfig {
         // User pref aether_ech still wins when set (off/0/false → force off).
         // Exit Node case is handled below in the socksProxyForCore branch;
         // this if is Freedom direct only. DO NOT touch Masque H2/fragment logic.
-        if (socksProxyForCore.isBlank()) {
+        if (socksProxyForCore.isBlank() && !isMasqueForEnv) {
             val echRaw = text("aether_ech", "").trim()
             val echLower = echRaw.lowercase()
             val useEch: Boolean
@@ -581,13 +581,10 @@ object CoreConfig {
             val isWarpForIdentity = !isMasqueForEnv &&
                 (effectiveProtocol == "wireguard" || effectiveProtocol == "gool")
             when {
-                echLower.isEmpty() && isMasqueForEnv -> {
-                    // The working H2 profile asks the core to resolve ECH and
-                    // reuse that key for both the API and the MASQUE session.
-                    useEch = true
-                    echValue = "auto"
-                }
                 echLower.isEmpty() && isWarpForIdentity -> {
+                    // MASQUE H2 keeps ECH off when no validated key is present.
+                    // An unfulfilled auto lookup stops the API before H2 starts.
+
                     // Freedom WireGuard/WoW keep the embedded API key because
                     // their API path is filtered on the direct carrier.
                     useEch = true
@@ -603,7 +600,7 @@ object CoreConfig {
             }
             if (useEch && echValue != null) {
                 if (useApiEch) {
-                    out["AETHER_ECH"] = echValue
+                    out["AETHER_API_ECH"] = echValue
                 } else {
                     out["AETHER_ECH"] = echValue
                     if (!echIsEmbedded) {
@@ -619,6 +616,15 @@ object CoreConfig {
             // Exit Node via Lithuania: no ECH — the log proves 3.0.20 worked
             // with ECH OFF from the very first Freedom=custom attempt.
             // Do not set AETHER_ECH here even if the pre-patched env would have.
+            out.remove("AETHER_ECH")
+            out.remove("AETHER_API_ECH")
+            out.remove("AETHER_ECH_DNS")
+            out.remove("AETHER_ECH_DOMAIN")
+        }
+        // MASQUE H2 must never inherit the API-only ECH switch. The API call
+        // runs before the H2 carrier and stops the job when its lookup has no
+        // HTTPS ECH record, exactly as the device log showed.
+        if (isMasqueForEnv) {
             out.remove("AETHER_ECH")
             out.remove("AETHER_API_ECH")
             out.remove("AETHER_ECH_DNS")
