@@ -5186,8 +5186,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting sidecar")
                     val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
                     if (ok) {
-                        warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
-                        ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}")
+                        // Match the reference sequence: stage 1 proves that the
+                        // Exit-Node SOCKS path can carry a real TCP dial before
+                        // Aether spends time on WARP/API/gateway work.
+                        val preflight = WarpExitManager.probeTcpThroughExit("api.cloudflareclient.com", 443)
+                        if (preflight) {
+                            warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                            ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}; TCP preflight passed")
+                        } else {
+                            ConnectionLog.record("Warp Setting: Exit-Node TCP preflight failed — falling back to Freedom")
+                            WarpExitManager.stop()
+                        }
                     } else {
                         ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
                     }

@@ -6884,36 +6884,19 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Arm a one-shot fresh scan when the user switches the Masque exit between
-     * Freedom and a custom Exit Node.
+     * Keep endpoint discovery in cache mode when the WARP egress changes.
      *
-     * The two exits reach the Cloudflare edge through different egress paths, so
-     * the gateway cache and lastconn a previous session wrote are measured
-     * against a path that is no longer in use: the latency ranking is stale and
-     * the cached gateway may be unreachable through the new path. Reusing it
-     * shows up as "cached gateway ... still works; skipping scan" on a connect
-     * that then lands on the wrong exit. Forcing a fresh scan here makes the
-     * next connect re-measure, and [EndpointDiscovery.FRESH] is consumed once
-     * (startTunnel flips it back to cache), so this never turns into a
-     * permanent full scan.
-     *
-     * Also deletes the cache files directly: FRESH is only honoured on the next
-     * startTunnel, and clearing the lastconn here means a connect that does not
-     * go through that path still cannot reuse the stale gateway.
+     * The MASQUE engine verifies the remembered gateway through the active
+     * Exit-Node SOCKS route before reusing it. Clearing lastconn here defeats
+     * that verification and forces a full scan on the first connect, which is
+     * especially costly after app data was cleared. The reference path uses the
+     * same cache-first rule: verify the cached gateway, then scan only when it
+     * fails. The endpoint cache is still invalidated by the engine's own failed
+     * verification and by the normal network-change path.
      */
     private fun requestFreshScanAfterExitSwitch(to: String) {
-        preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).commit()
-        runCatching {
-            val dir = filesDir
-            listOf(
-                "aether-lastconn.toml",
-                "aether-masque-lastconn.toml",
-                "aether-gool-lastconn.toml",
-                "aether-mim-lastconn.toml",
-                "masque-gateway-cache.json",
-            ).forEach { name -> java.io.File(dir, name).delete() }
-        }
-        ConnectionLog.record("Warp Setting: switched to $to — fresh scan armed for next connect")
+        preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName).commit()
+        ConnectionLog.record("Warp Setting: switched to $to — cached gateway will be verified through the new exit")
     }
 
     private fun editWarpCustom(transport: CoreConfig.WarpTransport = CoreConfig.WarpTransport.MASQUE) {

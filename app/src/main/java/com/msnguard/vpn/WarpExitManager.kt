@@ -82,6 +82,28 @@ object WarpExitManager {
         }, "warpexit-stop").start()
     }
 
+    /**
+     * Matches the reference client's stage-1 gate: prove that the sidecar can
+     * carry a real outbound TCP connection before Aether is started. A listener
+     * on localhost only proves that Xray booted; it says nothing about the
+     * selected Exit Node's upstream path.
+     */
+    fun probeTcpThroughExit(host: String, port: Int, timeoutMs: Int = 8_000): Boolean {
+        if (!isRunning) return false
+        return runCatching {
+            val proxy = java.net.Proxy(
+                java.net.Proxy.Type.SOCKS,
+                InetSocketAddress("127.0.0.1", SOCKS_PORT),
+            )
+            java.net.Socket(proxy).use { socket ->
+                socket.connect(InetSocketAddress.createUnresolved(host, port), timeoutMs)
+                socket.isConnected && !socket.isClosed
+            }
+        }.onFailure {
+            ConnectionLog.record("$TAG upstream TCP preflight failed: ${it.javaClass.simpleName}: ${it.message ?: "unknown"}")
+        }.getOrDefault(false)
+    }
+
     fun start(context: Context, exitUrl: String): Boolean {
         stop()
         lastError = ""
