@@ -12,9 +12,8 @@ def test_h2_probe_uses_connect_sni():
         ("async fn hunt_masque_peer", "fn masque_carrier"),
     ):
         block = CORE_TEXT.split(start, 1)[1].split(end, 1)[0]
-        assert "if masque_h2::enabled()" in block
+        assert "sni: if masque_h2::enabled()" in block
         assert "consts::CONNECT_SNI.to_string()" in block
-        assert "quic::masque_sni()?" in block
 
 
 def test_h2_cached_verification_selects_connect_sni_only_for_h2():
@@ -28,3 +27,37 @@ def test_h2_live_session_uses_connect_sni():
     block = CORE_TEXT.split("let tunnel_task = if h2", 1)[1].split("} else {", 1)[0]
     assert "sni: consts::CONNECT_SNI.to_string()" in block
     assert "sni: quic::masque_sni()?" not in block
+
+
+def test_masque_h2_keeps_api_ech_disabled_when_no_key_is_available():
+    tls = (ROOT / "core/aether/src/tls.rs").read_text(encoding="utf-8")
+    config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text(encoding="utf-8")
+    assert 'variable: "AETHER_API_ECH"' in tls
+    assert 'if (socksProxyForCore.isBlank() && !isMasqueForEnv)' in config
+    assert 'out["AETHER_API_ECH"] = echValue' in config
+
+
+def test_masque_h2_always_fragments_client_hello():
+    config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text(encoding="utf-8")
+    marker = '        // Mixed-case SNI only inside fragment branch (FCAE parity).\n'
+    block = config.split(marker, 1)[1].split('        // ECH:', 1)[0]
+    assert 'if (isMasqueForEnv) {' in block
+    assert 'out["AETHER_MASQUE_H2_FRAGMENT"] = "1"' in block
+
+
+def test_masque_does_not_prepare_api_or_session_ech():
+    config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text(encoding="utf-8")
+    block = config.split("// ECH:", 1)[1].split("// Zero Trust", 1)[0]
+    assert "val isWarpForIdentity = !isMasqueForEnv" in block
+    assert 'echLower.isEmpty() && isMasqueForEnv' not in block
+    assert 'out["AETHER_API_ECH"]' in block
+    assert 'out["AETHER_ECH"] = echValue' in block
+    assert 'if (isMasqueForEnv) {' in block
+    assert 'out.remove("AETHER_API_ECH")' in block
+
+
+def test_masque_startup_budget_covers_api_and_scan():
+    service = (ROOT / "app/src/main/java/com/msnguard/vpn/MsnGuardVpnService.kt").read_text(encoding="utf-8")
+    activity = (ROOT / "app/src/main/java/com/msnguard/vpn/MainActivity.kt").read_text(encoding="utf-8")
+    assert "MtuConfig.Method.MASQUE -> 300_000L" in service
+    assert "Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 300_000L else 300_000L" in activity

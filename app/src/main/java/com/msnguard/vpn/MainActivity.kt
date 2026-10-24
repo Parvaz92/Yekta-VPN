@@ -8692,7 +8692,9 @@ class MainActivity : Activity() {
         // The first-connect ladder is a UI deadline, not the core's scan
         // deadline. Give MASQUE 80s so ECH/API delays do not evict it at 48s.
         Protocol.WIREGUARD -> 32_000L
-        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 80_000L
+        // Reference startup budget includes API activation retries plus the
+        // complete balanced H2/IPv4 gateway scan.
+        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 300_000L else 300_000L
         Protocol.WARP_IN_WARP -> 55_000L
         else -> 240_000L // SHARD: 31 slices x12s=372s worst, 5 successes at slice 19 ≈228s — 240 covers it; 45s killed slice 4/31
     }

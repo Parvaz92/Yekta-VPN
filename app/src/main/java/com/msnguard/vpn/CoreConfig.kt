@@ -535,7 +535,15 @@ object CoreConfig {
         // 0 gateways in 120s (3.0.19 log). Match PattNG: MASQUE fragment OFF
         // by default — user can still turn it on via h2_fragmentation pref.
         // Mixed-case SNI only inside fragment branch (FCAE parity).
-        if (isMasqueForEnv && text("h2_fragmentation", "off") == "on") {
+        if (isMasqueForEnv) {
+            // MASQUE H2 parity: the working profile hardens the H2 ClientHello
+            // with fragmentation before the gateway scan starts. Keep the
+            // optional mixed-case SNI switch separate.
+            out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
+            if (bool("mixed_case_sni", false)) {
+                out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
+            }
+        } else if (text("h2_fragmentation", "off") == "on") {
             out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
             if (bool("mixed_case_sni", false)) {
                 out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
@@ -560,25 +568,26 @@ object CoreConfig {
         // User pref aether_ech still wins when set (off/0/false → force off).
         // Exit Node case is handled below in the socksProxyForCore branch;
         // this if is Freedom direct only. DO NOT touch Masque H2/fragment logic.
-        if (socksProxyForCore.isBlank()) {
+        if (socksProxyForCore.isBlank() && !isMasqueForEnv) {
             val echRaw = text("aether_ech", "").trim()
             val echLower = echRaw.lowercase()
             val useEch: Boolean
             var echValue: String? = null
             var useApiEch = false
             var echIsEmbedded = false
-            // isMasqueForEnv covers masque + mim; add wireguard + gool (WoW) for identity.
-            val isWarpForIdentity = isMasqueForEnv || effectiveProtocol == "wireguard" || effectiveProtocol == "gool"
+            // MASQUE H2 follows the working profile with ECH fully off:
+            // the API and the tunnel both use clear TLS. WireGuard/WoW keep
+            // their API-only ECH path.
+            val isWarpForIdentity = !isMasqueForEnv &&
+                (effectiveProtocol == "wireguard" || effectiveProtocol == "gool")
             when {
                 echLower.isEmpty() && isWarpForIdentity -> {
-                    // Freedom direct: embed key on the API-only var so
-                    // resolve_ech for H2 stays OFF (no AETHER_ECH). For
-                    // WireGuard/WoW there is no H2, but same API_ECH path
-                    // is the filtered-carrier fix (FCAE 2.3.2 -> embed).
+                    // MASQUE H2 keeps ECH off when no validated key is present.
+                    // An unfulfilled auto lookup stops the API before H2 starts.
+
+                    // Freedom WireGuard/WoW keep the embedded API key because
+                    // their API path is filtered on the direct carrier.
                     useEch = true
-                    // ECHEndpointRoster hands the freshest cloudflare-ech.com
-                    // blob (DNS-verified against the fallback resolver list);
-                    // null → the embedded constant below, unchanged behavior.
                     echValue = EchEndpointRoster.freshApiEch(context)
                         ?: "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
                     echIsEmbedded = true
@@ -607,6 +616,15 @@ object CoreConfig {
             // Exit Node via Lithuania: no ECH — the log proves 3.0.20 worked
             // with ECH OFF from the very first Freedom=custom attempt.
             // Do not set AETHER_ECH here even if the pre-patched env would have.
+            out.remove("AETHER_ECH")
+            out.remove("AETHER_API_ECH")
+            out.remove("AETHER_ECH_DNS")
+            out.remove("AETHER_ECH_DOMAIN")
+        }
+        // MASQUE H2 must never inherit the API-only ECH switch. The API call
+        // runs before the H2 carrier and stops the job when its lookup has no
+        // HTTPS ECH record, exactly as the device log showed.
+        if (isMasqueForEnv) {
             out.remove("AETHER_ECH")
             out.remove("AETHER_API_ECH")
             out.remove("AETHER_ECH_DNS")
