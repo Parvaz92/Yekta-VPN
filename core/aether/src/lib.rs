@@ -906,17 +906,9 @@ async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> 
 }
 
 async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity> {
-    let identity = load_or_enrol_masque(config_path).await?;
-    if identity.refused {
-        return Ok(identity);
-    }
-    match account::enable_warp(&identity.device_id, &identity.access_token).await {
-        Ok(()) => log::info!("[+] warp enabled for the masque device"),
-        Err(error) => log::warn!(
-            "[!] could not enable warp for the masque device, the edge may refuse it: {error}"
-        ),
-    }
-    Ok(identity)
+    // Existing identities are already activated. Repeating this PATCH on every connect
+    // adds the four API retries before the H2 gateway path can start.
+    load_or_enrol_masque(config_path).await
 }
 
 async fn load_or_enrol_masque(config_path: &str) -> Result<account::Identity> {
@@ -969,6 +961,8 @@ async fn load_or_enrol_masque(config_path: &str) -> Result<account::Identity> {
         ..identity
     };
     let identity = adopt_team_profile(identity).await;
+    account::enable_warp(&identity.device_id, &identity.access_token).await?;
+    log::info!("[+] warp enabled for the new masque identity");
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new masque identity to {config_path}");
     Ok(identity)
@@ -1128,11 +1122,7 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             let mode = prober::ScanMode::parse(&mode_str);
             let probe = prober::MasqueProbe {
-                sni: if masque_h2::enabled() {
-                    consts::CONNECT_SNI.to_string()
-                } else {
-                    quic::masque_sni()?
-                },
+                sni: quic::masque_sni()?,
                 authority: quic::default_authority().to_string(),
                 path: quic::default_path().to_string(),
                 cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1286,11 +1276,7 @@ async fn hunt_masque_peer(
     );
     let mode = prober::ScanMode::parse(mode_str);
     let probe = prober::MasqueProbe {
-        sni: if masque_h2::enabled() {
-            consts::CONNECT_SNI.to_string()
-        } else {
-            quic::masque_sni()?
-        },
+        sni: quic::masque_sni()?,
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -1333,16 +1319,12 @@ async fn quick_verify_masque_peer(
 ) -> bool {
     // The core checks the name as it starts; a job of the library given no domain name fails
     // every check here.
-    // H2 uses the WARP CONNECT SNI; H3 keeps the configured camouflage SNI.
-    let sni = if masque_h2::enabled() {
-        consts::CONNECT_SNI.to_string()
-    } else {
-        match quic::masque_sni() {
-            Ok(sni) => sni,
-            Err(e) => {
-                log::warn!("[-] {e}");
-                return false;
-            }
+    // Probe, cache verification and the live H2/H3 session use one configured SNI.
+    let sni = match quic::masque_sni() {
+        Ok(sni) => sni,
+        Err(e) => {
+            log::warn!("[-] {e}");
+            return false;
         }
     };
     let vp = quic::VerifyParams {
@@ -1613,8 +1595,8 @@ async fn establish_masque(
     let tunnel_task = if h2 {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer,
-            // H2 parity: use the CONNECT SNI for the actual TCP/TLS session.
-            sni: consts::CONNECT_SNI.to_string(),
+            // The configured MASQUE SNI is shared by probe, cache verification and H2.
+            sni: quic::masque_sni()?,
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
