@@ -54,3 +54,10 @@ def test_masque_does_not_prepare_api_or_session_ech():
     assert 'out["AETHER_ECH"] = echValue' in block
     assert 'if (isMasqueForEnv) {' in block
     assert 'out.remove("AETHER_API_ECH")' in block
+
+
+def test_masque_startup_budget_covers_api_and_scan():
+    service = (ROOT / "app/src/main/java/com/msnguard/vpn/MsnGuardVpnService.kt").read_text(encoding="utf-8")
+    activity = (ROOT / "app/src/main/java/com/msnguard/vpn/MainActivity.kt").read_text(encoding="utf-8")
+    assert "MtuConfig.Method.MASQUE -> 300_000L" in service
+    assert "Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 300_000L else 300_000L" in activity

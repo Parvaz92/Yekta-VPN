@@ -5875,11 +5875,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             // needs only the 120s scan (prober.rs Balanced overall_deadline)
             // + margin — no 300s ladder. PattNG provisions in <60s for the
             // same reason.
-            MtuConfig.Method.MASQUE -> 150_000L
+            // The API activation can consume four 20s retries before the
+            // 120s H2 gateway scan even begins. The reference client budgets
+            // the complete startup, not the scan alone.
+            MtuConfig.Method.MASQUE -> 300_000L
             else -> 200_000L // WOW: two stacked scans (outer + inner, 80s + 180s)
         }
         val perRungBudgetMsFollow = when (method) {
-            MtuConfig.Method.MASQUE -> 150_000L
+            // The API activation can consume four 20s retries before the
+            // 120s H2 gateway scan even begins. The reference client budgets
+            // the complete startup, not the scan alone.
+            MtuConfig.Method.MASQUE -> 300_000L
             else -> perRungBudgetMsDefault
         }
         for ((rungIdx, mtu) in ladder.withIndex()) {
