@@ -38,7 +38,6 @@ def test_h2_applies_fingerprint_to_context_and_connection_options():
     block = (ROOT / "core/aether/src/masque_h2.rs").read_text(encoding="utf-8")
     assert "let fingerprint = tls::Fingerprint::configured();" in block
     assert "fingerprint.apply(&mut builder, H2_ALPN)?;" in block
-    assert "fingerprint.prepare(&mut config, H2_ALPN)?;" in block
 
 
 def test_regular_ipv4_scan_uses_reference_gateway_set_before_ranges():

@@ -190,8 +190,6 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
     // (see tls::install_verification), so the hostname check is skipped too.
     config.set_verify_hostname(false);
     config.set_use_server_name_indication(true);
-    fingerprint.prepare(&mut config, H2_ALPN)?;
-
     Ok(config)
 }
 
