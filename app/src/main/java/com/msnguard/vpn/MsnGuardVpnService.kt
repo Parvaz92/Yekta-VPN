@@ -5234,14 +5234,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 ConnectionLog.record("Creating Android VPN interface (via ${TunEngineManager.current(this).label})")
                 val activeEngine = TunEnginePref.get(this)
                 // BadVPN tun2socks reaches its udpgw rendezvous (127.0.0.1:7300) by
-                // issuing a SOCKS CONNECT to it, and aether would relay that through
-                // the tunnel where nothing listens on 7300 — so DNS dies and every
-                // name-based site fails while IP-only apps (Telegram) still work.
-                // Route BadVPN through WarpUdpgwFront, which answers that CONNECT
-                // itself and relays the rest to aether (which still applies the
-                // routing rules). Zeptun and Hev use their own mapdns and never
-                // touch udpgw, so they keep talking to aether directly.
-                val legacyFrontUp = activeEngine == TunEnginePref.LEGACY && WarpUdpgwFront.start(CoreConfig.SOCKS_PORT)
+                // issuing a SOCKS CONNECT to it. In Exit mode the front must relay
+                // normal TCP and UDP to Xray's listener, not directly to WARP;
+                // otherwise DNS and QUIC bypass the VLESS outbound or die at 7300.
+                // Zeptun and Hev speak SOCKS UDP directly and can use Xray itself.
+                val exitNodeUp = _exitCustom && WarpExitManager.isRunning
+                val legacyUpstreamPort = if (exitNodeUp) WarpExitManager.SOCKS_PORT else CoreConfig.SOCKS_PORT
+                val legacyFrontUp = activeEngine == TunEnginePref.LEGACY &&
+                    WarpUdpgwFront.start(legacyUpstreamPort)
                 // Encrypted DNS: SmartDnsFront answers the device's DNS itself over
                 // DoT/DoH on the WARP egress and relays every other byte to the core.
                 // Only for the engines whose mapdns/fake-ip cannot speak DoT or DoH
@@ -5257,13 +5257,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     SmartDnsServer.hasEncrypted(effectiveConfig) &&
                     SmartDnsFront.start(this@MsnGuardVpnService, effectiveConfig, CoreConfig.SOCKS_PORT)
                 // With a custom Exit Node, WARP is the inner hop and Xray is
-                // the final hop. The TUN must therefore feed Xray's SOCKS;
-                // Xray sends its VLESS/Trojan/etc. dial through WARP's SOCKS.
-                val exitNodeUp = _exitCustom && WarpExitManager.isRunning
+                // the final hop. BadVPN needs the udpgw front; Hev and Zeptun
+                // can feed Xray's SOCKS directly.
                 val socksForEngine = when {
+                    legacyFrontUp -> WarpUdpgwFront.LISTEN_PORT
                     exitNodeUp -> WarpExitManager.SOCKS_PORT
                     smartDnsUp -> CoreConfig.SMART_DNS_FRONT_PORT
-                    legacyFrontUp -> WarpUdpgwFront.LISTEN_PORT
                     else -> CoreConfig.SOCKS_PORT
                 }
                 // ── MTU: same for the Builder's VPN interface and the TunEngine.
