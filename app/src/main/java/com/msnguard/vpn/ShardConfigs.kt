@@ -537,10 +537,9 @@ object ShardConfigs {
         listenPort: Int,
         logLevel: String,
         smartSplit: SmartSplit.FragmentProfile? = null,
-        mux: Boolean = false,
     ): String {
         val outbounds = JSONArray()
-            .put(outbound(context, node, "proxy", mux = mux))
+            .put(outbound(context, node, "proxy", mux = false))
             .put(
                 JSONObject().apply {
                     put("tag", "dns-out")
