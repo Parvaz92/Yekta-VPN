@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+static EXIT_H2_REPORTED: AtomicU32 = AtomicU32::new(0);
 
 use futures::stream::StreamExt;
 use rand::RngExt;
@@ -571,6 +574,9 @@ pub async fn host_has_ipv6() -> bool {
 }
 
 pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<ProbeResult> {
+    if crate::upstream::configured().is_some() {
+        EXIT_H2_REPORTED.store(0, Ordering::Relaxed);
+    }
     let mut st = mode.strategy();
     st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
     let timeout = st.per_probe_timeout;
@@ -738,6 +744,30 @@ async fn verify_one(
         return match crate::masque_h2::verify_h2(&cfg, timeout).await {
             Ok(rtt) => Some(ProbeResult { ip, port, rtt }),
             Err(e) => {
+                // The Android host forwards info logs, but not trace logs. Report
+                // only the first occurrence of each failure class on an Exit Node
+                // scan. No peer, proxy URL, credentials or raw error is exposed.
+                if crate::upstream::configured().is_some() {
+                    let detail = e.to_string().to_ascii_lowercase();
+                    let (bit, stage) = if detail.contains("socks") || detail.contains("proxy") {
+                        (1, "upstream SOCKS")
+                    } else if detail.contains("tls") || detail.contains("ech") {
+                        (2, "TLS handshake")
+                    } else if detail.contains("connect-ip status") {
+                        (4, "connect-ip response")
+                    } else if detail.contains("timeout") || detail.contains("timed out") {
+                        (8, "probe timeout")
+                    } else if detail.contains("stream") || detail.contains("body") || detail.contains("h2") {
+                        (16, "HTTP/2 stream")
+                    } else {
+                        (32, "TCP or data-plane")
+                    };
+                    if EXIT_H2_REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                        log::info!(
+                            "[*] Exit Node H2 gateway probe failed at {stage}: peer={ip}:{port}; error={e}"
+                        );
+                    }
+                }
                 log::trace!("h2 probe {ip}:{port} -> {e}");
                 None
             }
