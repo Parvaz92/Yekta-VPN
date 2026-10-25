@@ -117,7 +117,11 @@ object WarpExitManager {
         val listenHost = "127.0.0.1"
         val port = SOCKS_PORT
         val logLevel = "warning"
-        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel)
+        // The core's Exit-Node path carries both TCP (MASQUE/H2) and UDP (WireGuard/WoW).
+        // Use the same XUDP-capable VLESS mux profile as the reference client; without
+        // this, the VLESS sidecar's UDP path is created but its stream never carries
+        // WireGuard datagrams reliably.
+        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, mux = true)
         val configFile = ShardConfigs.writeConfig(context, "warpexit.json", config)
         if (!launch(context, configFile)) return false
         if (awaitListener(port, timeoutMs = 8000)) {
