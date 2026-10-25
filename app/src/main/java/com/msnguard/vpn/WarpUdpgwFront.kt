@@ -91,6 +91,9 @@ object WarpUdpgwFront {
     private var connPool: ExecutorService? = null
 
     @Volatile
+    private var acceptThread: Thread? = null
+
+    @Volatile
     private var upstreamPort: Int = 0
 
     val isRunning: Boolean
@@ -132,7 +135,7 @@ object WarpUdpgwFront {
         connPool = Executors.newCachedThreadPool()
         running.set(true)
 
-        Thread({
+        acceptThread = Thread({
             try {
                 while (running.get()) {
                     val client = try {
@@ -164,7 +167,8 @@ object WarpUdpgwFront {
             } catch (t: Throwable) {
                 record("$TAG accept loop ended: ${t.message}")
             }
-        }, "warp-udpgw-accept").apply { isDaemon = true }.start()
+        }, "warp-udpgw-accept").apply { isDaemon = true }
+        acceptThread?.start()
 
         record("$TAG listening on 127.0.0.1:$LISTEN_PORT → aether SOCKS $socksPort")
         return true
@@ -175,10 +179,16 @@ object WarpUdpgwFront {
         if (!running.getAndSet(false)) return
         associations.values.forEach { closeQuietly(it.udp) }
         associations.clear()
-        closeQuietly(serverSocket)
+        val server = serverSocket
+        closeQuietly(server)
         serverSocket = null
         connPool?.shutdownNow()
         connPool = null
+        val accept = acceptThread
+        acceptThread = null
+        if (accept != null && accept !== Thread.currentThread()) {
+            try { accept.join(250) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        }
         record("$TAG stopped")
     }
 
