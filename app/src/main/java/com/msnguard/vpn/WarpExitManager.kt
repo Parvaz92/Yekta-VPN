@@ -104,7 +104,7 @@ object WarpExitManager {
         }.getOrDefault(false)
     }
 
-    fun start(context: Context, exitUrl: String): Boolean {
+    fun start(context: Context, exitUrl: String, dialViaPort: Int = CoreConfig.SOCKS_PORT): Boolean {
         stop()
         lastError = ""
         activeLabel = exitUrl.take(48)
@@ -117,7 +117,7 @@ object WarpExitManager {
         val listenHost = "127.0.0.1"
         val port = SOCKS_PORT
         val logLevel = "warning"
-        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel)
+        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, dialViaPort = dialViaPort)
         val configFile = ShardConfigs.writeConfig(context, "warpexit.json", config)
         if (!launch(context, configFile)) return false
         if (awaitListener(port, timeoutMs = 8000)) {

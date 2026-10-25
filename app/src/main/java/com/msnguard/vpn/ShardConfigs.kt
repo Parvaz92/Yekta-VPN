@@ -537,9 +537,28 @@ object ShardConfigs {
         listenPort: Int,
         logLevel: String,
         smartSplit: SmartSplit.FragmentProfile? = null,
+        dialViaPort: Int? = null,
     ): String {
+        val proxy = outbound(context, node, "proxy", mux = false)
+        if (dialViaPort != null) {
+            val stream = proxy.optJSONObject("streamSettings") ?: JSONObject().also { proxy.put("streamSettings", it) }
+            val sockopt = stream.optJSONObject("sockopt") ?: JSONObject().also { stream.put("sockopt", it) }
+            sockopt.put("dialerProxy", "warp-upstream")
+        }
         val outbounds = JSONArray()
-            .put(outbound(context, node, "proxy", mux = false))
+            .put(proxy)
+            .apply {
+                if (dialViaPort != null) put(JSONObject().apply {
+                    put("tag", "warp-upstream")
+                    put("protocol", "socks")
+                    put("settings", JSONObject().apply {
+                        put("servers", JSONArray().put(JSONObject().apply {
+                            put("address", "127.0.0.1")
+                            put("port", dialViaPort)
+                        }))
+                    })
+                })
+            }
             .put(
                 JSONObject().apply {
                     put("tag", "dns-out")
