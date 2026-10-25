@@ -26,9 +26,39 @@ object WarpExitManager {
     @Volatile private var logThread: Thread? = null
     @Volatile var activeLabel: String = ""
         private set
+    @Volatile private var activeUrl: String = ""
+    @Volatile var pendingWarpAttach: Boolean = false
+        private set
     @Volatile var lastError: String = ""
         private set
     val isRunning: Boolean get() = running.get() && process?.isAlive == true
+
+    /** Rebuild the same Exit config after WARP's own SOCKS listener is ready. */
+    fun attachToWarp(context: Context, dialViaPort: Int): Boolean {
+        val url = activeUrl
+        if (url.isBlank()) return false
+        val ok = start(context, url, dialViaPort)
+        if (!ok) return false
+        // Do not hand the listener to tun2socks until the rebuilt Xray
+        // outbound has completed a real TCP dial through WARP.
+        val deadline = android.os.SystemClock.elapsedRealtime() + 12_000L
+        var tcpOk = false
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (probeTcpThroughExit("www.cloudflare.com", 443, 2_000)) {
+                tcpOk = true
+                break
+            }
+            try { Thread.sleep(250) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+        }
+        if (!tcpOk) {
+            lastError = "Exit outbound did not pass TCP preflight after WARP attach"
+            ConnectionLog.record("$TAG attach TCP preflight failed; refusing to expose Exit")
+            stopAndWait()
+            return false
+        }
+        pendingWarpAttach = false
+        return true
+    }
 
     private fun binary(context: Context): File =
         File(context.applicationInfo.nativeLibraryDir, "libxray.so")
@@ -68,19 +98,27 @@ object WarpExitManager {
         line.contains("A unified platform for anti-censorship") ||
         line.contains("infra/conf/serial: Reading config")
 
-    fun stop() {
+    private fun stopAndWait(clearConfig: Boolean = true) {
         running.set(false)
-        activeLabel = ""
+        if (clearConfig) {
+            activeLabel = ""
+            activeUrl = ""
+            pendingWarpAttach = false
+        }
         val proc = process
+        process = null
+        logThread = null
         try { proc?.destroy() } catch (_: Exception) {}
-        Thread({
-            try {
-                if (proc != null && proc.isAlive && !proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) proc.destroyForcibly()
-            } catch (_: Exception) {}
-            if (process === proc) { process = null; logThread = null }
-            running.set(false)
-        }, "warpexit-stop").start()
+        try {
+            if (proc != null && proc.isAlive && !proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
+                proc.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        } catch (_: Exception) {}
+        running.set(false)
     }
+
+    fun stop() = stopAndWait()
 
     /**
      * Matches the reference client's stage-1 gate: prove that the sidecar can
@@ -104,10 +142,16 @@ object WarpExitManager {
         }.getOrDefault(false)
     }
 
-    fun start(context: Context, exitUrl: String): Boolean {
+    fun start(context: Context, exitUrl: String, dialViaPort: Int? = CoreConfig.SOCKS_PORT): Boolean {
+        val keepUrl = exitUrl
         stop()
+        activeUrl = keepUrl
+        // A null upstream means the sidecar is staged first and attached only
+        // after WARP has published its SOCKS listener. This breaks the startup
+        // cycle without changing the Direct path.
+        pendingWarpAttach = dialViaPort == null
         lastError = ""
-        activeLabel = exitUrl.take(48)
+        activeLabel = keepUrl.take(48)
         val node = parseExitNode(exitUrl)
         if (node == null) {
             lastError = "could not parse config — supported: vless, vmess, trojan, ss, socks, hysteria2 (one link)"
@@ -117,11 +161,7 @@ object WarpExitManager {
         val listenHost = "127.0.0.1"
         val port = SOCKS_PORT
         val logLevel = "warning"
-        // The core's Exit-Node path carries both TCP (MASQUE/H2) and UDP (WireGuard/WoW).
-        // Use the same XUDP-capable VLESS mux profile as the reference client; without
-        // this, the VLESS sidecar's UDP path is created but its stream never carries
-        // WireGuard datagrams reliably.
-        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, mux = true)
+        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, dialViaPort = dialViaPort)
         val configFile = ShardConfigs.writeConfig(context, "warpexit.json", config)
         if (!launch(context, configFile)) return false
         if (awaitListener(port, timeoutMs = 8000)) {

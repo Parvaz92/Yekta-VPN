@@ -102,6 +102,10 @@ object WarpUdpgwFront {
     @Synchronized
     fun start(socksPort: Int): Boolean {
         if (running.get()) {
+            if (upstreamPort != socksPort) {
+                record("$TAG already running for upstream $upstreamPort; refusing route switch to $socksPort")
+                return false
+            }
             record("$TAG already running")
             return true
         }

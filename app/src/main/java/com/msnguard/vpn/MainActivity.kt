@@ -9794,6 +9794,11 @@ class MainActivity : Activity() {
             // closed socket on this transport, so every reachability probe was
             // refused instantly and the gate read a working tunnel as dead.
             com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
+        } else if (TunnelStatus.isActive() && WarpExitManager.isRunning) {
+            // Exit mode has two listeners: BadVPN's udpgw front for DNS/UDP, or
+            // Xray's SOCKS directly for Hev/Zeptun. Probing Aether's 1819 here
+            // reports the WARP carrier IP and hides the VLESS egress.
+            if (WarpUdpgwFront.isRunning) WarpUdpgwFront.LISTEN_PORT else WarpExitManager.SOCKS_PORT
         } else if (TunnelStatus.isActive() && ShardSocksFront.isRunning) {
             // The front-end, not xray's own 1824. Both would work for a CONNECT, but
             // this is also the port whose byte counters feed the tiles, so probing it

@@ -5062,19 +5062,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 if (proxyMode) {
                     // WARP over SOCKS still counts through the same AETHER_STATS
                     // counters; installs the same env the VPN branch already did.
-                    var _proxyWarpUpstream: String? = null
                     val _proxyProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
                     val _proxyWarpTransport = CoreConfig.warpTransportOf(_proxyProto)
                     val _proxyWarpCustom = _proxyWarpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _proxyWarpTransport)
                     if (_proxyWarpTransport != null && _proxyWarpCustom) {
                         val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _proxyWarpTransport)
                         ConnectionLog.record("Warp Setting: custom exit (proxy mode) for ${_proxyWarpTransport.name}, starting sidecar")
-                        val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
-                        if (ok) _proxyWarpUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}" else ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError}")
+                        val ok = WarpExitManager.start(this@MsnGuardVpnService, custom, CoreConfig.SOCKS_PORT)
+                        if (!ok) ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError}")
                     }
                     val _proxyBaseEnv = CoreConfig.envFromEffectiveConfig(this@MsnGuardVpnService, effectiveConfig)
-                    val _proxyPatchedEnv = if (_proxyWarpUpstream != null) LinkedHashMap(_proxyBaseEnv).apply { put("AETHER_UPSTREAM", _proxyWarpUpstream!!) } else _proxyBaseEnv
-                    CoreConfig.applyEnv(_proxyPatchedEnv)
+                    CoreConfig.applyEnv(_proxyBaseEnv)
                     val port = CoreConfig.proxyListenPort(this@MsnGuardVpnService)
                     val host = CoreConfig.proxyBindHost(this@MsnGuardVpnService)
                     NativeCore.prepare(effectiveConfig)
@@ -5172,7 +5170,6 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // shared WarpExit sidecar (xray on 1826) for whichever WARP transport
                 // this connect is actually using. WireGuard's xray stack is the same
                 // SOCKS → VLESS chain Masque uses (see CoreOutboundBuilder parity).
-                var warpExitUpstream: String? = null
                 val _warpProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
                 val _warpTransport = CoreConfig.warpTransportOf(_warpProto)
                 val _exitCustom = _warpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _warpTransport)
@@ -5183,23 +5180,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 }
                 if (_warpTransport != null && _exitCustom) {
                     val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _warpTransport)
-                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting sidecar")
-                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
-                    if (ok) {
-                        // Match the reference sequence: stage 1 proves that the
-                        // Exit-Node SOCKS path can carry a real TCP dial before
-                        // Aether spends time on WARP/API/gateway work.
-                        val preflight = WarpExitManager.probeTcpThroughExit("api.cloudflareclient.com", 443)
-                        if (preflight) {
-                            warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
-                            ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream for ${_warpTransport.name}; TCP preflight passed")
-                        } else {
-                            ConnectionLog.record("Warp Setting: Exit-Node TCP preflight failed — falling back to Freedom")
-                            WarpExitManager.stop()
-                        }
-                    } else {
-                        ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
+                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting Xray exit after WARP listener")
+                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom, null)
+                    if (!ok) {
+                        ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — aborting Exit Node")
+                        failAndStop("Exit Node sidecar failed")
+                        return@execute
                     }
+                    ConnectionLog.record("Warp Setting: Xray Exit is ready; WARP will dial through its SOCKS listener")
                 }
                 // MTU Automatic Scan (v2): measure THIS transport's path first
                 // so the engine env below and the TUN builder both use the same
@@ -5213,16 +5201,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     this@MsnGuardVpnService,
                     effectiveConfig,
                 )
-                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply {
-                    put("AETHER_UPSTREAM", warpExitUpstream!!)
-                    // The Exit Node is already the alternate egress. Match the
-                    // working H2 path: do not carry Freedom's API ECH into the
-                    // SOCKS route, where it causes the API/TLS EOF seen in logs.
-                    remove("AETHER_ECH")
-                    remove("AETHER_API_ECH")
-                    remove("AETHER_ECH_DNS")
-                    remove("AETHER_ECH_DOMAIN")
-                } else baseEnv
+                val patchedEnv = baseEnv
                 // Warp Setting log — prove which endpoint scanner family actually hit the wire.
                 // Isolated: one ConnectionLog line, no protocol/connect change. For Ptech-ipv6
                 // the engine must show `ip=v6` and candidates from 2606:4700:d0/d1; for Ptech-ipv4
@@ -5255,14 +5234,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 ConnectionLog.record("Creating Android VPN interface (via ${TunEngineManager.current(this).label})")
                 val activeEngine = TunEnginePref.get(this)
                 // BadVPN tun2socks reaches its udpgw rendezvous (127.0.0.1:7300) by
-                // issuing a SOCKS CONNECT to it, and aether would relay that through
-                // the tunnel where nothing listens on 7300 — so DNS dies and every
-                // name-based site fails while IP-only apps (Telegram) still work.
-                // Route BadVPN through WarpUdpgwFront, which answers that CONNECT
-                // itself and relays the rest to aether (which still applies the
-                // routing rules). Zeptun and Hev use their own mapdns and never
-                // touch udpgw, so they keep talking to aether directly.
-                val legacyFrontUp = activeEngine == TunEnginePref.LEGACY && WarpUdpgwFront.start(CoreConfig.SOCKS_PORT)
+                // issuing a SOCKS CONNECT to it. In Exit mode the front must relay
+                // normal TCP and UDP to Xray's listener, not directly to WARP;
+                // otherwise DNS and QUIC bypass the VLESS outbound or die at 7300.
+                // Zeptun and Hev speak SOCKS UDP directly and can use Xray itself.
+                val exitNodeUp = _exitCustom && WarpExitManager.isRunning
+                val legacyUpstreamPort = if (exitNodeUp) WarpExitManager.SOCKS_PORT else CoreConfig.SOCKS_PORT
+                val legacyFrontUp = activeEngine == TunEnginePref.LEGACY &&
+                    WarpUdpgwFront.start(legacyUpstreamPort)
                 // Encrypted DNS: SmartDnsFront answers the device's DNS itself over
                 // DoT/DoH on the WARP egress and relays every other byte to the core.
                 // Only for the engines whose mapdns/fake-ip cannot speak DoT or DoH
@@ -5277,9 +5256,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 val smartDnsUp = activeEngine != TunEnginePref.LEGACY &&
                     SmartDnsServer.hasEncrypted(effectiveConfig) &&
                     SmartDnsFront.start(this@MsnGuardVpnService, effectiveConfig, CoreConfig.SOCKS_PORT)
+                // With a custom Exit Node, WARP is the inner hop and Xray is
+                // the final hop. BadVPN needs the udpgw front; Hev and Zeptun
+                // can feed Xray's SOCKS directly.
                 val socksForEngine = when {
-                    smartDnsUp -> CoreConfig.SMART_DNS_FRONT_PORT
                     legacyFrontUp -> WarpUdpgwFront.LISTEN_PORT
+                    exitNodeUp -> WarpExitManager.SOCKS_PORT
+                    smartDnsUp -> CoreConfig.SMART_DNS_FRONT_PORT
                     else -> CoreConfig.SOCKS_PORT
                 }
                 // ── MTU: same for the Builder's VPN interface and the TunEngine.
@@ -5906,24 +5889,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     MtuConfig.Method.WOW -> { patched["AETHER_WG_MTU"] = mtu.toString(); patched["AETHER_MASQUE_MTU"] = mtu.toString() }
                     else -> {}
                 }
-                // Preserve WarpExit upstream across the MTU ladder: the rung rebuilds
-                // envFromEffectiveConfig does NOT carry Warp Setting state, so without
-                // this the 2nd MTU rung drops AETHER_UPSTREAM even on an Exit-Node
-                // connect — the Exit Node scan shows IR until the app is Force Stopped.
-                // Now per-transport: only re-attach for the transport this connect is on.
-                run {
-                    val ladderProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
-                    val ladderTransport = CoreConfig.warpTransportOf(ladderProto)
-                    if (ladderTransport != null && CoreConfig.warpExitIsCustom(this, ladderTransport) && WarpExitManager.isRunning) {
-                        patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
-                        // Keep the MTU retry on the same custom-exit profile:
-                        // Freedom-only API ECH must not leak into the SOCKS path.
-                        patched.remove("AETHER_ECH")
-                        patched.remove("AETHER_API_ECH")
-                        patched.remove("AETHER_ECH_DNS")
-                        patched.remove("AETHER_ECH_DOMAIN")
-                    }
-                }
+                // Exit routing lives in Xray's dialerProxy profile. Keep the
+                // WARP environment identical to Direct across every MTU rung.
                 CoreConfig.applyEnv(patched)
             }
             val addresses = NativeCore.prepare(effectiveConfig)
@@ -6097,6 +6064,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             try {
                 java.net.Socket().use { probe ->
                     probe.connect(java.net.InetSocketAddress("127.0.0.1", port), SOCKS_READY_PROBE_MS)
+                }
+                if (WarpExitManager.pendingWarpAttach) {
+                    ConnectionLog.record("WarpExit: WARP SOCKS is ready; attaching Exit outbound through it")
+                    if (!WarpExitManager.attachToWarp(this, CoreConfig.SOCKS_PORT)) {
+                        ConnectionLog.record("WarpExit: could not attach Exit outbound to WARP SOCKS: ${WarpExitManager.lastError}")
+                        return false
+                    }
+                    ConnectionLog.record("WarpExit: Exit outbound is now chained through WARP")
                 }
                 connected.set(true)
                 TunnelStatus.isProxyMode = proxyMode
