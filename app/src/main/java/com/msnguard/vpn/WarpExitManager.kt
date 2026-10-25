@@ -26,9 +26,21 @@ object WarpExitManager {
     @Volatile private var logThread: Thread? = null
     @Volatile var activeLabel: String = ""
         private set
+    @Volatile private var activeUrl: String = ""
+    @Volatile var pendingWarpAttach: Boolean = false
+        private set
     @Volatile var lastError: String = ""
         private set
     val isRunning: Boolean get() = running.get() && process?.isAlive == true
+
+    /** Rebuild the same Exit config after WARP's own SOCKS listener is ready. */
+    fun attachToWarp(context: Context, dialViaPort: Int): Boolean {
+        val url = activeUrl
+        if (url.isBlank()) return false
+        val ok = start(context, url, dialViaPort)
+        if (ok) pendingWarpAttach = false
+        return ok
+    }
 
     private fun binary(context: Context): File =
         File(context.applicationInfo.nativeLibraryDir, "libxray.so")
@@ -71,6 +83,8 @@ object WarpExitManager {
     fun stop() {
         running.set(false)
         activeLabel = ""
+        activeUrl = ""
+        pendingWarpAttach = false
         val proc = process
         try { proc?.destroy() } catch (_: Exception) {}
         Thread({
@@ -104,10 +118,16 @@ object WarpExitManager {
         }.getOrDefault(false)
     }
 
-    fun start(context: Context, exitUrl: String, dialViaPort: Int = CoreConfig.SOCKS_PORT): Boolean {
+    fun start(context: Context, exitUrl: String, dialViaPort: Int? = CoreConfig.SOCKS_PORT): Boolean {
+        val keepUrl = exitUrl
         stop()
+        activeUrl = keepUrl
+        // A null upstream means the sidecar is staged first and attached only
+        // after WARP has published its SOCKS listener. This breaks the startup
+        // cycle without changing the Direct path.
+        pendingWarpAttach = dialViaPort == null
         lastError = ""
-        activeLabel = exitUrl.take(48)
+        activeLabel = keepUrl.take(48)
         val node = parseExitNode(exitUrl)
         if (node == null) {
             lastError = "could not parse config — supported: vless, vmess, trojan, ss, socks, hysteria2 (one link)"

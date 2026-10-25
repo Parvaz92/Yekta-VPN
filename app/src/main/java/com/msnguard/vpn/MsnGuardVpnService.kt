@@ -5180,8 +5180,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 }
                 if (_warpTransport != null && _exitCustom) {
                     val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _warpTransport)
-                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting Xray exit")
-                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom, CoreConfig.SOCKS_PORT)
+                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting Xray exit after WARP listener")
+                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom, null)
                     if (!ok) {
                         ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — aborting Exit Node")
                         failAndStop("Exit Node sidecar failed")
@@ -6064,6 +6064,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             try {
                 java.net.Socket().use { probe ->
                     probe.connect(java.net.InetSocketAddress("127.0.0.1", port), SOCKS_READY_PROBE_MS)
+                }
+                if (WarpExitManager.pendingWarpAttach) {
+                    ConnectionLog.record("WarpExit: WARP SOCKS is ready; attaching Exit outbound through it")
+                    if (!WarpExitManager.attachToWarp(this, CoreConfig.SOCKS_PORT)) {
+                        ConnectionLog.record("WarpExit: could not attach Exit outbound to WARP SOCKS: ${WarpExitManager.lastError}")
+                        return false
+                    }
+                    ConnectionLog.record("WarpExit: Exit outbound is now chained through WARP")
                 }
                 connected.set(true)
                 TunnelStatus.isProxyMode = proxyMode
