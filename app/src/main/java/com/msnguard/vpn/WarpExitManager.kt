@@ -38,8 +38,26 @@ object WarpExitManager {
         val url = activeUrl
         if (url.isBlank()) return false
         val ok = start(context, url, dialViaPort)
-        if (ok) pendingWarpAttach = false
-        return ok
+        if (!ok) return false
+        // Do not hand the listener to tun2socks until the rebuilt Xray
+        // outbound has completed a real TCP dial through WARP.
+        val deadline = android.os.SystemClock.elapsedRealtime() + 12_000L
+        var tcpOk = false
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (probeTcpThroughExit("www.cloudflare.com", 443, 2_000)) {
+                tcpOk = true
+                break
+            }
+            try { Thread.sleep(250) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+        }
+        if (!tcpOk) {
+            lastError = "Exit outbound did not pass TCP preflight after WARP attach"
+            ConnectionLog.record("$TAG attach TCP preflight failed; refusing to expose Exit")
+            stopAndWait()
+            return false
+        }
+        pendingWarpAttach = false
+        return true
     }
 
     private fun binary(context: Context): File =
@@ -80,21 +98,27 @@ object WarpExitManager {
         line.contains("A unified platform for anti-censorship") ||
         line.contains("infra/conf/serial: Reading config")
 
-    fun stop() {
+    private fun stopAndWait(clearConfig: Boolean = true) {
         running.set(false)
-        activeLabel = ""
-        activeUrl = ""
-        pendingWarpAttach = false
+        if (clearConfig) {
+            activeLabel = ""
+            activeUrl = ""
+            pendingWarpAttach = false
+        }
         val proc = process
+        process = null
+        logThread = null
         try { proc?.destroy() } catch (_: Exception) {}
-        Thread({
-            try {
-                if (proc != null && proc.isAlive && !proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) proc.destroyForcibly()
-            } catch (_: Exception) {}
-            if (process === proc) { process = null; logThread = null }
-            running.set(false)
-        }, "warpexit-stop").start()
+        try {
+            if (proc != null && proc.isAlive && !proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
+                proc.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        } catch (_: Exception) {}
+        running.set(false)
     }
+
+    fun stop() = stopAndWait()
 
     /**
      * Matches the reference client's stage-1 gate: prove that the sidecar can
