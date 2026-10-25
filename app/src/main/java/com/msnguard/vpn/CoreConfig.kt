@@ -530,16 +530,10 @@ object CoreConfig {
         out["AETHER_LOG_LEVEL"] = text("log_level", "info")
         out["AETHER_PERF_PROFILE"] = text("perf_profile", "auto")
 
-        // H2 fragmentation. PattNG screenshot 1-22-03 shows Fragment OFF yet
-        // MASQUE connects in <30s; MSN with fragment ON (default "on") found
-        // 0 gateways in 120s (3.0.19 log). Match PattNG: MASQUE fragment OFF
-        // by default — user can still turn it on via h2_fragmentation pref.
-        // Mixed-case SNI only inside fragment branch (FCAE parity).
+        // H2 fragmentation is opt-in, matching the working profile's default.
+        // Mixed-case SNI is only meaningful when fragmentation is enabled.
         if (isMasqueForEnv) {
-            // MASQUE H2 parity: the working profile hardens the H2 ClientHello
-            // with fragmentation before the gateway scan starts. Keep the
-            // optional mixed-case SNI switch separate.
-            out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
+            out["AETHER_MASQUE_H2_FRAGMENT"] = "0"
             if (bool("mixed_case_sni", false)) {
                 out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
             }

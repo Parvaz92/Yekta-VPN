@@ -9511,8 +9511,8 @@ class MainActivity : Activity() {
     }
 
     private fun defaultMasqueTransport(): MasqueTransport {
-        val name = preferences().getString(DEFAULT_MASQUE_TRANSPORT, MasqueTransport.H3.coreName)
-        return MasqueTransport.entries.firstOrNull { it.coreName == name } ?: MasqueTransport.H3
+        val name = preferences().getString(DEFAULT_MASQUE_TRANSPORT, MasqueTransport.H2.coreName)
+        return MasqueTransport.entries.firstOrNull { it.coreName == name } ?: MasqueTransport.H2
     }
 
     private fun scanSummary(): String = listOfNotNull(
