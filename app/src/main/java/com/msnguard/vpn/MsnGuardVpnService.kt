@@ -6071,6 +6071,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                         ConnectionLog.record("WarpExit: could not attach Exit outbound to WARP SOCKS: ${WarpExitManager.lastError}")
                         return false
                     }
+                    // The front may have been staged against WARP's listener before
+                    // Xray was attached. Rebind it to the FINAL Exit listener before
+                    // any TUN engine can consume it; otherwise DNS/UDP stays on WARP.
+                    if (TunEnginePref.get(this) == TunEnginePref.LEGACY) {
+                        WarpUdpgwFront.stop()
+                        if (!WarpUdpgwFront.start(WarpExitManager.SOCKS_PORT)) {
+                            ConnectionLog.record("WarpExit: could not switch BadVPN UDP front to final Exit listener")
+                            return false
+                        }
+                        ConnectionLog.record("WarpExit: BadVPN UDP front switched to final Exit listener")
+                    }
                     ConnectionLog.record("WarpExit: Exit outbound is now chained through WARP")
                 }
                 connected.set(true)

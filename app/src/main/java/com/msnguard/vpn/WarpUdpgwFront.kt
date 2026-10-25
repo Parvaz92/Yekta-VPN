@@ -102,14 +102,21 @@ object WarpUdpgwFront {
     @Synchronized
     fun start(socksPort: Int): Boolean {
         if (running.get()) {
-            if (upstreamPort != socksPort) {
-                record("$TAG already running for upstream $upstreamPort; refusing route switch to $socksPort")
-                return false
+            if (upstreamPort == socksPort) {
+                record("$TAG already running")
+                return true
             }
-            record("$TAG already running")
-            return true
+            // A reconnect can replace WARP's listener with the final Exit
+            // listener. Refusing the switch leaves BadVPN/DNS on the old route.
+            record("$TAG switching upstream $upstreamPort → $socksPort")
+            stop()
         }
         upstreamPort = socksPort
+        if (socksPort <= 0) {
+            record("$TAG invalid upstream port $socksPort")
+            upstreamPort = 0
+            return false
+        }
 
         val server = try {
             ServerSocket().apply {

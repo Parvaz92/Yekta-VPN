@@ -184,9 +184,15 @@ object WarpExitManager {
         val profile = (if (line.startsWith("vmess://", ignoreCase = true))
             com.msnguard.vpn.shard.VmessFmt.parse(line)
             else com.msnguard.vpn.shard.ShardImport.parseOne(line)) ?: return null
-        val node = profile.toShardNode()
-        if (node.address.contains("[") || node.address.contains("]")) return null
-        if (node.port !in 1..65535) return null
+        val parsed = profile.toShardNode()
+        // URI IPv6 hosts are written as [addr] so the port is unambiguous.
+        // Xray's server field expects the bare literal; keeping the brackets
+        // makes the sidecar treat the host as malformed and closes the pipe.
+        // URI.idnHost() already removes IPv6 brackets. Keep the bare literal:
+        // Xray's JSON server.address wants `2606:...`, while the URI only uses
+        // brackets to delimit the host from its port.
+        val node = parsed.copy(address = parsed.address.removeSurrounding("[", "]"))
+        if (node.address.isBlank() || node.port !in 1..65535) return null
         return node
     }
 
