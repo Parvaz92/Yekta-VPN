@@ -6077,14 +6077,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     if (TunEnginePref.get(this) == TunEnginePref.LEGACY && currentProtocol == "WIREGUARD") {
                         WarpUdpgwFront.stop()
                         var frontSwitched = false
-                        repeat(6) {
+                        for (attempt in 0 until 6) {
                             if (WarpUdpgwFront.start(WarpExitManager.SOCKS_PORT)) {
                                 frontSwitched = true
-                                return@repeat
+                                break
                             }
                             try { Thread.sleep(100) } catch (_: InterruptedException) {
                                 Thread.currentThread().interrupt()
-                                return@repeat
+                                break
                             }
                         }
                         if (!frontSwitched) {
