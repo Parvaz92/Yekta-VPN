@@ -142,14 +142,62 @@ object WarpExitManager {
         }.getOrDefault(false)
     }
 
-    fun start(context: Context, exitUrl: String, dialViaPort: Int? = CoreConfig.SOCKS_PORT): Boolean {
+    /**
+     * Reads Cloudflare's authenticated trace response through one local SOCKS hop.
+     * The result identifies the egress of that listener; it never logs the VLESS
+     * link or any credential.
+     */
+    fun probeCloudflareTrace(socksPort: Int, label: String, timeoutMs: Int = 8_000): Boolean {
+        return runCatching {
+            val connection = java.net.URL("https://www.cloudflare.com/cdn-cgi/trace")
+                .openConnection(
+                    java.net.Proxy(
+                        java.net.Proxy.Type.SOCKS,
+                        InetSocketAddress("127.0.0.1", socksPort),
+                    )
+                ) as java.net.HttpURLConnection
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = timeoutMs
+            connection.requestMethod = "GET"
+            try {
+                check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
+                val fields = connection.inputStream.bufferedReader().use { reader ->
+                    reader.readLines().mapNotNull { line ->
+                        line.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] }
+                    }.toMap()
+                }
+                val ip = fields["ip"].orEmpty()
+                val loc = fields["loc"].orEmpty()
+                check(ip.isNotBlank()) { "trace did not return ip" }
+                ConnectionLog.record("$TAG route probe=$label listener=127.0.0.1:$socksPort egressIp=$ip cfLoc=${loc.ifBlank { "unknown" }}")
+                true
+            } finally {
+                connection.disconnect()
+            }
+        }.onFailure {
+            ConnectionLog.record("$TAG route probe=$label listener=127.0.0.1:$socksPort failed=${it.javaClass.simpleName}")
+        }.getOrDefault(false)
+    }
+
+    fun start(
+        context: Context,
+        exitUrl: String,
+        dialViaPort: Int? = CoreConfig.SOCKS_PORT,
+        reverseChain: Boolean = false,
+    ): Boolean {
         val keepUrl = exitUrl
         stop()
         activeUrl = keepUrl
         // A null upstream means the sidecar is staged first and attached only
         // after WARP has published its SOCKS listener. This breaks the startup
         // cycle without changing the Direct path.
-        pendingWarpAttach = dialViaPort == null
+        // Reverse chain keeps the sidecar stable as WARP's upstream. It must not
+        // be rebuilt after WARP starts: that would turn WARP -> VLESS back into
+        // VLESS -> WARP.
+        pendingWarpAttach = dialViaPort == null && !reverseChain
+        if (reverseChain) {
+            ConnectionLog.record("$TAG mode=Warp Over V2ray; inbound=127.0.0.1:$SOCKS_PORT udp=true outbound=custom")
+        }
         lastError = ""
         activeLabel = keepUrl.take(48)
         val node = parseExitNode(exitUrl)
@@ -161,12 +209,33 @@ object WarpExitManager {
         val listenHost = "127.0.0.1"
         val port = SOCKS_PORT
         val logLevel = "warning"
-        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, dialViaPort = dialViaPort)
+        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, dialViaPort = dialViaPort, reverseChain = reverseChain)
         val configFile = ShardConfigs.writeConfig(context, "warpexit.json", config)
         if (!launch(context, configFile)) return false
         if (awaitListener(port, timeoutMs = 8000)) {
             running.set(true)
             ConnectionLog.record("$TAG up on $port via ${LogRedactor.nodeTag(node.key)}")
+            if (reverseChain) {
+                val deadline = android.os.SystemClock.elapsedRealtime() + 12_000L
+                var tcpOk = false
+                while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                    if (probeTcpThroughExit("www.cloudflare.com", 443, 2_000)) {
+                        tcpOk = true
+                        break
+                    }
+                    try { Thread.sleep(250) } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                }
+                if (!tcpOk) {
+                    lastError = "reverse Exit outbound did not pass TCP preflight"
+                    ConnectionLog.record("$TAG reverse-chain TCP preflight failed; refusing Warp Over V2ray")
+                    stopAndWait()
+                    return false
+                }
+                ConnectionLog.record("$TAG reverse-chain TCP preflight passed")
+            }
             return true
         }
         lastError = "listener $port never came up"

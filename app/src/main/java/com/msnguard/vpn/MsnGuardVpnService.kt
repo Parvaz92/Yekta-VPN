@@ -5173,6 +5173,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 val _warpProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
                 val _warpTransport = CoreConfig.warpTransportOf(_warpProto)
                 val _exitCustom = _warpTransport != null && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService, _warpTransport)
+                val _warpOverV2ray = _exitCustom && _warpTransport != null &&
+                    CoreConfig.warpExitChainMode(this@MsnGuardVpnService, _warpTransport) == CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY
                 if (_warpTransport == null) {
                     ConnectionLog.record("Warp Setting: not a WARP transport (proto=${_warpProto.ifBlank { "none" }}) — sidecar skipped")
                 } else if (!_exitCustom) {
@@ -5180,8 +5182,21 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 }
                 if (_warpTransport != null && _exitCustom) {
                     val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService, _warpTransport)
-                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name}, starting Xray exit after WARP listener")
-                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom, null)
+                    val chainLabel = if (_warpOverV2ray) "Warp Over V2ray" else "V2ray Over Warp"
+                    if (_warpOverV2ray) {
+                        runCatching { JSONObject(effectiveConfig).put("socks_proxy", "127.0.0.1:${WarpExitManager.SOCKS_PORT}") }
+                            .onSuccess { effectiveConfig = it.toString() }
+                            .onFailure { ConnectionLog.record("Warp Setting: could not prepare reverse upstream") }
+                    }
+                    ConnectionLog.record("Warp Setting: custom exit requested for ${_warpTransport.name} mode=$chainLabel")
+                    val ok = if (_warpOverV2ray) {
+                        // PattNG/Aether reverse-chain contract: Xray owns a mixed
+                        // UDP-capable inbound and routes it to the parsed custom
+                        // outbound; Aether is started with this inbound as upstream.
+                        WarpExitManager.start(this@MsnGuardVpnService, custom, CoreConfig.SOCKS_PORT, reverseChain = true)
+                    } else {
+                        WarpExitManager.start(this@MsnGuardVpnService, custom, null)
+                    }
                     if (!ok) {
                         ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — aborting Exit Node")
                         failAndStop("Exit Node sidecar failed")
@@ -5239,7 +5254,11 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // otherwise DNS and QUIC bypass the VLESS outbound or die at 7300.
                 // Zeptun and Hev speak SOCKS UDP directly and can use Xray itself.
                 val exitNodeUp = _exitCustom && WarpExitManager.isRunning
-                val legacyUpstreamPort = if (exitNodeUp) WarpExitManager.SOCKS_PORT else CoreConfig.SOCKS_PORT
+                val reverseExitUp = exitNodeUp && _warpOverV2ray
+                // Reverse chain: the engine must feed Aether's SOCKS listener;
+                // Aether then sends WARP's own connections to Xray's mixed inbound.
+                // Forward chain keeps the existing final Xray listener.
+                val legacyUpstreamPort = if (reverseExitUp) CoreConfig.SOCKS_PORT else if (exitNodeUp) WarpExitManager.SOCKS_PORT else CoreConfig.SOCKS_PORT
                 val legacyFrontUp = activeEngine == TunEnginePref.LEGACY &&
                     WarpUdpgwFront.start(legacyUpstreamPort)
                 // Encrypted DNS: SmartDnsFront answers the device's DNS itself over
@@ -5261,7 +5280,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // can feed Xray's SOCKS directly.
                 val socksForEngine = when {
                     legacyFrontUp -> WarpUdpgwFront.LISTEN_PORT
-                    exitNodeUp -> WarpExitManager.SOCKS_PORT
+                    exitNodeUp && !reverseExitUp -> WarpExitManager.SOCKS_PORT
+                    reverseExitUp -> CoreConfig.SOCKS_PORT
                     smartDnsUp -> CoreConfig.SMART_DNS_FRONT_PORT
                     else -> CoreConfig.SOCKS_PORT
                 }
@@ -6066,6 +6086,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     probe.connect(java.net.InetSocketAddress("127.0.0.1", port), SOCKS_READY_PROBE_MS)
                 }
                 if (WarpExitManager.pendingWarpAttach) {
+                    ConnectionLog.record("WarpExit: route checkpoint stage=warp-before-exit listener=127.0.0.1:${CoreConfig.SOCKS_PORT}")
+                    WarpExitManager.probeCloudflareTrace(CoreConfig.SOCKS_PORT, "warp-before-exit")
                     ConnectionLog.record("WarpExit: WARP SOCKS is ready; attaching Exit outbound through it")
                     if (!WarpExitManager.attachToWarp(this, CoreConfig.SOCKS_PORT)) {
                         ConnectionLog.record("WarpExit: could not attach Exit outbound to WARP SOCKS: ${WarpExitManager.lastError}")
@@ -6092,6 +6114,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                             return false
                         }
                         ConnectionLog.record("WarpExit: WireGuard BadVPN UDP front switched to final Exit listener")
+                    }
+                    ConnectionLog.record("WarpExit: route checkpoint stage=exit-after-attach listener=127.0.0.1:${WarpExitManager.SOCKS_PORT}")
+                    WarpExitManager.probeCloudflareTrace(WarpExitManager.SOCKS_PORT, "exit-node-direct")
+                    ConnectionLog.record("WarpExit: route checkpoint stage=aether-final listener=127.0.0.1:${CoreConfig.SOCKS_PORT}")
+                    WarpExitManager.probeCloudflareTrace(CoreConfig.SOCKS_PORT, "aether-final")
+                    if (TunEnginePref.get(this) == TunEnginePref.LEGACY && currentProtocol == "WIREGUARD") {
+                        ConnectionLog.record("WarpExit: route checkpoint stage=wireguard-final listener=127.0.0.1:${WarpUdpgwFront.LISTEN_PORT}")
+                        WarpExitManager.probeCloudflareTrace(WarpUdpgwFront.LISTEN_PORT, "wireguard-final")
                     }
                     ConnectionLog.record("WarpExit: Exit outbound is now chained through WARP")
                 }

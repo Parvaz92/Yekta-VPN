@@ -120,6 +120,9 @@ object CoreConfig {
     const val WARP_EXIT_CUSTOM_PREF_WIREGUARD = "warp_exit_custom_wireguard"
     const val WARP_EXIT_MODE_PREF_WOW = "warp_exit_mode_wow"
     const val WARP_EXIT_CUSTOM_PREF_WOW = "warp_exit_custom_wow"
+    const val WARP_EXIT_CHAIN_MODE_PREF = "warp_exit_chain_mode"
+    const val WARP_EXIT_CHAIN_V2RAY_OVER_WARP = "v2ray-over-warp"
+    const val WARP_EXIT_CHAIN_WARP_OVER_V2RAY = "warp-over-v2ray"
 
     enum class WarpTransport { MASQUE, WIREGUARD, WOW }
 
@@ -204,6 +207,22 @@ object CoreConfig {
 
     fun warpExitIsCustom(context: android.content.Context, t: WarpTransport): Boolean =
         warpExitMode(context, t) == WARP_EXIT_MODE_CUSTOM && warpExitCustom(context, t).isNotBlank()
+
+    fun warpExitChainMode(context: android.content.Context, t: WarpTransport): String {
+        val key = when (t) {
+            WarpTransport.MASQUE -> "warp_exit_chain_mode_masque"
+            WarpTransport.WIREGUARD -> "warp_exit_chain_mode_wireguard"
+            WarpTransport.WOW -> "warp_exit_chain_mode_wow"
+        }
+        val raw = context.profiled().getString(key, WARP_EXIT_CHAIN_V2RAY_OVER_WARP)?.trim().orEmpty()
+        return if (raw == WARP_EXIT_CHAIN_WARP_OVER_V2RAY) raw else WARP_EXIT_CHAIN_V2RAY_OVER_WARP
+    }
+
+    fun warpExitChainModeKey(t: WarpTransport): String = when (t) {
+        WarpTransport.MASQUE -> "warp_exit_chain_mode_masque"
+        WarpTransport.WIREGUARD -> "warp_exit_chain_mode_wireguard"
+        WarpTransport.WOW -> "warp_exit_chain_mode_wow"
+    }
 
     // Legacy single-transport surface — Masque alias. Kept so existing callers
     // compile and existing installs keep their Masque exit.
