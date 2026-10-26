@@ -184,6 +184,7 @@ object WarpExitManager {
         exitUrl: String,
         dialViaPort: Int? = CoreConfig.SOCKS_PORT,
         reverseChain: Boolean = false,
+        reverseUdp: Boolean = false,
     ): Boolean {
         val keepUrl = exitUrl
         stop()
@@ -209,7 +210,7 @@ object WarpExitManager {
         val listenHost = "127.0.0.1"
         val port = SOCKS_PORT
         val logLevel = "warning"
-        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, dialViaPort = dialViaPort, reverseChain = reverseChain)
+        val config = ShardConfigs.tunnelConfig(context, node, listenHost, port, logLevel, dialViaPort = dialViaPort, reverseChain = reverseChain, reverseUdp = reverseUdp)
         val configFile = ShardConfigs.writeConfig(context, "warpexit.json", config)
         if (!launch(context, configFile)) return false
         if (awaitListener(port, timeoutMs = 8000)) {

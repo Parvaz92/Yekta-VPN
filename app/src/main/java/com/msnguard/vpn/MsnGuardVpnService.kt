@@ -5193,7 +5193,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                         // PattNG/Aether reverse-chain contract: Xray owns a mixed
                         // UDP-capable inbound and routes it to the parsed custom
                         // outbound; Aether is started with this inbound as upstream.
-                        WarpExitManager.start(this@MsnGuardVpnService, custom, CoreConfig.SOCKS_PORT, reverseChain = true)
+                        WarpExitManager.start(this@MsnGuardVpnService, custom, CoreConfig.SOCKS_PORT, reverseChain = true, reverseUdp = _warpTransport == CoreConfig.WarpTransport.WIREGUARD)
                     } else {
                         WarpExitManager.start(this@MsnGuardVpnService, custom, null)
                     }

@@ -539,11 +539,12 @@ object ShardConfigs {
         smartSplit: SmartSplit.FragmentProfile? = null,
         dialViaPort: Int? = null,
         reverseChain: Boolean = false,
+        reverseUdp: Boolean = false,
     ): String {
         // Keep the Exit outbound un-muxed. WireGuard's UDP handshake needs the
         // plain VLESS transport here; mux can reuse the wrong TLS/SNI session and
         // produces the certificate mismatch seen only on WireGuard Exit.
-        val proxy = outbound(context, node, "proxy", mux = false)
+        val proxy = outbound(context, node, "proxy", mux = reverseUdp)
         if (dialViaPort != null && !reverseChain) {
             val stream = proxy.optJSONObject("streamSettings") ?: JSONObject().also { proxy.put("streamSettings", it) }
             val sockopt = stream.optJSONObject("sockopt") ?: JSONObject().also { stream.put("sockopt", it) }
