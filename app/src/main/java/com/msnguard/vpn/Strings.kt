@@ -870,6 +870,10 @@ object Strings {
             "از طریق خروجی V2Ray شما — برای هر روش جداگانه، بقیه دست‌نخورده می‌مانند.",
             "通过你的 V2Ray 出口 — 按传输单独生效，其他不变。"
         ),
+        "V2ray Over Warp" to Triple("V2ray Over Warp", "V2ray Over Warp", "V2ray Over Warp"),
+        "Warp Over V2ray" to Triple("Warp Over V2ray", "Warp Over V2ray", "Warp Over V2ray"),
+        "Connection to V2ray through Warp" to Triple("Connection to V2ray through Warp", "اتصال به V2ray از مسیر Warp", "通过 Warp 连接到 V2ray"),
+        "Connection to Warp through V2ray with Cloudflare IP" to Triple("Connection to Warp through V2ray with Cloudflare IP", "اتصال به Warp از مسیر V2ray با آیپی کلودفلر", "通过 V2ray 连接到 Warp，使用 Cloudflare IP"),
         "Freedom — direct" to Triple("Freedom — direct", "آزادی — مستقیم", "自由 — 直连"),
         "Through your V2Ray config" to Triple("Through your V2Ray config", "از طریق کانفیگ V2Ray شما", "通过你的 V2Ray 配置"),
         "Freedom — dial direct" to Triple("Freedom — dial direct", "آزادی — اتصال مستقیم", "自由 — 直连拨号"),

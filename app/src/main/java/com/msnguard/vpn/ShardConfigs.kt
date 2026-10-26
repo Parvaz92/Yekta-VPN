@@ -538,12 +538,14 @@ object ShardConfigs {
         logLevel: String,
         smartSplit: SmartSplit.FragmentProfile? = null,
         dialViaPort: Int? = null,
+        reverseChain: Boolean = false,
+        reverseUdp: Boolean = false,
     ): String {
         // Keep the Exit outbound un-muxed. WireGuard's UDP handshake needs the
         // plain VLESS transport here; mux can reuse the wrong TLS/SNI session and
         // produces the certificate mismatch seen only on WireGuard Exit.
-        val proxy = outbound(context, node, "proxy", mux = false)
-        if (dialViaPort != null) {
+        val proxy = outbound(context, node, "proxy", mux = reverseUdp)
+        if (dialViaPort != null && !reverseChain) {
             val stream = proxy.optJSONObject("streamSettings") ?: JSONObject().also { proxy.put("streamSettings", it) }
             val sockopt = stream.optJSONObject("sockopt") ?: JSONObject().also { stream.put("sockopt", it) }
             sockopt.put("dialerProxy", "warp-upstream")
@@ -551,7 +553,7 @@ object ShardConfigs {
         val outbounds = JSONArray()
             .put(proxy)
             .apply {
-                if (dialViaPort != null) put(JSONObject().apply {
+                if (dialViaPort != null && !reverseChain) put(JSONObject().apply {
                     put("tag", "warp-upstream")
                     put("protocol", "socks")
                     put("settings", JSONObject().apply {
@@ -628,7 +630,7 @@ object ShardConfigs {
                     put("tag", "in")
                     put("listen", listenHost)
                     put("port", listenPort)
-                    put("protocol", "socks")
+                    put("protocol", if (reverseChain) "mixed" else "socks")
                     put(
                         "settings",
                         JSONObject().apply {
@@ -671,7 +673,7 @@ object ShardConfigs {
                     // were tested against the real binary; both route correctly, and
                     // this is the safer one.
                     // PattNG parity: always sniff+fakedns. Plain SHARD had no sniffing before, so fake IPs were never generated.
-                    put(
+                    if (!reverseChain) put(
                         "sniffing",
                         JSONObject().apply {
                             put("enabled", true)
@@ -707,7 +709,7 @@ object ShardConfigs {
             // would only create a second resolver to reason about.
             // PattNG parity: no DoH. Plain SHARD uses fakedns + dns-out like PattNG's configureLocalDns.
             // Inbound sniffing carries "fakedns" so Xray synthesizes a fake IP per query and the routing rules resolve via dns-out.
-            if (smartSplit == null) {
+            if (smartSplit == null && !reverseChain) {
                 put("fakedns", JSONArray().put(JSONObject().apply {
                     put("ipPool", "198.18.0.0/16")
                     put("poolSize", 1024)
@@ -734,6 +736,13 @@ object ShardConfigs {
             // the default outbound and everything goes through the node. blackhole is
             // present only so a future rule has something to point at.
             put("outbounds", outbounds)
+            if (reverseChain) {
+                put("routing", JSONObject().put("rules", JSONArray().put(JSONObject().apply {
+                    put("type", "field")
+                    put("inboundTag", JSONArray().put("in"))
+                    put("outboundTag", "proxy")
+                })))
+            }
             if (smartSplit != null) {
                 put("dns", smartSplitDns(context))
                 put("routing", JSONObject().put("rules", smartSplitRules(context)))

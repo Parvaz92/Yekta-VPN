@@ -6452,8 +6452,11 @@ class MainActivity : Activity() {
         val exitToggleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         lateinit var exitDirectBtn: TextView
         lateinit var exitNodeBtn: TextView
+        lateinit var v2rayOverWarpBtn: TextView
+        lateinit var warpOverV2rayBtn: TextView
+        val chainModesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; visibility = View.GONE }
         val exitCollapse = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = roundedBackground(warpC(SURFACE.toLong(), 0xFFF7F9FB), 14, warpC(DIVIDER.toLong(), 0xFFD5DDE3)); visibility = View.GONE }
-        val exitField = settingsField(value = "", hintText = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link", multiline = true).apply { minLines = 2; maxLines = 4 }
+        val exitField = settingsField(value = "", hintText = "vless | vmess | trojan | ss | socks | hysteria2 — one link", multiline = true).apply { minLines = 2; maxLines = 4 }
         val exitHint = label(Strings.t("Per transport"), 10f, MUTED)
         var applyBtn: TextView? = null
         var currentExitTransport: CoreConfig.WarpTransport = warpTransportOfRail(railSelected)
@@ -6463,6 +6466,7 @@ class MainActivity : Activity() {
             val tag = exitLabelFor(t)
             val mode = CoreConfig.warpExitMode(this@MainActivity, t)
             val isCustom = mode == CoreConfig.WARP_EXIT_MODE_CUSTOM
+            val chainMode = CoreConfig.warpExitChainMode(this@MainActivity, t)
             val raw = CoreConfig.warpExitCustom(this@MainActivity, t)
             exitField.setText(raw)
             exitField.hint = "vless | vmess | trojan | ss | socks | hysteria2 \u2014 one link"
@@ -6482,6 +6486,14 @@ class MainActivity : Activity() {
                 exitNodeBtn.setTextColor(MUTED)
                 exitCollapse.visibility = View.GONE
             }
+            chainModesRow.visibility = if (isCustom) View.VISIBLE else View.GONE
+            val selectedChainBg = roundedBackground(warpC(selectedSurface.toLong(), 0xFF241B3C), 12, warpC(palette.violet.toLong(), 0xFFA18DF8))
+            val offChainBg = roundedBackground(warpC(SURFACE.toLong(), 0xFF10171D), 12, warpC(DIVIDER.toLong(), 0xFF33404A))
+            val reverseBg = roundedBackground(warpC(connectedContainer.toLong(), 0xFF102C30), 12, warpC(connected.toLong(), 0xFF35C5C1))
+            v2rayOverWarpBtn.background = if (chainMode == CoreConfig.WARP_EXIT_CHAIN_V2RAY_OVER_WARP) selectedChainBg else offChainBg
+            warpOverV2rayBtn.background = if (chainMode == CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY) reverseBg else offChainBg
+            v2rayOverWarpBtn.setTextColor(if (chainMode == CoreConfig.WARP_EXIT_CHAIN_V2RAY_OVER_WARP) warpC(palette.violet.toLong(), 0xFFA18DF8) else MUTED)
+            warpOverV2rayBtn.setTextColor(if (chainMode == CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY) warpC(connected.toLong(), 0xFF35C5C1) else MUTED)
             exitHint.text = tag + " \u00B7 " + Strings.t(if (isCustom) "Exit-Node" else "Direct")
         }
         exitDirectBtn = TextView(this).apply {
@@ -6522,6 +6534,27 @@ class MainActivity : Activity() {
         exitToggleRow.addView(exitDirectBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
         exitToggleRow.addView(exitNodeBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         exitBox.addView(exitToggleRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        fun chainButton(title: String, description: String, reverse: Boolean): TextView = TextView(this).apply {
+            text = Strings.t(title) + "\n" + Strings.t(description)
+            textSize = 10f
+            setTextColor(MUTED)
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            typeface = Typefaces.medium(this@MainActivity)
+            isClickable = true; isFocusable = true
+            setOnClickListener {
+                if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@setOnClickListener }
+                val t = warpTransportOfRail(railSelected)
+                preferences().edit().putString(CoreConfig.warpExitChainModeKey(t), if (reverse) CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY else CoreConfig.WARP_EXIT_CHAIN_V2RAY_OVER_WARP).commit()
+                ConnectionLog.record("Warp Setting: " + exitLabelFor(t) + " chain → " + if (reverse) "Warp Over V2ray" else "V2ray Over Warp")
+                refreshExitBox()
+            }
+        }
+        v2rayOverWarpBtn = chainButton("V2ray Over Warp", "Connection to V2ray through Warp", false)
+        warpOverV2rayBtn = chainButton("Warp Over V2ray", "Connection to Warp through V2ray with Cloudflare IP", true)
+        chainModesRow.addView(v2rayOverWarpBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        chainModesRow.addView(warpOverV2rayBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        exitBox.addView(chainModesRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
         val exitRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         exitRow.addView(exitField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(10) })
         val localApplyBtn = createSettingsButton(Strings.t("Save"), backgroundOverride = primary, textColorOverride = primaryContainer) {
