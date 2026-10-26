@@ -672,7 +672,7 @@ object ShardConfigs {
                     // were tested against the real binary; both route correctly, and
                     // this is the safer one.
                     // PattNG parity: always sniff+fakedns. Plain SHARD had no sniffing before, so fake IPs were never generated.
-                    put(
+                    if (!reverseChain) put(
                         "sniffing",
                         JSONObject().apply {
                             put("enabled", true)
@@ -708,7 +708,7 @@ object ShardConfigs {
             // would only create a second resolver to reason about.
             // PattNG parity: no DoH. Plain SHARD uses fakedns + dns-out like PattNG's configureLocalDns.
             // Inbound sniffing carries "fakedns" so Xray synthesizes a fake IP per query and the routing rules resolve via dns-out.
-            if (smartSplit == null) {
+            if (smartSplit == null && !reverseChain) {
                 put("fakedns", JSONArray().put(JSONObject().apply {
                     put("ipPool", "198.18.0.0/16")
                     put("poolSize", 1024)
