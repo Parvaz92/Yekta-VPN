@@ -6074,13 +6074,24 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     // The front may have been staged against WARP's listener before
                     // Xray was attached. Rebind it to the FINAL Exit listener before
                     // any TUN engine can consume it; otherwise DNS/UDP stays on WARP.
-                    if (TunEnginePref.get(this) == TunEnginePref.LEGACY) {
+                    if (TunEnginePref.get(this) == TunEnginePref.LEGACY && currentProtocol == "WIREGUARD") {
                         WarpUdpgwFront.stop()
-                        if (!WarpUdpgwFront.start(WarpExitManager.SOCKS_PORT)) {
-                            ConnectionLog.record("WarpExit: could not switch BadVPN UDP front to final Exit listener")
+                        var frontSwitched = false
+                        for (attempt in 0 until 6) {
+                            if (WarpUdpgwFront.start(WarpExitManager.SOCKS_PORT)) {
+                                frontSwitched = true
+                                break
+                            }
+                            try { Thread.sleep(100) } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            }
+                        }
+                        if (!frontSwitched) {
+                            ConnectionLog.record("WarpExit: could not switch WireGuard BadVPN UDP front to final Exit listener")
                             return false
                         }
-                        ConnectionLog.record("WarpExit: BadVPN UDP front switched to final Exit listener")
+                        ConnectionLog.record("WarpExit: WireGuard BadVPN UDP front switched to final Exit listener")
                     }
                     ConnectionLog.record("WarpExit: Exit outbound is now chained through WARP")
                 }
