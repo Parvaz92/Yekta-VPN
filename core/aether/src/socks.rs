@@ -1379,6 +1379,14 @@ async fn handle_udp_associate(
 ) -> Result<()> {
     let control_peer = sock.peer_addr()?;
     let expected_ip = expected_udp_source(control_peer, &requested);
+    // Hev and Zeptun issue UDP ASSOCIATE from a separate loopback datagram
+    // socket. For a loopback-only listener, the control socket's loopback peer
+    // is the authoritative client identity; the address in the request is not
+    // necessarily the datagram socket's local address.
+    let allow_loopback_source = std::env::var("AETHER_LOCAL_UDP_ASSOCIATE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+        && control_peer.ip().is_loopback();
 
     let relay = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
     let relay_addr = relay.local_addr()?;
@@ -1399,7 +1407,7 @@ async fn handle_udp_associate(
         tokio::select! {
             r = relay.recv_from(&mut cbuf) => {
                 let (n, from) = match r { Ok(v) => v, Err(_) => break };
-                if !udp_source_allowed(expected_ip, client, from) {
+                if !allow_loopback_source && !udp_source_allowed(expected_ip, client, from) {
                     refused += 1;
                     if refused == 1 || refused.is_multiple_of(64) {
                         log::warn!(
