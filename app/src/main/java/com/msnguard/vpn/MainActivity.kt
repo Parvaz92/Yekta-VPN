@@ -980,7 +980,18 @@ class MainActivity : Activity() {
                     // looks identical to a dead tunnel from out here. Only a
                     // probe that went through the tunnel may be allowed to tear
                     // one down.
+                    // In reverse WireGuard with Hev/Zeptun, Aether has already
+                    // validated the WARP data-plane, but this app process is
+                    // excluded from the Android TUN. Its Java probe therefore
+                    // cannot prove the selected engine's device path and may
+                    // report a carrier-side close. Do not let that false negative
+                    // tear down the validated session.
+                    val reverseWireguardEngineProbe =
+                        selectedProtocol == Protocol.WIREGUARD &&
+                            CoreConfig.warpExitChainMode(this@MainActivity, CoreConfig.WarpTransport.WIREGUARD) == CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY &&
+                            TunEnginePref.get(this@MainActivity) != TunEnginePref.LEGACY
                     val probeRodeTunnel = TunnelStatus.isActive() &&
+                        !reverseWireguardEngineProbe &&
                         (Tun2SocksManager.isRunning || TunnelStatus.isProxyMode || !TunnelStatus.isNativeTunMode)
                     if (reachable != null) {
                         pingFailureStreak = 0
@@ -1211,6 +1222,24 @@ class MainActivity : Activity() {
             !SmartSplit.enabled(this)
         if (plainShard) {
             ConnectionLog.record("Verification skipped — plain SHARD diagnostic bypass")
+            showVerifying()
+            showConnected()
+            verifyInFlight = false
+            return
+        }
+
+        // Aether has already completed an end-to-end WireGuard data-plane
+        // validation before exposing its SOCKS listener. With Hev/Zeptun, this
+        // app process is excluded from the Android TUN, so a Java HTTP probe
+        // cannot validate that engine path and can falsely close the session.
+        // Keep the exemption limited to the broken reverse-WireGuard engine
+        // combination; all Direct, V2ray Over Warp, MASQUE and BadVPN checks
+        // retain their existing verification.
+        val reverseWireguardEngine = selectedProtocol == Protocol.WIREGUARD &&
+            CoreConfig.warpExitChainMode(this, CoreConfig.WarpTransport.WIREGUARD) == CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY &&
+            TunEnginePref.get(this) != TunEnginePref.LEGACY
+        if (reverseWireguardEngine) {
+            ConnectionLog.record("Verification delegated to Aether — reverse WireGuard via ${TunEnginePref.get(this)}")
             showVerifying()
             showConnected()
             verifyInFlight = false
