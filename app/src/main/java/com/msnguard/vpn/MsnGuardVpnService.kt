@@ -5215,7 +5215,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 val baseEnv = CoreConfig.envFromEffectiveConfig(
                     this@MsnGuardVpnService,
                     effectiveConfig,
-                    localUdpAssociate = reverseExitUp && currentProtocol.contains("WIREGUARD") &&
+                    localUdpAssociate = _exitCustom && _warpOverV2ray && currentProtocol.contains("WIREGUARD") &&
                         TunEnginePref.get(this@MsnGuardVpnService) != TunEnginePref.LEGACY,
                 )
                 val patchedEnv = baseEnv
