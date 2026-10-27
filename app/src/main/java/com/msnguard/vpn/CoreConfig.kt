@@ -303,6 +303,7 @@ object CoreConfig {
         protocol: String? = null,
         listenOverride: Int? = null,
         socksProxyForCore: String = "",
+        localUdpAssociate: Boolean = false,
     ): Map<String, String> {
         val prefs = context.profiled()
         fun text(key: String, fallback: String = "") =
@@ -626,6 +627,7 @@ object CoreConfig {
             }
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
+            if (localUdpAssociate) out["AETHER_LOCAL_UDP_ASSOCIATE"] = "1"
             // Exit Node via Lithuania: no ECH — the log proves 3.0.20 worked
             // with ECH OFF from the very first Freedom=custom attempt.
             // Do not set AETHER_ECH here even if the pre-patched env would have.
@@ -702,6 +704,7 @@ object CoreConfig {
         context: Context,
         overridesJson: String,
         listenOverride: Int? = null,
+        localUdpAssociate: Boolean = false,
     ): Map<String, String> {
         val json = runCatching { org.json.JSONObject(overridesJson) }.getOrElse { org.json.JSONObject() }
         val proto = json.optString("protocol").ifBlank { null }
@@ -716,7 +719,13 @@ object CoreConfig {
             w.contains("://") -> w // http:// / https:// passthrough
             else -> "socks5://$w"
         }
-        val base = env(context, protocol = proto, listenOverride = listenOverride, socksProxyForCore = upstream ?: "")
+        val base = env(
+            context,
+            protocol = proto,
+            listenOverride = listenOverride,
+            socksProxyForCore = upstream ?: "",
+            localUdpAssociate = localUdpAssociate,
+        )
         if (peer != null) {
             val ov = LinkedHashMap(base)
             // Mirrors the old JSON -> engine mapping: a manual pin reached both
@@ -752,7 +761,7 @@ object CoreConfig {
         // Env vars that can appear in one exit mode and not the other.
         // Anything in the map wins; anything absent is actively cleared.
         val clearIfAbsent = listOf(
-            "AETHER_UPSTREAM",
+            "AETHER_UPSTREAM", "AETHER_LOCAL_UDP_ASSOCIATE",
             "AETHER_ECH", "AETHER_API_ECH", "AETHER_ECH_DNS", "AETHER_ECH_DOMAIN",
             // Ptech toggle: when user flips back to Default, the previous
             // Ptech CIDRs/ports must not linger in the process env.

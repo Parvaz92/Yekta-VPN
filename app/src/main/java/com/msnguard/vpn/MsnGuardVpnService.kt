@@ -5215,6 +5215,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 val baseEnv = CoreConfig.envFromEffectiveConfig(
                     this@MsnGuardVpnService,
                     effectiveConfig,
+                    localUdpAssociate = _exitCustom && _warpOverV2ray && currentProtocol.contains("WIREGUARD") &&
+                        TunEnginePref.get(this@MsnGuardVpnService) != TunEnginePref.LEGACY,
                 )
                 val patchedEnv = baseEnv
                 // Warp Setting log — prove which endpoint scanner family actually hit the wire.
