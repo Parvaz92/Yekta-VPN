@@ -1040,7 +1040,10 @@ class MainActivity : Activity() {
                         ConnectionLog.record(
                             "Health probe failed but it left over the carrier link, not the tunnel — not counting against the session"
                         )
-                        showDegraded()
+                        // This probe never measured the tunnel, so it must not
+                        // paint a healthy data path as degraded. Keep the current
+                        // state unchanged; a real tunnel probe still owns the
+                        // DEGRADED transition in the branch below.
                     } else {
                         // A session that stops passing traffic is a dead tunnel,
                         // not a cosmetic "degraded" badge. Show degraded for the
