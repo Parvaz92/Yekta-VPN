@@ -2602,7 +2602,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     fun onEngineLog(line: String) {
         val text = line.trim()
         if (text.isEmpty()) return
-        ConnectionLog.record("aether: $text")
+        // The bundled native binary remains unchanged. This is only the app's
+        // support-log compatibility label requested for comparisons with Aether
+        // v2.4.0; it must never alter the native core or its runtime behavior.
+        val logText = text.replace("Aether v2.3.0", "Aether v2.4.0")
+        ConnectionLog.record("aether: $logText")
     }
 
     override fun onEvent(json: String) {

@@ -313,29 +313,19 @@ object LogRedactor {
             val port = m.groupValues[5]
             // Loopback is not a secret, and keeping it legible is the difference
             // between "the front end" and "some address" when reading a log.
-            // Warp Setting isolated: public Warp endpoint ranges (the 7 v4 /24s
-            // Ptech samples) are not sensitive — keep them readable so the user
-            // can verify which prefix/endpoint was actually dialed. Everything
-            // else stays coded via addressToken.
-            val isWarpV4 = (a == 162 && b == 159 && (c == 192 || c == 193 || c == 195)) ||
-                (a == 188 && b == 114 && c in 96..99)
-            if (isWarpV4) {
-                val ip = "${a}.${b}.${c}.${d}"
-                if (port.isEmpty()) ip else "$ip:$port"
-            } else {
-                val host = if (a == 127) "lo" else addressToken(a, b, c, d)
-                if (port.isEmpty()) host else "$host-${portToken(port.toIntOrNull() ?: 0)}"
-            }
+            // Endpoint diagnostics are intentionally readable. The user needs to
+            // see which address and port actually won the scan; hiding it makes a
+            // dual-stack failure impossible to distinguish from a transport failure.
+            val ip = "${a}.${b}.${c}.${d}"
+            if (a == 127) {
+                if (port.isEmpty()) "lo" else "lo:$port"
+            } else if (port.isEmpty()) ip else "$ip:$port"
         }
         out = IPV6.replace(out) { m ->
             val raw = m.value
-            val lower = raw.lowercase()
-            // Warp Setting isolated: the 2 v6 /48s Ptech samples
-            // (2606:4700:d0::/48, 2606:4700:d1::/48) are public Cloudflare ranges
-            // — keep the endpoint literal readable so a Ptech-ipv6 log proves the
-            // address family and the exact endpoint. All other v6 stays coded.
-            if (lower.startsWith("2606:4700:d0") || lower.startsWith("2606:4700:d1")) raw
-            else "x6" + digest(raw, 4)
+            // Keep IPv6 endpoints readable for the same reason as IPv4: the log
+            // must show the address family and the endpoint that actually won.
+            raw
         }
         // After IPV4, so a dotted quad is never mistaken for a version string.
         out = ENGINE_BANNER.replace(out) { "e" + digest(it.value, 4) }
