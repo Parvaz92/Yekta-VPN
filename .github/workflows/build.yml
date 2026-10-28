@@ -91,7 +91,11 @@ jobs:
           test -f app/src/main/jniLibs/arm64-v8a/libdnstt.so
           test -f app/src/main/jniLibs/armeabi-v7a/libdnstt.so
           test -f app/src/main/jniLibs/x86_64/libdnstt.so
-          rm -rf "$(go env GOPATH)/pkg/mod"
+          # GitHub-hosted runners are disposable; cleanup must not turn a
+          # successful native build into a failed job because module-cache files
+          # may be read-only.
+          chmod -R u+w "$(go env GOPATH)/pkg/mod" 2>/dev/null || true
+          rm -rf "$(go env GOPATH)/pkg/mod" 2>/dev/null || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
