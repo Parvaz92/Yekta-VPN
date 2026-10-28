@@ -41,6 +41,15 @@ class RelayContract(unittest.TestCase):
 
     def test_worker_ladder_auth_and_no_fallback(self):
         self.assertIn('listOf(RELAY_A, RELAY_B)', RELAY)
+        self.assertIn('api.devices.cloudflare.com', RELAY)
+        self.assertIn('api.cloudflareclient.com', RELAY)
+        self.assertIn('104.24.4.6', RELAY)
+        self.assertIn('104.18.0.6', RELAY)
+        self.assertIn('Retry-After', RELAY)
+        self.assertIn('installId(context)', RELAY)
+        self.assertIn('enrollDirect(context', RELAY)
+        self.assertIn('ApiRoute(API_PRIMARY, API_PRIMARY)', RELAY)
+        self.assertIn('API_EDGES.map', RELAY)
         self.assertIn('X-MSN-Timestamp', RELAY)
         self.assertIn('X-MSN-Nonce', RELAY)
         self.assertIn('X-MSN-Signature', RELAY)
