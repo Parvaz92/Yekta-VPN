@@ -25,6 +25,8 @@ assert 'first.await(FIRST_RESULT_TIMEOUT_MS' in SCANNER
 assert 'executor.shutdown()' in SCANNER
 assert 'val reader = process.inputStream.bufferedReader()' in SCANNER
 assert 'fields[2] == "socks5"' in SCANNER
+assert 'catch (_: java.io.IOException)' in SCANNER
+assert 'scanner log reader reach the process default exception handler' in SCANNER
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629
 assert 'tools/build-dnstt.sh' in WORKFLOW
 assert "go-version: '1.25'" in WORKFLOW

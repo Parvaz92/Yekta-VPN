@@ -52,15 +52,21 @@ internal object DnsttResolverScanner {
                     val index = next.getAndIncrement()
                     if (index >= resolvers.size) break
                     val ip = resolvers[index]
-                    if (probe(context, dataDir, ip)) {
-                        appendCache(cache, ip)
-                        synchronized(firstResult) {
-                            if (firstResult[0] == null) {
-                                firstResult[0] = ip
-                                first.countDown()
-                                ConnectionLog.record("DNSTT resolver #${index + 1}/${resolvers.size} healthy: $ip")
+                    runCatching {
+                        if (probe(context, dataDir, ip)) {
+                            appendCache(cache, ip)
+                            synchronized(firstResult) {
+                                if (firstResult[0] == null) {
+                                    firstResult[0] = ip
+                                    first.countDown()
+                                    ConnectionLog.record("DNSTT resolver #${index + 1}/${resolvers.size} healthy: $ip")
+                                }
                             }
                         }
+                    }.onFailure { error ->
+                        if (running.get()) ConnectionLog.record(
+                            "DNSTT resolver #${index + 1} probe error: ${error.message ?: "unknown"}"
+                        )
                     }
                 }
             }
@@ -82,8 +88,15 @@ internal object DnsttResolverScanner {
 
     fun stopScan() {
         running.set(false)
-        scanProcesses.toList().forEach { runCatching { it.destroy() } }
-        scanProcesses.clear()
+        val processes = synchronized(scanProcesses) {
+            val snapshot = scanProcesses.toList()
+            scanProcesses.clear()
+            snapshot
+        }
+        processes.forEach { process ->
+            runCatching { process.destroy() }
+            runCatching { process.destroyForcibly() }
+        }
         scanExecutor?.shutdownNow()
         scanExecutor = null
     }
@@ -107,13 +120,26 @@ internal object DnsttResolverScanner {
                 }.start()
         }.getOrNull() ?: return false
         synchronized(scanProcesses) { scanProcesses += process }
-        Thread {
-            process.errorStream.bufferedReader().useLines { lines ->
-                lines.forEach { line ->
-                    if (line.isNotBlank()) ConnectionLog.record("DNSTT scan[$ip]: $line")
+        Thread({
+            try {
+                val reader = process.errorStream.bufferedReader()
+                while (true) {
+                    val line = try {
+                        reader.readLine()
+                    } catch (_: java.io.IOException) {
+                        break
+                    }
+                    if (line == null) break
+                    if (line.isNotBlank()) {
+                        runCatching { ConnectionLog.record("DNSTT scan[$ip]: $line") }
+                    }
                 }
+                runCatching { reader.close() }
+            } catch (_: Throwable) {
+                // Closing a PT stream during teardown is normal. Never let the
+                // scanner log reader reach the process default exception handler.
             }
-        }.apply { isDaemon = true; name = "dnstt-scan-log-$ip" }.start()
+        }, "dnstt-scan-log-$ip").apply { isDaemon = true }.start()
         return try {
             val listener = readMethod(process) ?: return false
             socksProbe(listener, ip)
@@ -124,20 +150,24 @@ internal object DnsttResolverScanner {
         }
     }
 
-    private fun readMethod(process: Process): String? {
+    private fun readMethod(process: Process): String? = runCatching {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
         val reader = process.inputStream.bufferedReader()
         while (System.nanoTime() < deadline && process.isAlive) {
             if (process.inputStream.available() > 0) {
-                val line = reader.readLine()?.trim() ?: return null
+                val line = try {
+                    reader.readLine()
+                } catch (_: java.io.IOException) {
+                    return@runCatching null
+                } ?: return@runCatching null
                 if (line.startsWith("CMETHOD ")) {
                     val fields = line.split(Regex("\\s+"))
-                    if (fields.size >= 4 && fields[2] == "socks5") return fields[3]
+                    if (fields.size >= 4 && fields[2] == "socks5") return@runCatching fields[3]
                 }
             } else Thread.sleep(20)
         }
-        return null
-    }
+        null
+    }.getOrNull()
 
     private fun socksProbe(listener: String, resolver: String): Boolean {
         val parts = listener.substringAfterLast(':').toIntOrNull() ?: return false
