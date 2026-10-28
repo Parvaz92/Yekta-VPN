@@ -4577,7 +4577,9 @@ class MainActivity : Activity() {
                 // Manual's description carries its own state, because picking it
                 // with an empty box is the one choice in this sheet that cannot
                 // work — and the sheet is where the user decides.
-                if (mode == TorManager.TorMode.MANUAL && !TorManualBridges.isConfigured(this)) {
+                if (mode == TorManager.TorMode.DNSTT) {
+                    Strings.t("DNS tunnel; slow, for essential apps")
+                } else if (mode == TorManager.TorMode.MANUAL && !TorManualBridges.isConfigured(this)) {
                     Strings.t("Enter a bridge first, in the row below this one")
                 } else if (mode == TorManager.TorMode.MANUAL) {
                     TorManualBridges.summary(this)
