@@ -165,6 +165,7 @@ object TorManager {
         OBFS4("obfs4", "obfs4", "Bridge that hides Tor's traffic shape"),
         MEEK("meek", "Meek", "Rides a CDN; slow but hard to block"),
         SNOWFLAKE("snowflake", "Snowflake", "Volunteer WebRTC proxies"),
+        DNSTT("dnstt", "DNS Tunnel", "DNS tunnel; slow, for essential apps"),
         MANUAL("manual", "Manual bridge", "Bridge lines you entered yourself");
 
         /** Localized at call time, not class-load, so a language switch refreshes it. */
@@ -195,6 +196,7 @@ object TorManager {
         Rung(TorMode.MEEK, BRIDGE_TIMEOUT_S),
         Rung(TorMode.OBFS4, BRIDGE_TIMEOUT_S),
         Rung(TorMode.SNOWFLAKE, BRIDGE_TIMEOUT_S),
+        Rung(TorMode.DNSTT, BRIDGE_TIMEOUT_S),
     )
 
     /**
@@ -245,6 +247,7 @@ object TorManager {
      */
     fun isChainable(context: Context, mode: TorMode): Boolean = when (mode) {
         TorMode.AUTO -> true
+        TorMode.DNSTT -> false
         TorMode.MANUAL -> manualIsChainable(context)
         else -> chainedLadder.any { it.mode == mode }
     }
@@ -388,6 +391,7 @@ object TorManager {
         TorMode.OBFS4 -> listOf("obfs4")
         TorMode.MEEK -> listOf("meek_lite")
         TorMode.SNOWFLAKE -> listOf("snowflake")
+        TorMode.DNSTT -> listOf("dnstt")
         TorMode.MANUAL -> TorManualBridges.transports(context)
     }
 
@@ -395,6 +399,7 @@ object TorManager {
         TorMode.OBFS4 -> TorBridges.OBFS4
         TorMode.MEEK -> TorBridges.MEEK
         TorMode.SNOWFLAKE -> TorBridges.SNOWFLAKE
+        TorMode.DNSTT -> DnsttBridges.lines()
         TorMode.MANUAL -> TorManualBridges.bridges(context).map { it.line }
         else -> emptyList()
     }
@@ -564,7 +569,7 @@ object TorManager {
             // enough for a three-hop handshake over it.
             appendLine(
                 "CircuitBuildTimeout " + when {
-                    mode == TorMode.MEEK || mode == TorMode.SNOWFLAKE -> 120
+                    mode == TorMode.MEEK || mode == TorMode.SNOWFLAKE || mode == TorMode.DNSTT -> 120
                     // Manual is judged by what was actually pasted: a webtunnel or
                     // meek_lite line pays an HTTP round trip per cell exactly like
                     // our own Meek rung does, so it needs the same allowance.
@@ -673,7 +678,8 @@ object TorManager {
     private fun startPt(context: Context, dataDir: File, transports: List<String>): Boolean {
         ptMethods.clear()
 
-        val binary = nativeFile(context, "libobfs4proxy.so")
+        val binaryName = if (transports == listOf("dnstt")) "libdnstt.so" else "libobfs4proxy.so"
+        val binary = nativeFile(context, binaryName)
         if (!binary.exists()) {
             ConnectionLog.record("$TAG PT binary missing at ${binary.absolutePath}")
             return false
@@ -692,6 +698,9 @@ object TorManager {
             put("TOR_PT_STATE_LOCATION", stateDir.absolutePath + "/")
             put("TOR_PT_EXIT_ON_STDIN_CLOSE", "1")
             put("HOME", dataDir.absolutePath)
+            // DNSTT receives doh/pubkey/domain through Tor's managed-PT
+            // SOCKS username arguments from each Bridge line. It does not use
+            // TOR_PT_SERVER_TRANSPORT_OPTIONS (that variable is server-side).
             upstreamProxy?.let { proxy -> put("TOR_PT_PROXY", "socks5://$proxy") }
         }
 
