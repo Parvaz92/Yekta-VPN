@@ -16,8 +16,9 @@ internal object DnsttResolverScanner {
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
     // The input order is part of the selection policy; never parallelize it.
     private const val WORKERS = 1
-    private const val PROBE_TIMEOUT_MS = 5_000
-    private const val FIRST_RESULT_TIMEOUT_MS = 90_000L
+    private const val PROBE_TIMEOUT_MS = 8_000
+    private const val METHOD_TIMEOUT_MS = 12_000L
+    private const val FIRST_RESULT_TIMEOUT_MS = 120_000L
     private val running = AtomicBoolean(false)
     @Volatile private var scanExecutor: java.util.concurrent.ExecutorService? = null
     @Volatile private var scanProcesses = mutableListOf<Process>()
@@ -118,6 +119,8 @@ internal object DnsttResolverScanner {
                     environment()["TOR_PT_EXIT_ON_STDIN_CLOSE"] = "1"
                     environment()["HOME"] = dataDir.absolutePath
                 }.start()
+        }.onFailure { error ->
+            ConnectionLog.record("DNSTT resolver #$ip process start failed: ${error.message ?: "unknown"}")
         }.getOrNull() ?: return false
         synchronized(scanProcesses) { scanProcesses += process }
         Thread({
@@ -141,8 +144,14 @@ internal object DnsttResolverScanner {
             }
         }, "dnstt-scan-log-$ip").apply { isDaemon = true }.start()
         return try {
-            val listener = readMethod(process) ?: return false
-            socksProbe(listener, ip)
+            val listener = readMethod(process)
+            if (listener == null) {
+                ConnectionLog.record("DNSTT resolver #$ip: no SOCKS listener")
+                return false
+            }
+            val healthy = socksProbe(listener, ip)
+            if (!healthy) ConnectionLog.record("DNSTT resolver #$ip: tunnel probe failed")
+            healthy
         } finally {
             runCatching { process.outputStream.close() }
             runCatching { process.destroy() }
@@ -150,24 +159,30 @@ internal object DnsttResolverScanner {
         }
     }
 
-    private fun readMethod(process: Process): String? = runCatching {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
-        val reader = process.inputStream.bufferedReader()
-        while (System.nanoTime() < deadline && process.isAlive) {
-            if (process.inputStream.available() > 0) {
-                val line = try {
-                    reader.readLine()
-                } catch (_: java.io.IOException) {
-                    return@runCatching null
-                } ?: return@runCatching null
-                if (line.startsWith("CMETHOD ")) {
-                    val fields = line.split(Regex("\\s+"))
-                    if (fields.size >= 4 && fields[2] == "socks5") return@runCatching fields[3]
+    private fun readMethod(process: Process): String? {
+        val result = arrayOfNulls<String>(1)
+        val done = CountDownLatch(1)
+        Thread({
+            try {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    for (raw in lines) {
+                        val fields = raw.trim().split(Regex("\\s+"))
+                        if (fields.size >= 4 && fields[0] == "CMETHOD" && fields[2] == "socks5") {
+                            result[0] = fields[3]
+                            break
+                        }
+                        if (raw.trim() == "CMETHODS DONE") break
+                    }
                 }
-            } else Thread.sleep(20)
-        }
-        null
-    }.getOrNull()
+            } catch (_: Throwable) {
+                // The process is deliberately terminated after a failed probe.
+            } finally {
+                done.countDown()
+            }
+        }, "dnstt-method-reader").apply { isDaemon = true }.start()
+        done.await(METHOD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        return result[0]
+    }
 
     private fun socksProbe(listener: String, resolver: String): Boolean {
         val parts = listener.substringAfterLast(':').toIntOrNull() ?: return false
@@ -180,9 +195,14 @@ internal object DnsttResolverScanner {
                 output.write(byteArrayOf(5, 1, 2)); output.flush()
                 check(input.read() == 5 && input.read() == 2)
                 val args = "udp=$resolver:53;pubkey=241169008830694749fe96bb070c4855c5bb5b9c47b3833ed7d88521ba30a43f;domain=t.ruhnama.net"
-                val bytes = args.toByteArray(Charsets.ISO_8859_1)
-                output.write(byteArrayOf(1, bytes.size.toByte())); output.write(bytes)
-                output.write(byteArrayOf(1, 0)); output.flush()
+                // goptlib's PT argument channel is RFC1929 username+password.
+                // Use username for the first part and password for the remainder,
+                // because Android's SOCKS probe must keep each field <=255 bytes.
+                val split = args.indexOf(';').coerceAtLeast(1)
+                val username = args.substring(0, split).toByteArray(Charsets.ISO_8859_1)
+                val password = args.substring(split).toByteArray(Charsets.ISO_8859_1)
+                output.write(byteArrayOf(1, username.size.toByte())); output.write(username)
+                output.write(byteArrayOf(password.size.toByte())); output.write(password); output.flush()
                 check(input.read() == 1 && input.read() == 0)
                 val destination = "1.1.1.1".toByteArray(Charsets.US_ASCII)
                 output.write(byteArrayOf(5, 1, 0, 3, destination.size.toByte())); output.write(destination)
