@@ -156,7 +156,7 @@ internal object DnsttResolverScanner {
                 check(input.read() == 1 && input.read() == 0)
                 val destination = "1.1.1.1".toByteArray(Charsets.US_ASCII)
                 output.write(byteArrayOf(5, 1, 0, 3, destination.size.toByte())); output.write(destination)
-                output.write(byteArrayOf(1, 187)); output.flush()
+                output.write(byteArrayOf(1, 187.toByte())); output.flush()
                 input.read() == 5 && input.read() == 0 && input.read() == 0 && input.read() == 3
             }
         }.getOrDefault(false)
