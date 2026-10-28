@@ -15,10 +15,16 @@ assert 'DnsttResolverScanner.prepare(context, dataDir)' in BRIDGES
 assert 'udp=$resolver:53' in BRIDGES
 SCANNER = (ROOT / "app/src/main/java/com/msnguard/vpn/DnsttResolverScanner.kt").read_text()
 RESOLVERS = ROOT / "app/src/main/assets/dnstt-resolvers-ir.txt"
-assert 'private const val WORKERS = 1' in SCANNER
 assert 'dnstt-working-resolvers-ir.txt' in SCANNER
 assert 'DNSTT_FRESH_SCAN_PREF' in SCANNER
 assert 'scanning 7629 resolvers in order' in SCANNER
+assert 'private const val WORKERS = 1' in SCANNER
+assert 'readIps(cache).firstOrNull()' in SCANNER
+assert 'cache.delete()' in SCANNER
+assert 'first.await(FIRST_RESULT_TIMEOUT_MS' in SCANNER
+assert 'executor.shutdown()' in SCANNER
+assert 'val reader = process.inputStream.bufferedReader()' in SCANNER
+assert 'fields[2] == "socks5"' in SCANNER
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629
 assert 'tools/build-dnstt.sh' in WORKFLOW
 assert "go-version: '1.25'" in WORKFLOW

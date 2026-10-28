@@ -107,6 +107,13 @@ internal object DnsttResolverScanner {
                 }.start()
         }.getOrNull() ?: return false
         synchronized(scanProcesses) { scanProcesses += process }
+        Thread {
+            process.errorStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    if (line.isNotBlank()) ConnectionLog.record("DNSTT scan[$ip]: $line")
+                }
+            }
+        }.apply { isDaemon = true; name = "dnstt-scan-log-$ip" }.start()
         return try {
             val listener = readMethod(process) ?: return false
             socksProbe(listener, ip)
@@ -119,10 +126,14 @@ internal object DnsttResolverScanner {
 
     private fun readMethod(process: Process): String? {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+        val reader = process.inputStream.bufferedReader()
         while (System.nanoTime() < deadline && process.isAlive) {
             if (process.inputStream.available() > 0) {
-                val line = process.inputStream.bufferedReader().readLine()?.trim() ?: return null
-                if (line.startsWith("CMETHOD ")) return line.split(Regex("\\s+"))[3]
+                val line = reader.readLine()?.trim() ?: return null
+                if (line.startsWith("CMETHOD ")) {
+                    val fields = line.split(Regex("\\s+"))
+                    if (fields.size >= 4 && fields[2] == "socks5") return fields[3]
+                }
             } else Thread.sleep(20)
         }
         return null
