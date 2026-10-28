@@ -141,7 +141,7 @@ data class ShardNode(
      *
      * ```
      *   CA 🇨🇦 | @Raydikalx | 5897B0 | 443 | 5e719c   → leading ISO code
-     *   🇺🇸 | @WhiteDNS | US983|2.6MB/s|…            → flag emoji only
+     *   🇺🇸 | @source | US983|2.6MB/s|…            → flag emoji only
      * ```
      *
      * A flag emoji is two regional-indicator code points, each exactly 0x1F1E6
