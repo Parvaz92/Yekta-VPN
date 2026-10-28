@@ -27,6 +27,9 @@ internal object DnsttBridges {
                 "dnstt 192.0.2.4:$base $FP_1 udp=$resolver:53 pubkey=$PUBKEY_1 domain=t.ruhnama.net",
                 "dnstt 192.0.2.4:${base + 1} $FP_2 udp=$resolver:53 pubkey=$PUBKEY_2 domain=t2.bypasscensorship.org",
             )
-        }.take(30)
+        }.take(30) + listOf(
+            "dnstt 192.0.2.4:61 $FP_1 doh=https://dns.google/dns-query pubkey=$PUBKEY_1 domain=t.ruhnama.net",
+            "dnstt 192.0.2.4:62 $FP_2 doh=https://dns.google/dns-query pubkey=$PUBKEY_2 domain=t2.bypasscensorship.org",
+        )
     }
 }

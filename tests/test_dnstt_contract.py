@@ -27,12 +27,15 @@ assert 'process.inputStream.bufferedReader().useLines' in SCANNER
 assert 'process.errorStream.bufferedReader()' in SCANNER
 assert 'fields[2] == "socks5"' in SCANNER
 assert 'done.await(METHOD_TIMEOUT_MS, TimeUnit.MILLISECONDS)' in SCANNER
-assert 'FIRST_RESULT_TIMEOUT_MS = 120_000L' in SCANNER
+assert 'FIRST_RESULT_TIMEOUT_MS = 15_000L' in SCANNER
+assert 'PROBE_TIMEOUT_MS = 30_000' in SCANNER
+assert 'starting Tor with DoH fallback' in SCANNER
+assert 'doh=https://dns.google/dns-query' in BRIDGES
 assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 428' in BUILD and 'versionName = "3.1.31"' in BUILD
+assert 'versionCode = 429' in BUILD and 'versionName = "3.1.32"' in BUILD
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629
 assert 'tools/build-dnstt.sh' in WORKFLOW
 assert "go-version: '1.25'" in WORKFLOW

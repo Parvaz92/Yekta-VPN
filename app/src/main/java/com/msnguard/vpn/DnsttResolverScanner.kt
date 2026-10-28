@@ -16,9 +16,11 @@ internal object DnsttResolverScanner {
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
     // The input order is part of the selection policy; never parallelize it.
     private const val WORKERS = 1
-    private const val PROBE_TIMEOUT_MS = 8_000
+    private const val PROBE_TIMEOUT_MS = 30_000
     private const val METHOD_TIMEOUT_MS = 12_000L
-    private const val FIRST_RESULT_TIMEOUT_MS = 120_000L
+    // Let the first resolver finish a real tunnel handshake, then let the
+    // background scan continue while Tor uses the built-in DoH fallback.
+    private const val FIRST_RESULT_TIMEOUT_MS = 15_000L
     private val running = AtomicBoolean(false)
     @Volatile private var scanExecutor: java.util.concurrent.ExecutorService? = null
     @Volatile private var scanProcesses = mutableListOf<Process>()
@@ -81,7 +83,9 @@ internal object DnsttResolverScanner {
         }, "dnstt-resolver-scan-wait").apply { isDaemon = true }.start()
         first.await(FIRST_RESULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         val selected = firstResult[0] ?: readIps(cache).firstOrNull()
-        if (selected == null) ConnectionLog.record("DNSTT resolver scan found no healthy resolver yet")
+        if (selected == null) {
+            ConnectionLog.record("DNSTT resolver scan still running; starting Tor with DoH fallback")
+        }
         return selected
     }
 
