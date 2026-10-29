@@ -53,6 +53,10 @@ object TorManager {
 
     /** Preference key holding the user's choice of [TorMode]. */
     const val MODE_PREF = "tor_mode"
+    const val DNSTT_FRESH_SCAN_PREF = "tor_dnstt_fresh_scan"
+
+    fun requestDnsttFreshScan(context: Context) = DnsttResolverScanner.requestFreshScan(context)
+    fun stopDnsttScan() = DnsttResolverScanner.stopScan()
 
     /**
      * Whether Tor should ride inside a WARP tunnel (Tor-over-WARP).
@@ -399,7 +403,7 @@ object TorManager {
         TorMode.OBFS4 -> TorBridges.OBFS4
         TorMode.MEEK -> TorBridges.MEEK
         TorMode.SNOWFLAKE -> TorBridges.SNOWFLAKE
-        TorMode.DNSTT -> DnsttBridges.lines()
+        TorMode.DNSTT -> DnsttBridges.lines(context, File(context.filesDir, "tor_data"))
         TorMode.MANUAL -> TorManualBridges.bridges(context).map { it.line }
         else -> emptyList()
     }
@@ -1151,6 +1155,9 @@ object TorManager {
     fun stop() {
         stopping.set(true)
         TorSocksFront.stop()
+        // Resolver discovery is session-independent. A failed Tor rung must not
+        // cancel the ordered scan; it continues in the background and fills the
+        // persistent cache for the next connection.
         stopTorProcess()
         stopPt()
         bootstrapPercent = 0

@@ -131,7 +131,7 @@ object LogRedactor {
      *
      * ```
      * AL 🇦🇱 | @Raydikalx | B2CCBD | 5e4e03
-     * 🇺🇸 | @WhiteDNS | US983|2.6MB/s|…
+     * 🇺🇸 | @source | US983|2.6MB/s|…
      * ```
      *
      * Two pipes minimum, so ordinary prose containing a single `|` is untouched.
