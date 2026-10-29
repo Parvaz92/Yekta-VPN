@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Ordered DNSTT resolver discovery with persistent, engine-scoped cache. */
 internal object DnsttResolverScanner {
     private const val CACHE_NAME = "dnstt-working-resolvers-ir.txt"
+    private const val PROGRESS_NAME = "dnstt-resolver-scan-index.txt"
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
     // The input order is part of the selection policy; never parallelize it.
     private const val WORKERS = 1
@@ -36,17 +37,22 @@ internal object DnsttResolverScanner {
 
         if (fresh) {
             cache.delete()
+            File(dataDir, PROGRESS_NAME).delete()
             context.profiled().edit().putBoolean(TorManager.DNSTT_FRESH_SCAN_PREF, false).apply()
-            ConnectionLog.record("DNSTT Fresh Scan: cache cleared; scanning 7629 resolvers in order")
+            ConnectionLog.record("DNSTT Fresh Scan: cache and progress cleared; scanning 7629 resolvers in order")
         }
 
         val resolvers = readIpsFromAsset(context)
         if (resolvers.isEmpty()) return null
-        stopScan()
+        if (running.get()) {
+            ConnectionLog.record("DNSTT resolver scan already running; using current scan")
+            return readIps(cache).firstOrNull()
+        }
         running.set(true)
         val first = CountDownLatch(1)
         val firstResult = arrayOfNulls<String>(1)
-        val next = AtomicInteger(0)
+        val progress = File(dataDir, PROGRESS_NAME)
+        val next = AtomicInteger(readProgress(progress).coerceIn(0, resolvers.size))
         val executor = Executors.newFixedThreadPool(WORKERS)
         scanExecutor = executor
         repeat(WORKERS) {
@@ -54,6 +60,7 @@ internal object DnsttResolverScanner {
                 while (running.get()) {
                     val index = next.getAndIncrement()
                     if (index >= resolvers.size) break
+                    writeProgress(progress, index + 1)
                     val ip = resolvers[index]
                     runCatching {
                         if (probe(context, dataDir, ip)) {
@@ -221,6 +228,17 @@ internal object DnsttResolverScanner {
             lines.map(String::trim).filter { it.matches(Regex("^\\d{1,3}(?:\\.\\d{1,3}){3}$")) }.toList()
         }
     }.getOrDefault(emptyList())
+
+    private fun readProgress(file: File): Int = runCatching {
+        file.readText().trim().toInt()
+    }.getOrDefault(0)
+
+    private fun writeProgress(file: File, index: Int) {
+        runCatching {
+            file.parentFile?.mkdirs()
+            file.writeText(index.toString())
+        }
+    }
 
     private fun readIps(file: File): List<String> = runCatching {
         if (!file.isFile) emptyList() else file.readLines().map(String::trim).filter(String::isNotEmpty).distinct()

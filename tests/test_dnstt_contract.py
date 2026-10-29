@@ -20,6 +20,7 @@ assert 'DNSTT_FRESH_SCAN_PREF' in SCANNER
 assert 'scanning 7629 resolvers in order' in SCANNER
 assert 'private const val WORKERS = 1' in SCANNER
 assert 'readIps(cache).firstOrNull()' in SCANNER
+assert '        stopDnsttScan()' not in TOR
 assert 'cache.delete()' in SCANNER
 assert 'first.await(FIRST_RESULT_TIMEOUT_MS' in SCANNER
 assert 'executor.shutdown()' in SCANNER
@@ -35,7 +36,7 @@ assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 429' in BUILD and 'versionName = "3.1.32"' in BUILD
+assert 'versionCode = 430' in BUILD and 'versionName = "3.1.33"' in BUILD
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629
 assert 'tools/build-dnstt.sh' in WORKFLOW
 assert "go-version: '1.25'" in WORKFLOW

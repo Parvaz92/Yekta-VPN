@@ -1155,7 +1155,9 @@ object TorManager {
     fun stop() {
         stopping.set(true)
         TorSocksFront.stop()
-        stopDnsttScan()
+        // Resolver discovery is session-independent. A failed Tor rung must not
+        // cancel the ordered scan; it continues in the background and fills the
+        // persistent cache for the next connection.
         stopTorProcess()
         stopPt()
         bootstrapPercent = 0
