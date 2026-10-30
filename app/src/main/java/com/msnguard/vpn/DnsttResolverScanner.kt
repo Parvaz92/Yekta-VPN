@@ -23,7 +23,6 @@ internal object DnsttResolverScanner {
     private const val PROBE_TIMEOUT_MS = 5_000
     private const val METHOD_TIMEOUT_MS = 4_000L
     private const val FIRST_RESULT_TIMEOUT_MS = 15_000L
-    private const val SCAN_TIMEOUT_MINUTES = 30L
     private val running = AtomicBoolean(false)
     @Volatile private var scanExecutor: java.util.concurrent.ExecutorService? = null
     @Volatile private var scanProcesses = mutableListOf<Process>()
@@ -88,9 +87,13 @@ internal object DnsttResolverScanner {
         }
         Thread({
             executor.shutdown()
-            if (executor.awaitTermination(SCAN_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
-                ConnectionLog.record("DNSTT resolver scan complete: ${readIps(cache).size} healthy resolver(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
+            // The complete asset is the scan budget. Do not cancel it because
+            // Tor has already timed out; the next resolver session resumes from
+            // the persisted index and consumes the remaining entries.
+            runCatching {
+                executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)
             }
+            ConnectionLog.record("DNSTT resolver scan complete: ${readIps(cache).size} healthy resolver(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
             running.set(false)
         }, "dnstt-resolver-scan-wait").apply { isDaemon = true }.start()
         first.await(FIRST_RESULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
