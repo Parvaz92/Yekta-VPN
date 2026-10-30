@@ -18,7 +18,10 @@ RESOLVERS = ROOT / "app/src/main/assets/dnstt-resolvers-ir.txt"
 assert 'dnstt-working-resolvers-ir.txt' in SCANNER
 assert 'DNSTT_FRESH_SCAN_PREF' in SCANNER
 assert 'scanning 7629 resolvers in order' in SCANNER
-assert 'private const val WORKERS = 1' in SCANNER
+assert 'private const val WORKERS = 8' in SCANNER
+assert 'val next = AtomicInteger(start)' in SCANNER
+assert 'repeat(WORKERS)' in SCANNER
+assert 'REJECTED_NAME' in SCANNER
 assert 'readIps(cache).firstOrNull()' in SCANNER
 assert '        stopDnsttScan()' not in TOR
 assert 'cache.delete()' in SCANNER
@@ -29,14 +32,16 @@ assert 'process.errorStream.bufferedReader()' in SCANNER
 assert 'fields[2] == "socks5"' in SCANNER
 assert 'done.await(METHOD_TIMEOUT_MS, TimeUnit.MILLISECONDS)' in SCANNER
 assert 'FIRST_RESULT_TIMEOUT_MS = 15_000L' in SCANNER
-assert 'PROBE_TIMEOUT_MS = 30_000' in SCANNER
+assert 'PROBE_TIMEOUT_MS = 5_000' in SCANNER
 assert 'starting Tor with DoH fallback' in SCANNER
 assert 'doh=https://dns.google/dns-query' in BRIDGES
 assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 430' in BUILD and 'versionName = "3.1.33"' in BUILD
+assert 'versionCode = 431' in BUILD and 'versionName = "3.1.34"' in BUILD
+assert 'executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)' in SCANNER
+assert 'complete asset is the scan budget' in SCANNER
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629
 assert 'tools/build-dnstt.sh' in WORKFLOW
 assert "go-version: '1.25'" in WORKFLOW
