@@ -14,14 +14,16 @@ import java.util.concurrent.atomic.AtomicInteger
 internal object DnsttResolverScanner {
     private const val CACHE_NAME = "dnstt-working-resolvers-ir.txt"
     private const val PROGRESS_NAME = "dnstt-resolver-scan-index.txt"
+    private const val REJECTED_NAME = "dnstt-rejected-resolvers-ir.txt"
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
-    // The input order is part of the selection policy; never parallelize it.
-    private const val WORKERS = 1
-    private const val PROBE_TIMEOUT_MS = 30_000
-    private const val METHOD_TIMEOUT_MS = 12_000L
-    // Let the first resolver finish a real tunnel handshake, then let the
-    // background scan continue while Tor uses the built-in DoH fallback.
+    // The reference scanner uses bounded concurrent workers: input order is
+    // preserved within the round-robin partitions, while slow candidates do not
+    // block the complete scan.
+    private const val WORKERS = 8
+    private const val PROBE_TIMEOUT_MS = 5_000
+    private const val METHOD_TIMEOUT_MS = 4_000L
     private const val FIRST_RESULT_TIMEOUT_MS = 15_000L
+    private const val SCAN_TIMEOUT_MINUTES = 30L
     private val running = AtomicBoolean(false)
     @Volatile private var scanExecutor: java.util.concurrent.ExecutorService? = null
     @Volatile private var scanProcesses = mutableListOf<Process>()
@@ -38,6 +40,7 @@ internal object DnsttResolverScanner {
         if (fresh) {
             cache.delete()
             File(dataDir, PROGRESS_NAME).delete()
+            File(dataDir, REJECTED_NAME).delete()
             context.profiled().edit().putBoolean(TorManager.DNSTT_FRESH_SCAN_PREF, false).apply()
             ConnectionLog.record("DNSTT Fresh Scan: cache and progress cleared; scanning 7629 resolvers in order")
         }
@@ -52,7 +55,8 @@ internal object DnsttResolverScanner {
         val first = CountDownLatch(1)
         val firstResult = arrayOfNulls<String>(1)
         val progress = File(dataDir, PROGRESS_NAME)
-        val next = AtomicInteger(readProgress(progress).coerceIn(0, resolvers.size))
+        val start = readProgress(progress).coerceIn(0, resolvers.size)
+        val next = AtomicInteger(start)
         val executor = Executors.newFixedThreadPool(WORKERS)
         scanExecutor = executor
         repeat(WORKERS) {
@@ -60,8 +64,8 @@ internal object DnsttResolverScanner {
                 while (running.get()) {
                     val index = next.getAndIncrement()
                     if (index >= resolvers.size) break
-                    writeProgress(progress, index + 1)
                     val ip = resolvers[index]
+                    writeProgress(progress, maxOf(readProgress(progress), index + 1))
                     runCatching {
                         if (probe(context, dataDir, ip)) {
                             appendCache(cache, ip)
@@ -72,27 +76,26 @@ internal object DnsttResolverScanner {
                                     ConnectionLog.record("DNSTT resolver #${index + 1}/${resolvers.size} healthy: $ip")
                                 }
                             }
+                        } else {
+                            appendRejected(File(dataDir, REJECTED_NAME), ip)
                         }
                     }.onFailure { error ->
-                        if (running.get()) ConnectionLog.record(
-                            "DNSTT resolver #${index + 1} probe error: ${error.message ?: "unknown"}"
-                        )
+                        appendRejected(File(dataDir, REJECTED_NAME), ip)
+                        if (running.get()) ConnectionLog.record("DNSTT resolver #${index + 1} probe error: ${error.message ?: "unknown"}")
                     }
                 }
             }
         }
         Thread({
             executor.shutdown()
-            if (executor.awaitTermination(30, TimeUnit.MINUTES)) {
-                ConnectionLog.record("DNSTT resolver scan complete: ${readIps(cache).size} healthy resolver(s)")
+            if (executor.awaitTermination(SCAN_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
+                ConnectionLog.record("DNSTT resolver scan complete: ${readIps(cache).size} healthy resolver(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
             }
             running.set(false)
         }, "dnstt-resolver-scan-wait").apply { isDaemon = true }.start()
         first.await(FIRST_RESULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         val selected = firstResult[0] ?: readIps(cache).firstOrNull()
-        if (selected == null) {
-            ConnectionLog.record("DNSTT resolver scan still running; starting Tor with DoH fallback")
-        }
+        if (selected == null) ConnectionLog.record("DNSTT resolver scan still running; starting Tor with DoH fallback")
         return selected
     }
 
@@ -245,6 +248,13 @@ internal object DnsttResolverScanner {
     }.getOrDefault(emptyList())
 
     private fun appendCache(file: File, ip: String) {
+        synchronized(file.absolutePath.intern()) {
+            val current = readIps(file)
+            if (ip !in current) file.parentFile?.mkdirs().also { file.appendText(if (current.isEmpty()) ip else "\n$ip") }
+        }
+    }
+
+    private fun appendRejected(file: File, ip: String) {
         synchronized(file.absolutePath.intern()) {
             val current = readIps(file)
             if (ip !in current) file.parentFile?.mkdirs().also { file.appendText(if (current.isEmpty()) ip else "\n$ip") }
