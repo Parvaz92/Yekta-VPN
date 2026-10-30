@@ -19,11 +19,22 @@ internal object DnsttResolverScanner {
     // The reference scanner uses bounded concurrent workers: input order is
     // preserved within the round-robin partitions, while slow candidates do not
     // block the complete scan.
-    private const val WORKERS = 8
-    private const val PROBE_TIMEOUT_MS = 5_000
-    private const val METHOD_TIMEOUT_MS = 4_000L
+    // Match the reference scanner's high parallelism so a full resolver list
+    // can finish in minutes while each candidate still gets an end-to-end test.
+    private const val WORKERS = 100
+    private const val PROBE_TIMEOUT_MS = 2_500
+    private const val METHOD_TIMEOUT_MS = 2_500L
+    private const val PROGRESS_LOG_EVERY = 100
+    private const val SCAN_ASSET_SIZE = 7629
+    private val progressLock = Any()
     private const val FIRST_RESULT_TIMEOUT_MS = 15_000L
+    // DNSTT's effective MTU is determined by the DNS name and the server's
+    // negotiated payload. The TUN value is separate; this range is enforced on
+    // every DNSTT session so a bad profile cannot pass 134 or another tiny value.
+    const val DNSTT_MIN_TUN_MTU = 512
+    const val DNSTT_MAX_TUN_MTU = 1400
     private val running = AtomicBoolean(false)
+    private val completed = AtomicInteger(0)
     @Volatile private var scanExecutor: java.util.concurrent.ExecutorService? = null
     @Volatile private var scanProcesses = mutableListOf<Process>()
 
@@ -50,11 +61,13 @@ internal object DnsttResolverScanner {
             ConnectionLog.record("DNSTT resolver scan already running; using current scan")
             return readIps(cache).firstOrNull()
         }
-        running.set(true)
-        val first = CountDownLatch(1)
-        val firstResult = arrayOfNulls<String>(1)
         val progress = File(dataDir, PROGRESS_NAME)
         val start = readProgress(progress).coerceIn(0, resolvers.size)
+        running.set(true)
+        completed.set(start)
+        ConnectionLog.record("DNSTT resolver scan started: ${resolvers.size} candidates, from ${start + 1}")
+        val first = CountDownLatch(1)
+        val firstResult = arrayOfNulls<String>(1)
         val next = AtomicInteger(start)
         val executor = Executors.newFixedThreadPool(WORKERS)
         scanExecutor = executor
@@ -64,7 +77,14 @@ internal object DnsttResolverScanner {
                     val index = next.getAndIncrement()
                     if (index >= resolvers.size) break
                     val ip = resolvers[index]
-                    writeProgress(progress, maxOf(readProgress(progress), index + 1))
+                    synchronized(progressLock) {
+                        val advanced = maxOf(readProgress(progress), index + 1)
+                        writeProgress(progress, advanced)
+                        val done = completed.incrementAndGet()
+                        if (done % PROGRESS_LOG_EVERY == 0 || done == resolvers.size) {
+                            ConnectionLog.record("DNSTT resolver scan progress: $done/$SCAN_ASSET_SIZE")
+                        }
+                    }
                     runCatching {
                         if (probe(context, dataDir, ip)) {
                             appendCache(cache, ip)
@@ -224,7 +244,19 @@ internal object DnsttResolverScanner {
                 val destination = "1.1.1.1".toByteArray(Charsets.US_ASCII)
                 output.write(byteArrayOf(5, 1, 0, 3, destination.size.toByte())); output.write(destination)
                 output.write(byteArrayOf(1, 187.toByte())); output.flush()
-                input.read() == 5 && input.read() == 0 && input.read() == 0 && input.read() == 3
+                val version = input.read()
+                val reply = input.read()
+                val reserved = input.read()
+                val atyp = input.read()
+                check(version == 5 && reply == 0 && reserved == 0)
+                when (atyp) {
+                    1 -> repeat(4) { input.read() }
+                    3 -> { val length = input.read(); repeat(length.coerceAtLeast(0)) { input.read() } }
+                    4 -> repeat(16) { input.read() }
+                    else -> error("invalid SOCKS5 address type")
+                }
+                check(input.read() >= 0 && input.read() >= 0)
+                true
             }
         }.getOrDefault(false)
     }

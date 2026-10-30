@@ -2916,9 +2916,20 @@ ConnectionLog.record("MTU: $psiphonChainMtu for ${chainMethod.title} (chain)")
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Tor: creating TUN before Tor starts")
-                val torMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.TOR, Tun2SocksManager.VPN_INTERFACE_MTU)
+                val scannedTorMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.TOR, Tun2SocksManager.VPN_INTERFACE_MTU)
+                val dnsttSelected = TorManager.selectedMode(this) == TorManager.TorMode.DNSTT
+                val torMtu = if (dnsttSelected) {
+                    scannedTorMtu.coerceIn(
+                        DnsttResolverScanner.DNSTT_MIN_TUN_MTU,
+                        DnsttResolverScanner.DNSTT_MAX_TUN_MTU,
+                    )
+                } else scannedTorMtu
                 currentTunMtu = torMtu
-ConnectionLog.record("MTU: $torMtu for Tor")
+                if (dnsttSelected) {
+                    ConnectionLog.record("MTU: DNSTT TUN MTU $torMtu applied (allowed range 512..1400)")
+                } else {
+                    ConnectionLog.record("MTU: $torMtu for Tor")
+                }
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(torMtu)
