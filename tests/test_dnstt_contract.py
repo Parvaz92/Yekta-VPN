@@ -19,13 +19,26 @@ RESOLVERS = ROOT / "app/src/main/assets/dnstt-resolvers-ir.txt"
 assert 'dnstt-working-resolvers-ir.txt' in SCANNER
 assert 'DNSTT_FRESH_SCAN_PREF' in SCANNER
 assert 'scanning 7629 resolvers in order' in SCANNER
-assert 'private const val WORKERS = 100' in SCANNER
+assert 'private const val WORKERS = 40' in SCANNER
+assert 'fun awaitHealthy(context: Context, dataDir: File, cancelled: () -> Boolean)' in SCANNER
+assert TOR.index('DnsttResolverScanner.awaitHealthy(context, dataDir)') < TOR.index('val transports = transportsFor(context, mode)', TOR.index('private fun attempt('))
+assert 'if (resolver == null)' in TOR and 'Tor was not started' in TOR
+assert 'if (resolvers.isEmpty()) return emptyList()' in BRIDGES
+assert 'doh=https://' not in BRIDGES
+assert 'udp=$resolver:53 pubkey=' in BRIDGES
+assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) ||' in SCANNER
+assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2)' in SCANNER
+assert 'val args = "udp=$resolver:53;pubkey=$pubkey;domain=$domain"' in SCANNER
+assert 'val finished = (readIps(cache) + readIps(rejected)).toHashSet()' in SCANNER
+assert 'if (ip in finished) continue' in SCANNER
+assert 'if (stored) synchronized(progressLock)' in SCANNER
+assert 'DNSTT resolver scan progress: $done/${resolvers.size}' in SCANNER
 assert 'const val DNSTT_MIN_TUN_MTU = 512' in SCANNER
 assert 'const val DNSTT_MAX_TUN_MTU = 1400' in SCANNER
 assert 'DNSTT resolver scan started: ${resolvers.size} candidates' in SCANNER
 assert 'scannedTorMtu.coerceIn(' in VPN
 assert 'DNSTT TUN MTU $torMtu applied (allowed range 512..1400)' in VPN
-assert 'DNSTT resolver scan progress: $done/$SCAN_ASSET_SIZE' in SCANNER
+assert 'DNSTT resolver scan progress: $done/${resolvers.size}' in SCANNER
 assert 'val next = AtomicInteger(start)' in SCANNER
 assert 'repeat(WORKERS)' in SCANNER
 assert 'REJECTED_NAME' in SCANNER
@@ -40,13 +53,13 @@ assert 'fields[2] == "socks5"' in SCANNER
 assert 'done.await(METHOD_TIMEOUT_MS, TimeUnit.MILLISECONDS)' in SCANNER
 assert 'FIRST_RESULT_TIMEOUT_MS = 15_000L' in SCANNER
 assert 'PROBE_TIMEOUT_MS = 2_500' in SCANNER
-assert 'starting Tor with DoH fallback' in SCANNER
-assert 'doh=https://dns.google/dns-query' in BRIDGES
+assert 'waiting for first verified path' in SCANNER
+assert 'doh=https://dns.google/dns-query' not in BRIDGES
 assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 432' in BUILD and 'versionName = "3.1.35"' in BUILD
+assert 'versionCode = 433' in BUILD and 'versionName = "3.1.36"' in BUILD
 assert 'executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)' in SCANNER
 assert 'complete asset is the scan budget' in SCANNER
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629

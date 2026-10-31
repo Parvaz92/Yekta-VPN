@@ -818,6 +818,15 @@ object TorManager {
         // bridge descriptor they point at saves a handshake.
         keepTorState(dataDir, mode)
 
+        if (mode == TorMode.DNSTT) {
+            ConnectionLog.record("$TAG waiting for a verified DNSTT resolver before starting Tor")
+            val resolver = DnsttResolverScanner.awaitHealthy(context, dataDir) { stopping.get() }
+            if (resolver == null) {
+                ConnectionLog.record("$TAG DNS Tunnel: no verified resolver available; Tor was not started")
+                return false
+            }
+            ConnectionLog.record("$TAG DNS Tunnel: verified resolver selected")
+        }
         val transports = transportsFor(context, mode)
         if (transports.isNotEmpty() && !startPt(context, dataDir, transports)) {
             return false
