@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Ordered DNSTT resolver discovery with persistent, engine-scoped cache. */
 internal object DnsttResolverScanner {
     private const val CACHE_NAME = "dnstt-working-resolvers-ir.txt"
+    private const val PATHS_NAME = "dnstt-working-paths-ir.txt"
     private const val PROGRESS_NAME = "dnstt-resolver-scan-index.txt"
     private const val REJECTED_NAME = "dnstt-rejected-resolvers-ir.txt"
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
@@ -36,16 +37,17 @@ internal object DnsttResolverScanner {
 
     fun prepare(context: Context, dataDir: File): String? {
         val cache = File(dataDir, CACHE_NAME)
-        val cached = readIps(cache)
+        val cached = cachedPaths(dataDir)
         val fresh = context.profiled().getBoolean(TorManager.DNSTT_FRESH_SCAN_PREF, false)
         if (!fresh && cached.isNotEmpty()) {
-            ConnectionLog.record("DNSTT cache: using ${cached.size} verified resolver(s)")
-            return cached.first()
+            ConnectionLog.record("DNSTT cache: using ${cached.size} verified resolver/profile path(s)")
+            return cached.first().first
         }
 
         if (fresh) {
             DnsttBridges.reset(context)
             cache.delete()
+            File(dataDir, PATHS_NAME).delete()
             File(dataDir, PROGRESS_NAME).delete()
             File(dataDir, REJECTED_NAME).delete()
             context.profiled().edit().putBoolean(TorManager.DNSTT_FRESH_SCAN_PREF, false).apply()
@@ -56,7 +58,7 @@ internal object DnsttResolverScanner {
         if (resolvers.isEmpty()) return null
         if (running.get()) {
             ConnectionLog.record("DNSTT resolver scan already running; using current scan")
-            return readIps(cache).firstOrNull()
+            return cachedPaths(dataDir).firstOrNull()?.first
         }
         val progress = File(dataDir, PROGRESS_NAME)
         val rejected = File(dataDir, REJECTED_NAME)
@@ -67,7 +69,7 @@ internal object DnsttResolverScanner {
             progress.delete()
             ConnectionLog.record("DNSTT retrying all candidates after zero verified paths")
         }
-        val finished = (readIps(cache) + readIps(rejected)).toHashSet()
+        val finished = (cachedPaths(dataDir).map { it.first } + readIps(rejected)).toHashSet()
         val start = 0
         running.set(true)
         completed.set(finished.size)
@@ -86,7 +88,9 @@ internal object DnsttResolverScanner {
                     if (ip in finished) continue
                     var stored = false
                     runCatching {
-                        if (probe(context, dataDir, ip)) {
+                        val domain = probe(context, dataDir, ip)
+                        if (domain != null) {
+                            appendCache(File(dataDir, PATHS_NAME), "$ip $domain")
                             appendCache(cache, ip)
                             stored = true
                             synchronized(firstResult) {
@@ -123,21 +127,27 @@ internal object DnsttResolverScanner {
             runCatching {
                 executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)
             }
-            ConnectionLog.record("DNSTT resolver scan complete: ${readIps(cache).size} healthy resolver(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
+            ConnectionLog.record("DNSTT resolver scan complete: ${cachedPaths(dataDir).size} verified path(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
             running.set(false)
         }, "dnstt-resolver-scan-wait").apply { isDaemon = true }.start()
         first.await(FIRST_RESULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        val selected = firstResult[0] ?: readIps(cache).firstOrNull()
+        val selected = firstResult[0] ?: cachedPaths(dataDir).firstOrNull()?.first
         if (selected == null) ConnectionLog.record("DNSTT resolver scan still running; waiting for first verified path")
         return selected
     }
 
+    fun cachedPaths(dataDir: File): List<Pair<String, String>> =
+        readIps(File(dataDir, PATHS_NAME)).mapNotNull { line ->
+            val ip = line.substringBefore(' ')
+            val domain = line.substringAfter(' ', "")
+            if (domain == DnsttBridges.DOMAIN_1 || domain == DnsttBridges.DOMAIN_2) ip to domain else null
+        }
+
     /** Wait for a real end-to-end probe before allowing Tor to start. */
     fun awaitHealthy(context: Context, dataDir: File, cancelled: () -> Boolean): String? {
         prepare(context, dataDir)
-        val cache = File(dataDir, CACHE_NAME)
         while (!cancelled()) {
-            readIps(cache).firstOrNull()?.let { return it }
+            cachedPaths(dataDir).firstOrNull()?.let { return it.first }
             if (!running.get()) return null
             try {
                 Thread.sleep(250)
@@ -171,9 +181,11 @@ internal object DnsttResolverScanner {
         ConnectionLog.record("DNSTT Fresh Scan requested — cache will be cleared on next Tor connect")
     }
 
-    private fun probe(context: Context, dataDir: File, ip: String): Boolean =
-        probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) ||
-            probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2)
+    private fun probe(context: Context, dataDir: File, ip: String): String? = when {
+        probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) -> DnsttBridges.DOMAIN_1
+        probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2) -> DnsttBridges.DOMAIN_2
+        else -> null
+    }
 
     private fun probePath(context: Context, dataDir: File, ip: String, pubkey: String, domain: String): Boolean {
         val state = File(dataDir, "dnstt-scan/$ip").apply { mkdirs() }

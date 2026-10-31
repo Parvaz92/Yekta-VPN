@@ -11,7 +11,7 @@ assert 'DNSTT("dnstt", "DNS Tunnel"' in TOR
 assert 'TorMode.DNSTT -> listOf("dnstt")' in TOR
 assert 'TorMode.DNSTT -> DnsttBridges.lines(context, File(context.filesDir, "tor_data"))' in TOR
 assert 'binaryName = if (transports == listOf("dnstt")) "libdnstt.so"' in TOR
-assert 'DnsttResolverScanner.prepare(context, dataDir)' in BRIDGES
+assert 'DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
 assert 'udp=$resolver:53' in BRIDGES
 SCANNER = (ROOT / "app/src/main/java/com/msnguard/vpn/DnsttResolverScanner.kt").read_text()
 VPN = (ROOT / "app/src/main/java/com/msnguard/vpn/MsnGuardVpnService.kt").read_text()
@@ -24,18 +24,24 @@ assert 'fun awaitHealthy(context: Context, dataDir: File, cancelled: () -> Boole
 assert TOR.index('DnsttResolverScanner.awaitHealthy(context, dataDir)') < TOR.index('val transports = transportsFor(context, mode)', TOR.index('private fun attempt('))
 assert 'if (resolver == null)' in TOR and 'Tor was not started' in TOR
 assert 'DnsttBridges.advanceAfterFailure(context, dataDir)' in TOR
-assert 'val batch = resolvers.drop(normalizedOffset).take(BATCH_SIZE)' in BRIDGES
-assert 'private const val BATCH_SIZE = 15' in BRIDGES
+assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
+assert 'val batch = paths.drop(normalizedOffset).take(BATCH_SIZE)' in BRIDGES
+assert 'val pubkey = if (domain == DOMAIN_1) PUBKEY_1 else PUBKEY_2' in BRIDGES
+assert 'private const val BATCH_SIZE = 30' in BRIDGES
 assert 'DnsttBridges.reset(context)' in SCANNER
 assert 'currentProtocol.contains("TOR") && TorManager.selectedMode(this) == TorManager.TorMode.DNSTT' in VPN
 assert 'teardownService = !sealing && !pendingDnsttRetry' in VPN
-assert 'if (resolvers.isEmpty()) return emptyList()' in BRIDGES
+assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
+assert 'if (paths.isEmpty()) return emptyList()' in BRIDGES
 assert 'doh=https://' not in BRIDGES
-assert 'udp=$resolver:53 pubkey=' in BRIDGES
-assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) ||' in SCANNER
-assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2)' in SCANNER
+assert 'udp=$resolver:53 pubkey=$pubkey domain=$domain' in BRIDGES
+assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) -> DnsttBridges.DOMAIN_1' in SCANNER
+assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2) -> DnsttBridges.DOMAIN_2' in SCANNER
 assert 'val args = "udp=$resolver:53;pubkey=$pubkey;domain=$domain"' in SCANNER
-assert 'val finished = (readIps(cache) + readIps(rejected)).toHashSet()' in SCANNER
+assert 'fun cachedPaths(dataDir: File): List<Pair<String, String>>' in SCANNER
+assert 'appendCache(File(dataDir, PATHS_NAME), "$ip $domain")' in SCANNER
+assert 'File(dataDir, PATHS_NAME).delete()' in SCANNER
+assert 'val finished = (cachedPaths(dataDir).map { it.first } + readIps(rejected)).toHashSet()' in SCANNER
 assert 'if (ip in finished) continue' in SCANNER
 assert 'if (stored) synchronized(progressLock)' in SCANNER
 assert 'DNSTT resolver scan progress: $done/${resolvers.size}' in SCANNER
@@ -48,7 +54,7 @@ assert 'DNSTT resolver scan progress: $done/${resolvers.size}' in SCANNER
 assert 'val next = AtomicInteger(start)' in SCANNER
 assert 'repeat(WORKERS)' in SCANNER
 assert 'REJECTED_NAME' in SCANNER
-assert 'readIps(cache).firstOrNull()' in SCANNER
+assert 'cachedPaths(dataDir).firstOrNull()?.let { return it.first }' in SCANNER
 assert '        stopDnsttScan()' not in TOR
 assert 'cache.delete()' in SCANNER
 assert 'first.await(FIRST_RESULT_TIMEOUT_MS' in SCANNER
@@ -65,7 +71,11 @@ assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 433' in BUILD and 'versionName = "3.1.36"' in BUILD
+assert 'versionCode = 434' in BUILD and 'versionName = "3.1.37"' in BUILD
+assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
+assert 'DNSTT resolver scan complete: ${cachedPaths(dataDir).size} verified path(s)' in SCANNER
+assert 'mode != TorMode.DNSTT && now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000' in TOR
+assert 'DNSTT handshake:' in TOR
 assert 'executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)' in SCANNER
 assert 'complete asset is the scan budget' in SCANNER
 assert RESOLVERS.exists() and sum(1 for line in RESOLVERS.read_text().splitlines() if line.strip()) == 7629

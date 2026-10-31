@@ -932,7 +932,10 @@ object TorManager {
             if (stopping.get()) break
             if (!process.isAlive) break
             val now = System.currentTimeMillis()
-            if (now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000) {
+            // DNSTT's DNS round trips can hold the relay handshake at 10-14%
+            // without emitting another bootstrap percentage. Give this mode its
+            // full 300s rung budget; the 90s stall rule remains for other modes.
+            if (mode != TorMode.DNSTT && now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000) {
                 stalled = true
                 break
             }
@@ -985,6 +988,16 @@ object TorManager {
                     val flagged = tail.filter { it.contains("[warn]") || it.contains("[err]") }
                     val replay = if (flagged.isNotEmpty()) flagged.takeLast(6) else tail.takeLast(6)
                     replay.forEach { ConnectionLog.record("$TAG tor: ${it.take(160)}") }
+                }
+            }
+            // A DNSTT attempt can reach the relay yet fail during TLS or the
+            // Tor v3 handshake. Keep the actual warnings on failure so a probe
+            // that merely opened a stream is not mistaken for full bootstrap.
+            if (mode == TorMode.DNSTT && bootstrapPercent in 1..99) {
+                synchronized(rawTail) {
+                    rawTail.filter { it.contains("[warn]") || it.contains("[err]") }
+                        .takeLast(4)
+                        .forEach { ConnectionLog.record("$TAG DNSTT handshake: ${it.take(400)}") }
                 }
             }
             stopTorProcess()
