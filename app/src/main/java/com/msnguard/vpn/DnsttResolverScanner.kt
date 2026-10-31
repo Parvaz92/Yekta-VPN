@@ -13,19 +13,16 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Ordered DNSTT resolver discovery with persistent, engine-scoped cache. */
 internal object DnsttResolverScanner {
     private const val CACHE_NAME = "dnstt-working-resolvers-ir.txt"
+    private const val PATHS_NAME = "dnstt-working-paths-ir.txt"
     private const val PROGRESS_NAME = "dnstt-resolver-scan-index.txt"
     private const val REJECTED_NAME = "dnstt-rejected-resolvers-ir.txt"
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
-    // The reference scanner uses bounded concurrent workers: input order is
-    // preserved within the round-robin partitions, while slow candidates do not
-    // block the complete scan.
-    // Match the reference scanner's high parallelism so a full resolver list
-    // can finish in minutes while each candidate still gets an end-to-end test.
-    private const val WORKERS = 100
+    // Each worker owns a native PT process. Keep concurrency bounded to avoid
+    // starving Tor while it bootstraps.
+    private const val WORKERS = 40
     private const val PROBE_TIMEOUT_MS = 2_500
     private const val METHOD_TIMEOUT_MS = 2_500L
     private const val PROGRESS_LOG_EVERY = 100
-    private const val SCAN_ASSET_SIZE = 7629
     private val progressLock = Any()
     private const val FIRST_RESULT_TIMEOUT_MS = 15_000L
     // DNSTT's effective MTU is determined by the DNS name and the server's
@@ -40,15 +37,17 @@ internal object DnsttResolverScanner {
 
     fun prepare(context: Context, dataDir: File): String? {
         val cache = File(dataDir, CACHE_NAME)
-        val cached = readIps(cache)
+        val cached = cachedPaths(dataDir)
         val fresh = context.profiled().getBoolean(TorManager.DNSTT_FRESH_SCAN_PREF, false)
         if (!fresh && cached.isNotEmpty()) {
-            ConnectionLog.record("DNSTT cache: using ${cached.size} verified resolver(s)")
-            return cached.first()
+            ConnectionLog.record("DNSTT cache: using ${cached.size} verified resolver/profile path(s)")
+            return cached.first().first
         }
 
         if (fresh) {
+            DnsttBridges.reset(context)
             cache.delete()
+            File(dataDir, PATHS_NAME).delete()
             File(dataDir, PROGRESS_NAME).delete()
             File(dataDir, REJECTED_NAME).delete()
             context.profiled().edit().putBoolean(TorManager.DNSTT_FRESH_SCAN_PREF, false).apply()
@@ -59,13 +58,22 @@ internal object DnsttResolverScanner {
         if (resolvers.isEmpty()) return null
         if (running.get()) {
             ConnectionLog.record("DNSTT resolver scan already running; using current scan")
-            return readIps(cache).firstOrNull()
+            return cachedPaths(dataDir).firstOrNull()?.first
         }
         val progress = File(dataDir, PROGRESS_NAME)
-        val start = readProgress(progress).coerceIn(0, resolvers.size)
+        val rejected = File(dataDir, REJECTED_NAME)
+        // Older builds counted failed probes as complete. A fully rejected
+        // cache without any healthy path must be retried after the probe fix.
+        if (readIps(cache).isEmpty() && readIps(rejected).size >= resolvers.size) {
+            rejected.delete()
+            progress.delete()
+            ConnectionLog.record("DNSTT retrying all candidates after zero verified paths")
+        }
+        val finished = (cachedPaths(dataDir).map { it.first } + readIps(rejected)).toHashSet()
+        val start = 0
         running.set(true)
-        completed.set(start)
-        ConnectionLog.record("DNSTT resolver scan started: ${resolvers.size} candidates, from ${start + 1}")
+        completed.set(finished.size)
+        ConnectionLog.record("DNSTT resolver scan started: ${resolvers.size} candidates, ${finished.size} previously completed")
         val first = CountDownLatch(1)
         val firstResult = arrayOfNulls<String>(1)
         val next = AtomicInteger(start)
@@ -77,17 +85,14 @@ internal object DnsttResolverScanner {
                     val index = next.getAndIncrement()
                     if (index >= resolvers.size) break
                     val ip = resolvers[index]
-                    synchronized(progressLock) {
-                        val advanced = maxOf(readProgress(progress), index + 1)
-                        writeProgress(progress, advanced)
-                        val done = completed.incrementAndGet()
-                        if (done % PROGRESS_LOG_EVERY == 0 || done == resolvers.size) {
-                            ConnectionLog.record("DNSTT resolver scan progress: $done/$SCAN_ASSET_SIZE")
-                        }
-                    }
+                    if (ip in finished) continue
+                    var stored = false
                     runCatching {
-                        if (probe(context, dataDir, ip)) {
+                        val domain = probe(context, dataDir, ip)
+                        if (domain != null) {
+                            appendCache(File(dataDir, PATHS_NAME), "$ip $domain")
                             appendCache(cache, ip)
+                            stored = true
                             synchronized(firstResult) {
                                 if (firstResult[0] == null) {
                                     firstResult[0] = ip
@@ -97,10 +102,19 @@ internal object DnsttResolverScanner {
                             }
                         } else {
                             appendRejected(File(dataDir, REJECTED_NAME), ip)
+                            stored = true
                         }
                     }.onFailure { error ->
-                        appendRejected(File(dataDir, REJECTED_NAME), ip)
                         if (running.get()) ConnectionLog.record("DNSTT resolver #${index + 1} probe error: ${error.message ?: "unknown"}")
+                    }
+                    // Only a stored outcome is complete. An in-flight process
+                    // interrupted by app teardown must be retried on the next scan.
+                    if (stored) synchronized(progressLock) {
+                        val done = completed.incrementAndGet()
+                        writeProgress(progress, done)
+                        if (done % PROGRESS_LOG_EVERY == 0 || done == resolvers.size) {
+                            ConnectionLog.record("DNSTT resolver scan progress: $done/${resolvers.size}")
+                        }
                     }
                 }
             }
@@ -113,13 +127,36 @@ internal object DnsttResolverScanner {
             runCatching {
                 executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)
             }
-            ConnectionLog.record("DNSTT resolver scan complete: ${readIps(cache).size} healthy resolver(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
+            ConnectionLog.record("DNSTT resolver scan complete: ${cachedPaths(dataDir).size} verified path(s), ${readIps(File(dataDir, REJECTED_NAME)).size} rejected")
             running.set(false)
         }, "dnstt-resolver-scan-wait").apply { isDaemon = true }.start()
         first.await(FIRST_RESULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        val selected = firstResult[0] ?: readIps(cache).firstOrNull()
-        if (selected == null) ConnectionLog.record("DNSTT resolver scan still running; starting Tor with DoH fallback")
+        val selected = firstResult[0] ?: cachedPaths(dataDir).firstOrNull()?.first
+        if (selected == null) ConnectionLog.record("DNSTT resolver scan still running; waiting for first verified path")
         return selected
+    }
+
+    fun cachedPaths(dataDir: File): List<Pair<String, String>> =
+        readIps(File(dataDir, PATHS_NAME)).mapNotNull { line ->
+            val ip = line.substringBefore(' ')
+            val domain = line.substringAfter(' ', "")
+            if (domain == DnsttBridges.DOMAIN_1 || domain == DnsttBridges.DOMAIN_2) ip to domain else null
+        }
+
+    /** Wait for a real end-to-end probe before allowing Tor to start. */
+    fun awaitHealthy(context: Context, dataDir: File, cancelled: () -> Boolean): String? {
+        prepare(context, dataDir)
+        while (!cancelled()) {
+            cachedPaths(dataDir).firstOrNull()?.let { return it.first }
+            if (!running.get()) return null
+            try {
+                Thread.sleep(250)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+        }
+        return null
     }
 
     fun cached(dataDir: File): List<String> = readIps(File(dataDir, CACHE_NAME))
@@ -144,7 +181,13 @@ internal object DnsttResolverScanner {
         ConnectionLog.record("DNSTT Fresh Scan requested — cache will be cleared on next Tor connect")
     }
 
-    private fun probe(context: Context, dataDir: File, ip: String): Boolean {
+    private fun probe(context: Context, dataDir: File, ip: String): String? = when {
+        probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) -> DnsttBridges.DOMAIN_1
+        probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2) -> DnsttBridges.DOMAIN_2
+        else -> null
+    }
+
+    private fun probePath(context: Context, dataDir: File, ip: String, pubkey: String, domain: String): Boolean {
         val state = File(dataDir, "dnstt-scan/$ip").apply { mkdirs() }
         val process = runCatching {
             ProcessBuilder(File(context.applicationInfo.nativeLibraryDir, "libdnstt.so").absolutePath)
@@ -186,8 +229,8 @@ internal object DnsttResolverScanner {
                 ConnectionLog.record("DNSTT resolver #$ip: no SOCKS listener")
                 return false
             }
-            val healthy = socksProbe(listener, ip)
-            if (!healthy) ConnectionLog.record("DNSTT resolver #$ip: tunnel probe failed")
+            val healthy = socksProbe(listener, ip, pubkey, domain)
+            if (!healthy) ConnectionLog.record("DNSTT resolver #$ip: tunnel probe failed ($domain)")
             healthy
         } finally {
             runCatching { process.outputStream.close() }
@@ -221,7 +264,7 @@ internal object DnsttResolverScanner {
         return result[0]
     }
 
-    private fun socksProbe(listener: String, resolver: String): Boolean {
+    private fun socksProbe(listener: String, resolver: String, pubkey: String, domain: String): Boolean {
         val parts = listener.substringAfterLast(':').toIntOrNull() ?: return false
         return runCatching {
             Socket().use { socket ->
@@ -231,7 +274,7 @@ internal object DnsttResolverScanner {
                 val output = socket.getOutputStream()
                 output.write(byteArrayOf(5, 1, 2)); output.flush()
                 check(input.read() == 5 && input.read() == 2)
-                val args = "udp=$resolver:53;pubkey=241169008830694749fe96bb070c4855c5bb5b9c47b3833ed7d88521ba30a43f;domain=t.ruhnama.net"
+                val args = "udp=$resolver:53;pubkey=$pubkey;domain=$domain"
                 // goptlib's PT argument channel is RFC1929 username+password.
                 // Use username for the first part and password for the remainder,
                 // because Android's SOCKS probe must keep each field <=255 bytes.
