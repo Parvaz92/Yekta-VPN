@@ -1131,7 +1131,12 @@ object TorManager {
         for (rung in order) {
             if (stopping.get()) return false
             ConnectionLog.record("$TAG trying ${rung.mode.label} (${rung.timeoutSeconds}s)")
-            if (!attempt(context, dataDir, rung.mode, rung.timeoutSeconds)) continue
+            if (!attempt(context, dataDir, rung.mode, rung.timeoutSeconds)) {
+                if (rung.mode == TorMode.DNSTT && !stopping.get()) {
+                    DnsttBridges.advanceAfterFailure(context, dataDir)
+                }
+                continue
+            }
 
             if (!TorSocksFront.start(FRONT_SOCKS_PORT, TOR_SOCKS_PORT, TOR_DNS_PORT)) {
                 // The circuit is fine but nothing can use it, so this is a hard

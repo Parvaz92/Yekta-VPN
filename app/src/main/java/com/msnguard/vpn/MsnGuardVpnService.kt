@@ -2290,7 +2290,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Keeping the service alive is a precondition of the seal: stopSelf()
         // releases the blocking TUN's fd and the OS restores carrier networking,
         // which is the leak the switch exists to prevent.
-        stopTunnel(notify = false, teardownService = !sealing)
+        // A DNSTT retry needs this service's scheduler to stay alive. Teardown
+        // used to shut it down before scheduleAutoReconnect could run.
+        val pendingDnsttRetry = willAutoReconnect() &&
+            currentProtocol.contains("TOR") && TorManager.selectedMode(this) == TorManager.TorMode.DNSTT
+        stopTunnel(notify = false, teardownService = !sealing && !pendingDnsttRetry)
         // A quick reconnect owns the service: Psiphon, Tor, SHARD and the chain all
         // report a mid-teardown failure through here, and killing the service would
         // strand the restart the user just asked for — the same defect the native

@@ -23,6 +23,12 @@ assert 'private const val WORKERS = 40' in SCANNER
 assert 'fun awaitHealthy(context: Context, dataDir: File, cancelled: () -> Boolean)' in SCANNER
 assert TOR.index('DnsttResolverScanner.awaitHealthy(context, dataDir)') < TOR.index('val transports = transportsFor(context, mode)', TOR.index('private fun attempt('))
 assert 'if (resolver == null)' in TOR and 'Tor was not started' in TOR
+assert 'DnsttBridges.advanceAfterFailure(context, dataDir)' in TOR
+assert 'val batch = resolvers.drop(normalizedOffset).take(BATCH_SIZE)' in BRIDGES
+assert 'private const val BATCH_SIZE = 15' in BRIDGES
+assert 'DnsttBridges.reset(context)' in SCANNER
+assert 'currentProtocol.contains("TOR") && TorManager.selectedMode(this) == TorManager.TorMode.DNSTT' in VPN
+assert 'teardownService = !sealing && !pendingDnsttRetry' in VPN
 assert 'if (resolvers.isEmpty()) return emptyList()' in BRIDGES
 assert 'doh=https://' not in BRIDGES
 assert 'udp=$resolver:53 pubkey=' in BRIDGES

@@ -44,6 +44,7 @@ internal object DnsttResolverScanner {
         }
 
         if (fresh) {
+            DnsttBridges.reset(context)
             cache.delete()
             File(dataDir, PROGRESS_NAME).delete()
             File(dataDir, REJECTED_NAME).delete()
