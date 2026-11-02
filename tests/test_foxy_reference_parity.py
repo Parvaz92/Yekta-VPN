@@ -36,7 +36,9 @@ class FoxyReferenceParityContract(unittest.TestCase):
         self.assertIn('Strings.t("Sign in with Firefox")', text)
         self.assertNotIn('Strings.t("Send Code")', text)
         browser = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyBrowserLogin.kt").read_text()
-        self.assertIn("onCheckIsTextEditor", browser)
+        self.assertIn("isFocusableInTouchMode = true", browser)
+        self.assertIn("FLAG_NOT_FOCUSABLE", browser)
+        self.assertIn("SOFT_INPUT_ADJUST_RESIZE", browser)
         self.assertIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
 
     def test_country_ping_is_bounded_and_display_only(self):
@@ -46,6 +48,10 @@ class FoxyReferenceParityContract(unittest.TestCase):
         self.assertIn("TIMEOUT_MS", ping)
         self.assertIn("pingMs", models)
         self.assertIn("displayNameWithPing", models)
+        session = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/H2UpstreamSession.kt").read_text()
+        tunnel = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyTunnel.kt").read_text()
+        self.assertIn("localMaxConcurrentStreams", session)
+        self.assertIn("FoxySettings.multiplexStreams(context)", tunnel)
         self.assertNotIn('Strings.t("Password")', UI.read_text())
         self.assertNotIn('Strings.t("Verification code")', UI.read_text())
 
