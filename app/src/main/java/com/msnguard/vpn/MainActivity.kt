@@ -3407,10 +3407,6 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
-            body.addView(navRow(Strings.t("SSTP servers"), sstpSummary()) { openSstpSettings() }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
             // FOXY — one row like Warp Setting; the dedicated page owns the
             // Firefox Accounts browser sign-in; MSN never collects the password or code.
             body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
@@ -6438,36 +6434,6 @@ class MainActivity : Activity() {
     // Direct/Exit choice so Masque-Direct still means freedom even when WireGuard-Exit is set.
     private fun warpSettingSummary(): String = ""
 
-    private fun sstpSummary(): String {
-        val host = preferences().getString("sstp_host", null)
-        return host ?: Strings.t("Automatic server selection")
-    }
-
-    private fun openSstpSettings() {
-        val servers = SstpServerRepository.cached(this)
-        val options = mutableListOf(SstpServer("__refresh__", 0, "Update SSTP servers"), SstpServer("", 0, "Automatic")) + servers
-        showChoiceSheet(
-            title = Strings.t("SSTP servers"),
-            subtitle = Strings.t("Choose a server or Automatic"),
-            options = options,
-            selected = options.firstOrNull { it.host == preferences().getString("sstp_host", "") } ?: options.first(),
-            label = { if (it.host.isBlank()) Strings.t("Automatic") else "${it.country.ifBlank { "SSTP" }} · ${it.host}:${it.port}" },
-            description = { if (it.host.isBlank()) Strings.t("Try the fastest validated server") else Strings.t("Source: ${it.sources.joinToString()}") },
-        ) { chosen ->
-            if (chosen.host == "__refresh__") {
-                Thread {
-                    kotlinx.coroutines.runBlocking {
-                        val updated = SstpServerRepository.refresh(this@MainActivity)
-                        runOnUiThread { toastShort(Strings.tf("SSTP list updated: %s servers", updated.size.toString())) }
-                    }
-                }.start()
-            } else {
-                preferences().edit().putString("sstp_host", chosen.host).putInt("sstp_port", chosen.port).apply()
-                toastShort(Strings.t("Saved — applies on next connect"))
-            }
-        }
-    }
-
     private fun openWarpSettingScreen() {
         refreshWarpIdentityCards = null
         warpSettingPage?.let(pageHost::removeView)
@@ -8374,25 +8340,45 @@ class MainActivity : Activity() {
             }, INK, palette.neonViolet,
         )
         tlsRow.setOnClickListener {
-            val values = com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.entries
-            AlertDialog.Builder(this).setTitle(Strings.t("TLS fragmentation"))
-                .setSingleChoiceItems(values.map { when (it) {
+            val values = com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.entries.toList()
+            showChoiceSheet(
+                title = Strings.t("TLS fragmentation"),
+                subtitle = Strings.t("These controls affect Foxy only. Changes apply on the next Foxy connection."),
+                options = values,
+                selected = com.msnguard.vpn.foxy.FoxySettings.tlsSplitMode(this),
+                label = {
+                    when (it) {
+                        com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.OFF -> Strings.t("Disabled")
+                        com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
+                        com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
+                    }
+                },
+                description = { "" },
+            ) { chosen ->
+                com.msnguard.vpn.foxy.FoxySettings.saveTlsSplitMode(this, chosen)
+                (tlsRow.tag as? TextView)?.text = when (chosen) {
                     com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.OFF -> Strings.t("Disabled")
                     com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
                     com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
-                } }.toTypedArray(), values.indexOf(com.msnguard.vpn.foxy.FoxySettings.tlsSplitMode(this))) { d, which ->
-                    com.msnguard.vpn.foxy.FoxySettings.saveTlsSplitMode(this, values[which]); d.dismiss(); foxySettingPage?.let(pageHost::removeView); foxySettingPage = null; openFoxySettingScreen()
-                }.setNegativeButton(Strings.t("Cancel"), null).show().also { mirrorDialog(it) }
+                }
+            }
         }
         tuningCard.addView(tlsRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         val streams = com.msnguard.vpn.foxy.FoxySettings.multiplexStreams(this)
         val muxRow = foxyInfoRow(Strings.t("Multiplex concurrency"), "$streams ${Strings.t("streams")}", INK, palette.neonBlue)
         muxRow.setOnClickListener {
             val values = listOf(4, 8, 16, 32, 64)
-            AlertDialog.Builder(this).setTitle(Strings.t("Multiplex concurrency"))
-                .setSingleChoiceItems(values.map { "$it ${Strings.t("streams")}" }.toTypedArray(), values.indexOf(streams).coerceAtLeast(0)) { d, which ->
-                    com.msnguard.vpn.foxy.FoxySettings.saveMultiplexStreams(this, values[which]); d.dismiss(); foxySettingPage?.let(pageHost::removeView); foxySettingPage = null; openFoxySettingScreen()
-                }.setNegativeButton(Strings.t("Cancel"), null).show().also { mirrorDialog(it) }
+            showChoiceSheet(
+                title = Strings.t("Multiplex concurrency"),
+                subtitle = Strings.t("These controls affect Foxy only. Changes apply on the next Foxy connection."),
+                options = values,
+                selected = streams,
+                label = { "$it ${Strings.t("streams")}" },
+                description = { "" },
+            ) { chosen ->
+                com.msnguard.vpn.foxy.FoxySettings.saveMultiplexStreams(this, chosen)
+                (muxRow.tag as? TextView)?.text = "$chosen ${Strings.t("streams")}"
+            }
         }
         tuningCard.addView(muxRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         tuningCard.addView(label(Strings.t("These controls affect Foxy only. Changes apply on the next Foxy connection."), 11f, MUTED).apply { setPadding(dp(2), dp(12), 0, 0) })
@@ -9864,8 +9850,7 @@ class MainActivity : Activity() {
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
         MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel", true),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
-        SSTP("SSTP", "sstp", "SSTP over TLS with PPP", true),
-        PSIPHON("psiphon", "Psiphon", "Anti-censorship tunnel", true),
+        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),
 
         /**
