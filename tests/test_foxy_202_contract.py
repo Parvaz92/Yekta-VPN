@@ -27,6 +27,29 @@ class Foxy202Contract(unittest.TestCase):
         self.assertIn("tempFile", remote)
         self.assertIn("FALLBACK_URL", remote)
 
+    def test_webchannel_preserves_upstream_envelope_and_mobile_browser_ua(self):
+        login = (FOXY / "FoxyBrowserLogin.kt").read_text()
+        headers = (FOXY / "FirefoxAccountHeaders.kt").read_text()
+        self.assertIn("val channelId = envelope.optString(\"id\").ifBlank { CHANNEL_ID }", login)
+        self.assertIn("data: data", login)
+        self.assertIn("settings.userAgentString = FirefoxAccountHeaders.browserUserAgent", login)
+        self.assertIn("Mozilla/5.0 (Android $release; Mobile; rv:159.0)", headers)
+        self.assertIn("JSON.parse(d)", login.split("private val HOOK", 1)[1])
+        self.assertIn("data: data", login.split("window.__foxyReply", 1)[1])
+
+    def test_browser_login_uses_verified_session_and_pkce_authorization_code(self):
+        auth = (FOXY / "FxaAuth.kt").read_text()
+        self.assertIn("recovery_email/status", auth)
+        self.assertIn("isSessionVerified(sessionToken)", auth)
+        self.assertIn('put("response_type", "code")', auth)
+        self.assertIn('put("code_challenge_method", "S256")', auth)
+        self.assertIn('put("grant_type", "authorization_code")', auth)
+        self.assertIn('"/oauth/authorization"', auth)
+        self.assertIn('"/token"', auth)
+        browser = (FOXY / "FoxyBrowserLogin.kt").read_text()
+        self.assertNotIn("onOAuthResult", browser)
+        self.assertNotIn("api.accounts.firefox.com/v1/oauth/token", browser)
+
     def test_runtime_config_is_initialized_before_login_and_service_start(self):
         login = (FOXY / "FoxyBrowserLogin.kt").read_text()
         service = (ROOT / "app/src/main/java/com/msnguard/vpn/MsnGuardVpnService.kt").read_text()
